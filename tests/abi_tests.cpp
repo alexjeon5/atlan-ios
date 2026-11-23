@@ -274,6 +274,11 @@ void jni_bootstrap() {
     check(f.call(slot(63), {java.env(), thing, run_id, data + 0x710}).stop == atlan::Stop::returned && seen == 11 + 1000ULL * thing, "CallVoidMethodA reads jvalues");
     check(f.call(slot(49), {java.env(), thing, run_id, 5}).stop == atlan::Stop::service_error, "return type mismatch stops");
     check(f.call(slot(61), {java.env(), obj, run_id, 5}).stop == atlan::Stop::service_error, "receiver of another class stops");
+    const auto host_cls = java.class_handle("pkg/Thing");
+    check(host_cls == cls && java.class_handle("") == 0, "host class handle matches the guest's");
+    const auto host_obj = java.new_object(host_cls);
+    check(host_obj != 0 && java.new_object(0x1234) == 0 &&
+          f.call(slot(100), {java.env(), host_obj, ifield}).stop == atlan::Stop::returned, "host-minted object works in guest field access");
     check(f.call(slot(215), {java.env(), 0xc0001000, data + 0x200, 1}).stop == atlan::Stop::service_error, "RegisterNatives rejects an unknown class");
     bool overlap = false;
     try { atlan::JavaBootstrap again(f.runtime, f.dispatcher, {}); } catch (const std::invalid_argument&) { overlap = true; }

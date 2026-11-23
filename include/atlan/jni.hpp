@@ -60,6 +60,11 @@ public:
     // methods can be called by the guest; any other call stops by name.
     // False if (class, name, signature) is already registered.
     bool register_method(std::string class_name, std::string name, std::string signature, MethodHandler handler);
+    // Host-side handle minting, for calling registered natives from the embedder:
+    // the class handle for a name (created if unseen), and a new opaque object of
+    // that class. 0 means the reference tables are full.
+    [[nodiscard]] std::uint32_t class_handle(const std::string& class_name);
+    [[nodiscard]] std::uint32_t new_object(std::uint32_t class_handle);
     // Live global references (NewGlobalRef minus DeleteGlobalRef).
     [[nodiscard]] std::size_t live_global_refs() const noexcept {
         std::size_t n = 0;
