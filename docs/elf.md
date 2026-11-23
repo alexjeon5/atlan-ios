@@ -19,3 +19,5 @@ GNU hash만 있는 이미지, 심볼 버전, TLS, IFUNC, RELA·Android packed re
 `ImportDispatcher`는 진단 모드에서 만든 import trap 주소의 실행 fault를 심볼 이름으로 찾아 등록된 호스트 서비스로 보낸다. 서비스는 r0-r3 인자만 읽고 r0 결과를 설정하며, 반환 후 LR(bit 0은 Thumb 선택)로 복귀한다. 등록되지 않은 import는 `Stop::unresolved_import`로, 서비스 실패는 `Stop::service_error`로 멈추며 성공 반환을 만들지 않는다. 데이터 import(`STT_OBJECT`)는 디스패치하지 않는다. 실행 예산은 서비스가 게스트 콜백을 호출해도 하나로 공유한다.
 
 `ObjectLifetime`은 `__aeabi_atexit(obj, dtor, dso)`, `__cxa_atexit(dtor, obj, dso)`, `__cxa_finalize(dso)`를 구현한다. 소멸자 주소·인자·DSO 핸들은 게스트 값으로만 저장하고 호스트 `atexit`에 넘기지 않는다. finalize는 최신 등록부터 실행하며 항목을 실행 전에 제거하므로 두 번 실행되지 않는다. 소멸자는 `call_back`으로 호출자의 CPU 상태를 보존한 채 제한된 예산 안에서 실행한다. null 소멸자, 레지스트리 초과, 소멸자의 예산 초과·fault는 오류로 보고한다.
+
+`install_libc_services`는 관찰된 import만 타입 있는 서비스로 구현한다: `memset`(게스트 메모리 쓰기, 크기 상한, 주소 래핑 거부)과 `clock_gettime`(32비트 `timespec`, CLOCK_REALTIME·CLOCK_MONOTONIC만 지원하며 다른 clock id는 오류).

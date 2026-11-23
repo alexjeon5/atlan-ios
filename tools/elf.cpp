@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/elf.hpp"
+#include "atlan/libc_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
 #include <charconv>
@@ -60,6 +61,7 @@ int main(int argc, char* argv[]) {
         atlan::ImportDispatcher dispatcher;
         atlan::ObjectLifetime lifetime;
         lifetime.install(dispatcher);
+        atlan::install_libc_services(dispatcher);
         dispatcher.attach(image);
         runtime.memory = std::move(image.memory);
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
