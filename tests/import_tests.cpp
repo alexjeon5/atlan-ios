@@ -30,7 +30,8 @@ constexpr std::uint32_t atexit_aeabi = 0xf0000000, atexit_cxa = 0xf0000010, fina
                         unknown = 0xf0000030, memset_trap = 0xf0000050, clock_trap = 0xf0000060, strlen_trap = 0xf0000070, log_word = 0x4000, dtor_log = 0x2000, dtor_loop = 0x2040,
                         dtor_thumb = 0x2101, atexit_data = 0xf0000040,
                         malloc_trap = 0xf0000080, free_trap = 0xf0000090, calloc_trap = 0xf00000a0,
-                        realloc_trap = 0xf00000b0, strcpy_trap = 0xf00000c0, lock_trap = 0xf00000d0, unlock_trap = 0xf00000e0;
+                        realloc_trap = 0xf00000b0, strcpy_trap = 0xf00000c0, lock_trap = 0xf00000d0, unlock_trap = 0xf00000e0,
+                        attr_init_trap = 0xf00000f0, attr_type_trap = 0xf0000100, mutex_init_trap = 0xf0000110;
 
 struct Fixture {
     atlan::Runtime runtime;
@@ -56,7 +57,9 @@ struct Fixture {
                                  {"memset", memset_trap, 2}, {"clock_gettime", clock_trap, 2}, {"strlen", strlen_trap, 2},
                                  {"malloc", malloc_trap, 2}, {"free", free_trap, 2}, {"calloc", calloc_trap, 2},
                                  {"realloc", realloc_trap, 2}, {"strcpy", strcpy_trap, 2},
-                                 {"pthread_mutex_lock", lock_trap, 2}, {"pthread_mutex_unlock", unlock_trap, 2}};
+                                 {"pthread_mutex_lock", lock_trap, 2}, {"pthread_mutex_unlock", unlock_trap, 2},
+                                 {"pthread_mutexattr_init", attr_init_trap, 2}, {"pthread_mutexattr_settype", attr_type_trap, 2},
+                                 {"pthread_mutex_init", mutex_init_trap, 2}};
         dispatcher.attach(image);
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
@@ -187,6 +190,19 @@ void heap_and_strings() {
     check(g.call(unlock_trap, {0x4400}).stop == atlan::Stop::returned && !g.mutexes.held(0x4400), "mutex unlock");
     check(g.call(unlock_trap, {0x4400}).stop == atlan::Stop::service_error, "unlocking a free mutex is reported");
     check(g.call(lock_trap, {0}).stop == atlan::Stop::service_error, "null mutex is reported");
+    check(g.call(attr_init_trap, {0x4500}).stop == atlan::Stop::returned && get32(g.runtime.memory, 0x4500) == 0, "mutexattr_init");
+    check(g.call(attr_type_trap, {0x4500, 1}).stop == atlan::Stop::returned && get32(g.runtime.memory, 0x4500) == 1, "settype recursive");
+    check(g.call(mutex_init_trap, {0x4600, 0x4500}).stop == atlan::Stop::returned, "mutex_init with attribute");
+    check(g.call(lock_trap, {0x4600}).stop == atlan::Stop::returned && g.call(lock_trap, {0x4600}).stop == atlan::Stop::returned,
+          "recursive mutex relocks");
+    (void)g.call(unlock_trap, {0x4600});
+    check(g.mutexes.held(0x4600), "recursive mutex stays held until fully unlocked");
+    (void)g.call(unlock_trap, {0x4600});
+    check(!g.mutexes.held(0x4600), "recursive mutex releases");
+    (void)g.call(attr_type_trap, {0x4500, 2}); (void)g.call(mutex_init_trap, {0x4700, 0x4500});
+    (void)g.call(lock_trap, {0x4700});
+    check(g.call(lock_trap, {0x4700}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == 35, "error-checking relock returns EDEADLK");
+    check(g.call(attr_type_trap, {0x4500, 9}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == 22, "invalid type returns EINVAL");
     // strcpy
     put32(g.runtime.memory, 0x4300, 0x00636261);
     check(g.call(strcpy_trap, {p, 0x4300}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == p &&

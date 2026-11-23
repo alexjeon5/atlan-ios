@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "atlan/imports.hpp"
-#include <unordered_set>
+#include <unordered_map>
 
 namespace atlan {
-// Single guest thread pthread mutex services. Mutex state is tracked by guest
-// address in the host; the guest object is not modified. With one thread, locking
-// a held normal mutex can never succeed, so it is reported as a deadlock.
+// Single guest thread pthread mutex services. State is tracked by guest address
+// in the host. A mutexattr word in guest memory holds its type (0 normal, 1
+// recursive, 2 error-checking, as in Bionic). With one thread, locking a held
+// normal mutex can never succeed, so it is reported as a deadlock.
 class MutexTable {
 public:
     void install(ImportDispatcher& dispatcher);
-    [[nodiscard]] bool held(std::uint32_t address) const { return held_.contains(address); }
+    [[nodiscard]] bool held(std::uint32_t address) const {
+        const auto found = mutexes_.find(address);
+        return found != mutexes_.end() && found->second.count != 0;
+    }
 private:
-    std::unordered_set<std::uint32_t> held_;
+    struct State { std::uint32_t type{}; std::uint32_t count{}; };
+    std::unordered_map<std::uint32_t, State> mutexes_;  // absent: statically initialized, normal
 };
 }
