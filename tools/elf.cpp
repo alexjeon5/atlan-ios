@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/elf.hpp"
+#include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
 #include <charconv>
 #include <fstream>
@@ -56,14 +57,22 @@ int main(int argc, char* argv[]) {
                   << " trapped_imports=" << image.trapped_imports.size()
                   << " pending_initializers=" << image.initializers.size() << '\n';
         atlan::Runtime runtime;
+        atlan::ImportDispatcher dispatcher;
+        atlan::ObjectLifetime lifetime;
+        lifetime.install(dispatcher);
+        dispatcher.attach(image);
         runtime.memory = std::move(image.memory);
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
         const auto invoke = [&](std::string_view label, std::uint32_t address,
                                 std::span<const std::uint32_t> args) {
-            const auto result = runtime.call(address, args, 0x70100000, 0xffff0000, budget);
+            const auto outcome = dispatcher.call(runtime, address, args, 0x70100000, 0xffff0000, budget);
+            const auto& result = outcome.cpu;
             std::cout << label << " event=" << atlan::event_name(result.event)
                       << " r0=" << runtime.cpu.registers[0] << " retired=" << result.retired
                       << " pc=0x" << std::hex << runtime.pc() << std::dec;
+            if (!outcome.message.empty()) std::cout << " service_error=\"" << outcome.message << '"';
+            if (outcome.stop == atlan::Stop::unresolved_import) std::cout << " missing_service=" << outcome.import;
+            if (outcome.stop == atlan::Stop::service_error) std::cout << " failing_service=" << outcome.import;
             if (result.event != atlan::Event::function_return) {
                 std::cout << " fault=0x" << std::hex << result.address << std::dec;
                 if (const auto* import = image.import_at(result.event == atlan::Event::memory_fault ? result.address : runtime.pc()))
