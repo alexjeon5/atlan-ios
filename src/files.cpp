@@ -4,7 +4,7 @@
 
 namespace atlan {
 namespace {
-constexpr std::uint32_t f_getfd = 1, f_setfd = 2, f_getfl = 3, f_setfl = 4, ebadf = 9, einval = 22;
+constexpr std::uint32_t f_getfd = 1, f_setfd = 2, f_getfl = 3, f_setfl = 4, ebadf = 9;
 constexpr std::uint32_t settable_status = 04000;  // O_NONBLOCK on ARM Linux
 }
 void VirtualFiles::install(ImportDispatcher& dispatcher) {
