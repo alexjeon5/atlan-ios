@@ -6,6 +6,10 @@ namespace atlan {
 bool ImportDispatcher::bind(std::string name, ImportService service) {
     return services_.emplace(std::move(name), std::move(service)).second;
 }
+bool ImportDispatcher::bind_trap(std::uint32_t address, std::string name) {
+    if (address % 4 != 0) return false;
+    return traps_.emplace(address, std::move(name)).second;
+}
 void ImportDispatcher::attach(const elf::Image& image) {
     for (const auto& import : image.trapped_imports)
         if (import.type != 1) traps_[import.address] = import.name;  // not STT_OBJECT
@@ -15,13 +19,16 @@ CallOutcome ImportDispatcher::call(Runtime& runtime, std::uint32_t target,
                                    std::uint32_t stack_top, std::uint32_t return_target,
                                    std::uint64_t budget) {
     if (depth_ != 0) throw std::logic_error("use call_back from inside an import service");
-    if (arguments.size() > 4 || stack_top % 8 != 0 || return_target % 4 != 0 ||
+    if (arguments.size() > Runtime::max_call_arguments || stack_top % 8 != 0 || return_target % 4 != 0 ||
         (target & ~1U) == return_target ||
         runtime.memory.translate(return_target, MemoryAccess::read) != nullptr)
         throw std::invalid_argument("invalid scalar AAPCS32 call frame");
-    for (std::size_t i = 0; i < 4; ++i)
-        runtime.cpu.registers[i] = i < arguments.size() ? arguments[i] : 0;
-    runtime.cpu.registers[13] = stack_top;
+    if (!runtime.load_arguments(arguments, stack_top)) {
+        CallOutcome outcome;
+        outcome.stop = Stop::cpu_event;
+        outcome.cpu = {Event::memory_fault, 0, stack_top, 0, MemoryAccess::write};
+        return outcome;
+    }
     runtime.cpu.registers[14] = return_target;
     runtime.start(target);
     return_target_ = return_target;
@@ -31,13 +38,18 @@ CallOutcome ImportDispatcher::call(Runtime& runtime, std::uint32_t target,
 CallOutcome ImportDispatcher::call_back(Runtime& runtime, std::uint32_t target,
                                         std::span<const std::uint32_t> arguments) {
     if (depth_ == 0 || depth_ >= max_depth) throw std::logic_error("guest callback outside a bounded service");
-    if (arguments.size() > 4 || (target & ~1U) == return_target_)
+    if (arguments.size() > Runtime::max_call_arguments || (target & ~1U) == return_target_)
         throw std::invalid_argument("invalid scalar AAPCS32 callback");
     const CpuState saved = runtime.cpu;
-    for (std::size_t i = 0; i < 4; ++i)
-        runtime.cpu.registers[i] = i < arguments.size() ? arguments[i] : 0;
     // Skip the caller's current frame, keeping 8-byte alignment.
-    runtime.cpu.registers[13] = (saved.registers[13] - 256) & ~std::uint64_t{7};
+    const auto frame = static_cast<std::uint32_t>((saved.registers[13] - 256) & ~std::uint64_t{7});
+    if (!runtime.load_arguments(arguments, frame)) {
+        CallOutcome outcome;
+        outcome.stop = Stop::cpu_event;
+        outcome.cpu = {Event::memory_fault, 0, frame, 0, MemoryAccess::write};
+        runtime.cpu = saved;
+        return outcome;
+    }
     runtime.cpu.registers[14] = return_target_;
     runtime.start(target);
     auto outcome = run_to_return(runtime, return_target_);

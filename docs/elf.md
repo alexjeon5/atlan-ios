@@ -10,13 +10,13 @@
 
 호스트 도구 `atlan-elf --help`에서 입력·호출 옵션을 확인할 수 있다. 생성자는 `--initialize`를 명시할 때만 실행하며, 초기화나 함수 호출이 실패하면 다음 호출로 진행하지 않는다. 초기화 이전 호출은 해당 함수의 의존성을 이해한 경우에만 유효하다. 생성자 실행 중 변경한 메모리는 실패 시 되돌리지 않으므로 초기화를 재시도하려면 이미지를 다시 로드한다.
 
-`Runtime::call`은 최대 네 개의 32비트 정수·포인터 인자, 8바이트 정렬 스택과 LR 반환 주소를 설정한다. 반환 sentinel에 도달하면 `function_return`을 반환하며, 그렇지 않으면 최초 이벤트나 실행 예산 초과를 보고한다. 부동소수점·64비트·구조체 인자, 스택으로 전달하는 추가 인자와 Java 객체 변환은 아직 제공하지 않는다. 게스트 메모리를 호스트에서 수정한 경우 실행을 재개하기 전에 exclusive monitor를 해제해야 한다.
+`Runtime::call`은 최대 32개의 32비트 정수·포인터 인자(처음 네 개는 r0-r3, 나머지는 새 sp부터 연속 word), 8바이트 정렬 스택과 LR 반환 주소를 설정한다. 스택 word를 쓸 수 없으면 `memory_fault`로 시작 전에 멈춘다. 반환 sentinel에 도달하면 `function_return`을 반환하며, 그렇지 않으면 최초 이벤트나 실행 예산 초과를 보고한다. 부동소수점·구조체 인자와 Java 객체 변환은 아직 제공하지 않는다. 64비트 값은 호출자가 두 word로 나눠 넘기며 자동 정렬하지 않는다. 게스트 메모리를 호스트에서 수정한 경우 실행을 재개하기 전에 exclusive monitor를 해제해야 한다.
 
 GNU hash만 있는 이미지, 심볼 버전, TLS, IFUNC, RELA·Android packed relocations, 텍스트 재배치와 겹치는 세그먼트 내용은 지원하지 않는다. 지원하지 않는 형식은 오류로 보고한다. 합성 ELF 테스트는 두 load bias, ARM·Thumb 반환, BSS, 네 가지 재배치, RELRO, import trap과 잘못된 입력을 검증한다.
 
 ## Import dispatch와 객체 수명
 
-`ImportDispatcher`는 진단 모드에서 만든 import trap 주소의 실행 fault를 심볼 이름으로 찾아 등록된 호스트 서비스로 보낸다. 서비스는 r0-r3 인자만 읽고 r0 결과를 설정하며, 반환 후 LR(bit 0은 Thumb 선택)로 복귀한다. 등록되지 않은 import는 `Stop::unresolved_import`로, 서비스 실패는 `Stop::service_error`로 멈추며 성공 반환을 만들지 않는다. 데이터 import(`STT_OBJECT`)는 디스패치하지 않는다. 실행 예산은 서비스가 게스트 콜백을 호출해도 하나로 공유한다.
+`ImportDispatcher`는 진단 모드에서 만든 import trap 주소의 실행 fault를 심볼 이름으로 찾아 등록된 호스트 서비스로 보낸다. 서비스는 `arg()`로 r0-r3을, `read_arg()`로 스택 인자(실패 가능)를 읽고 r0 결과를 설정하며, 반환 후 LR(bit 0은 Thumb 선택)로 복귀한다. 등록되지 않은 import는 `Stop::unresolved_import`로, 서비스 실패는 `Stop::service_error`로 멈추며 성공 반환을 만들지 않는다. 데이터 import(`STT_OBJECT`)는 디스패치하지 않는다. 실행 예산은 서비스가 게스트 콜백을 호출해도 하나로 공유한다.
 
 `ObjectLifetime`은 `__aeabi_atexit(obj, dtor, dso)`, `__cxa_atexit(dtor, obj, dso)`, `__cxa_finalize(dso)`를 구현한다. 소멸자 주소·인자·DSO 핸들은 게스트 값으로만 저장하고 호스트 `atexit`에 넘기지 않는다. finalize는 최신 등록부터 실행하며 항목을 실행 전에 제거하므로 두 번 실행되지 않는다. 소멸자는 `call_back`으로 호출자의 CPU 상태를 보존한 채 제한된 예산 안에서 실행한다. null 소멸자, 레지스트리 초과, 소멸자의 예산 초과·fault는 오류로 보고한다.
 

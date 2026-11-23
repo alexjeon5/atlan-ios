@@ -29,8 +29,16 @@ public:
     [[nodiscard]] bool thumb() const noexcept;
     [[nodiscard]] Result step() noexcept;
     [[nodiscard]] Result run(std::uint64_t budget) noexcept;
-    // Scalar AAPCS32 call: at most four register arguments, with an 8-byte
-    // aligned stack. return_target is an unmapped host-controlled sentinel.
+    static constexpr std::size_t max_call_arguments = 32;
+    // Loads AAPCS32 integer arguments: the first four in r0-r3, the rest as
+    // consecutive words at the new sp (8-byte aligned, below stack_top). 64-bit
+    // values are passed as two words by the caller. False if the stack words are
+    // not writable guest memory; sp is then unchanged and nothing is written.
+    [[nodiscard]] bool load_arguments(std::span<const std::uint32_t> arguments, std::uint32_t stack_top);
+    // Scalar AAPCS32 call: up to max_call_arguments word arguments (extras on the
+    // stack), with an 8-byte aligned stack. return_target is an unmapped
+    // host-controlled sentinel. A stack frame that cannot be written yields a
+    // memory_fault result.
     [[nodiscard]] Result call(std::uint32_t target, std::span<const std::uint32_t> arguments,
                               std::uint32_t stack_top, std::uint32_t return_target,
                               std::uint64_t budget);

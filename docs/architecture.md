@@ -21,7 +21,7 @@ CPU 상태는 R0–R14의 32비트 값, NZCV·Q·GE·ITSTATE, TLS, exclusive mon
 | 모듈 | 입력과 출력 | 상태 |
 | --- | --- | --- |
 | ELF 로더 | ELF32 ARM 바이트·심볼 resolver → 게스트 매핑·export·재배치·생성자 목록 | EABI5·SysV hash·네 가지 REL 재배치 구현. [범위와 제약](elf.md) |
-| Android 호환 계층 | SVC·Bionic import·JNI 호출 → 명시적 호스트 서비스 | 미구현 |
+| Android 호환 계층 | SVC·Bionic import·JNI 호출 → 명시적 호스트 서비스 | 로깅·스택/가변 인자·최소 JavaVM/JNIEnv 구현. [범위](abi.md) |
 | Java/DEX 처리 | DEX·native method 연결 → 필요한 Java 객체와 JNI 동작 | 미구현 |
 | iOS 플랫폼 | 수명주기·입력·파일·네트워크·그래픽·오디오 서비스 | 합성 CPU 데모만 연결 |
 | AOT | 해독된 코드·재배치·간접 분기 정보 → 패키징 전에 서명할 ARM64 코드 | 조사 예정 |
