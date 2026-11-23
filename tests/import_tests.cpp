@@ -25,7 +25,7 @@ std::uint32_t get32(atlan::Memory& memory, std::uint32_t at) {
 }
 constexpr std::uint32_t code = 0x1000, stack = 0x80000, sentinel = 0xffff0000;
 constexpr std::uint32_t atexit_aeabi = 0xf0000000, atexit_cxa = 0xf0000010, finalize = 0xf0000020,
-                        unknown = 0xf0000030, memset_trap = 0xf0000050, clock_trap = 0xf0000060, log_word = 0x4000, dtor_log = 0x2000, dtor_loop = 0x2040,
+                        unknown = 0xf0000030, memset_trap = 0xf0000050, clock_trap = 0xf0000060, strlen_trap = 0xf0000070, log_word = 0x4000, dtor_log = 0x2000, dtor_loop = 0x2040,
                         dtor_thumb = 0x2101, atexit_data = 0xf0000040;
 
 struct Fixture {
@@ -47,7 +47,7 @@ struct Fixture {
         image.trapped_imports = {{"__aeabi_atexit", atexit_aeabi, 2}, {"__cxa_atexit", atexit_cxa, 2},
                                  {"__cxa_finalize", finalize, 2}, {"__never_registered", unknown, 2},
                                  {"data_symbol", atexit_data, 1},
-                                 {"memset", memset_trap, 2}, {"clock_gettime", clock_trap, 2}};
+                                 {"memset", memset_trap, 2}, {"clock_gettime", clock_trap, 2}, {"strlen", strlen_trap, 2}};
         dispatcher.attach(image);
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
@@ -117,6 +117,9 @@ void libc() {
     check(f.call(memset_trap, {0x4101, 0, 0}).stop == atlan::Stop::returned, "zero-length memset");
     check(f.call(memset_trap, {0x9000000, 0, 4}).stop == atlan::Stop::service_error, "memset to unmapped memory fails");
     check(f.call(memset_trap, {0xfffffffe, 0, 4}).stop == atlan::Stop::service_error, "memset wrap fails");
+    put32(f.runtime.memory, 0x4300, 0x00636261);  // "abc"
+    check(f.call(strlen_trap, {0x4300}).stop == atlan::Stop::returned && f.runtime.cpu.registers[0] == 3, "strlen");
+    check(f.call(strlen_trap, {0x9000000}).stop == atlan::Stop::service_error, "strlen stops at unmapped memory");
     check(f.call(clock_trap, {1, 0x4200}).stop == atlan::Stop::returned && f.runtime.cpu.registers[0] == 0,
           "clock_gettime monotonic");
     check(get32(f.runtime.memory, 0x4204) < 1000000000, "tv_nsec in range");

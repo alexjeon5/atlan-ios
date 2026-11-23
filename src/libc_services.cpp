@@ -19,6 +19,18 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         call.set_result(dest);
         return std::nullopt;
     });
+    // size_t strlen(const char* text): bounded scan of guest memory.
+    dispatcher.bind("strlen", [](ImportCall& call) -> std::optional<std::string> {
+        const auto start = call.arg(0);
+        for (std::uint32_t length = 0; length < max_block; ++length) {
+            std::byte value{};
+            if (std::uint64_t{start} + length > 0xffffffffULL ||
+                !call.runtime().memory.read(start + length, std::span<std::byte>(&value, 1)))
+                return "strlen read left mapped guest memory";
+            if (value == std::byte{0}) { call.set_result(length); return std::nullopt; }
+        }
+        return "strlen exceeds service bound";
+    });
     // int clock_gettime(clockid_t clock, struct timespec* out), 32-bit Linux ABI.
     // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) are supported.
     dispatcher.bind("clock_gettime", [](ImportCall& call) -> std::optional<std::string> {
