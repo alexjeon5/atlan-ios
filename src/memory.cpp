@@ -82,4 +82,10 @@ void Memory::protect(std::uint32_t base, std::uint64_t size, Permissions permiss
     for (std::uint64_t at = base; at < end; at += page_size)
         pages_.at(static_cast<std::uint32_t>(at))->permissions = permissions;
 }
+void Memory::unmap(std::uint32_t base, std::uint64_t size) {
+    if (size == 0 || size > (std::uint64_t{1} << 32) - base || base % page_size != 0 || size % page_size != 0)
+        throw std::invalid_argument("invalid ARM32 unmap range");
+    for (std::uint64_t at = base; at < std::uint64_t{base} + size; at += page_size)
+        pages_.erase(static_cast<std::uint32_t>(at));
+}
 }

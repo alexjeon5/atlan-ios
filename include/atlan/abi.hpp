@@ -35,4 +35,9 @@ private:
 // reported as an error, never skipped. On success the text is appended to `out`.
 [[nodiscard]] std::optional<std::string> format_guest_printf(Memory& memory, std::uint32_t format,
                                                              VarArgs& args, std::string& out);
+
+// snprintf, vsnprintf, sprintf, vsprintf over guest memory using format_guest_printf.
+// The n-limited forms truncate and always NUL-terminate (n > 0) but return the full
+// length, as C does. The unbounded forms are limited by the formatter's output bound.
+void install_printf_services(ImportDispatcher& dispatcher);
 }

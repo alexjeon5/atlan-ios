@@ -2,7 +2,9 @@
 #include "atlan/abi.hpp"
 #include <array>
 #include <bit>
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 
 namespace atlan {
 namespace {
@@ -221,5 +223,29 @@ std::optional<std::string> format_guest_printf(Memory& memory, std::uint32_t for
         if (!append(std::string_view(buffer.data(), static_cast<std::size_t>(produced)))) return overflow;
     }
     return std::nullopt;
+}
+void install_printf_services(ImportDispatcher& dispatcher) {
+    struct Form { const char* name; bool bounded, list; };
+    for (const Form form : {Form{"snprintf", true, false}, Form{"vsnprintf", true, true},
+                            Form{"sprintf", false, false}, Form{"vsprintf", false, true}}) {
+        dispatcher.bind(form.name, [form](ImportCall& call) -> std::optional<std::string> {
+            const unsigned fixed = form.bounded ? 3 : 2;  // buf [, size], fmt
+            const auto buffer = call.arg(0);
+            const auto size = form.bounded ? call.arg(1) : 0xffffffffU;
+            const auto format = call.arg(fixed - 1);
+            auto args = form.list ? VarArgs::from_va_list(call.runtime().memory, call.arg(fixed))
+                                  : VarArgs::from_call(call, fixed);
+            std::string text;
+            if (auto error = format_guest_printf(call.runtime().memory, format, args, text)) return std::string(form.name) + ": " + *error;
+            if (!form.bounded || size != 0) {
+                const std::size_t keep = form.bounded ? std::min<std::size_t>(text.size(), size - 1) : text.size();
+                std::vector<std::byte> bytes(keep + 1, std::byte{0});
+                for (std::size_t i = 0; i < keep; ++i) bytes[i] = static_cast<std::byte>(text[i]);
+                if (!call.runtime().memory.write(buffer, bytes)) return std::string(form.name) + " guest memory fault";
+            }
+            call.set_result(static_cast<std::uint32_t>(text.size()));
+            return std::nullopt;
+        });
+    }
 }
 }

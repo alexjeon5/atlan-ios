@@ -20,6 +20,8 @@ public:
     [[nodiscard]] std::byte* translate(std::uint64_t address, MemoryAccess access) noexcept;
     [[nodiscard]] bool read(std::uint32_t address, std::span<std::byte> out) noexcept;
     [[nodiscard]] bool write(std::uint32_t address, std::span<const std::byte> data) noexcept;
+    // Removes whole pages; unmapped pages inside the range are ignored.
+    void unmap(std::uint32_t base, std::uint64_t size);
     void protect(std::uint32_t base, std::uint64_t size, Permissions permissions);
 
 private:

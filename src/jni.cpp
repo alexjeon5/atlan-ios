@@ -62,6 +62,10 @@ const std::vector<std::string>& invoke_names() {
 void put(std::vector<std::byte>& bytes, std::size_t at, std::uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) bytes[at + i] = std::byte((value >> (8 * i)) & 255);
 }
+bool put_guest8(Memory& memory, std::uint32_t at, std::uint8_t value) {
+    const std::array<std::byte, 1> bytes{std::byte(value)};
+    return memory.write(at, bytes);
+}
 bool put_guest(Memory& memory, std::uint32_t at, std::uint32_t value) {
     std::array<std::byte, 4> bytes{};
     for (unsigned i = 0; i < 4; ++i) bytes[i] = std::byte((value >> (8 * i)) & 255);
@@ -85,8 +89,23 @@ std::uint32_t JavaBootstrap::new_object(std::uint32_t handle) {
         (handle - class_handle_base) / 4 > state_->classes.size() || state_->objects.size() >= 65536)
         return 0;
     state_->objects.push_back(state_->classes[(handle - class_handle_base) / 4 - 1]);
+    state_->texts.emplace_back();
+    state_->is_string.push_back(state_->objects.back() == "java/lang/String");
     state_->fields.emplace_back();
     return object_handle_base + 4 * static_cast<std::uint32_t>(state_->objects.size());
+}
+std::uint32_t JavaBootstrap::new_string(const std::string& utf8) {
+    if (utf8.find('\0') != std::string::npos || utf8.size() > 1U << 20 || state_->objects.size() >= 65536) return 0;
+    const auto cls = new_object(class_handle("java/lang/String"));
+    if (cls == 0) return 0;
+    state_->texts.back() = utf8;
+    return cls;
+}
+std::optional<std::string> JavaBootstrap::string_text(std::uint32_t handle) const {
+    if (handle < object_handle_base + 4 || (handle - object_handle_base) % 4 != 0 ||
+        (handle - object_handle_base) / 4 > state_->objects.size() || !state_->is_string[(handle - object_handle_base) / 4 - 1])
+        return std::nullopt;
+    return state_->texts[(handle - object_handle_base) / 4 - 1];
 }
 const std::string& JavaBootstrap::invoke_name(std::size_t slot) { return invoke_names().at(slot); }
 const std::string& JavaBootstrap::native_name(std::size_t slot) { return native_names().at(slot); }
@@ -224,6 +243,8 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
                 return label + " does not model constructor " + cls + ".<init>" + member.signature;
             if (state->objects.size() >= max_objects) return label + " object table is full";
             state->objects.push_back(cls);
+            state->texts.emplace_back();
+            state->is_string.push_back(cls == "java/lang/String");
             state->fields.emplace_back();
             call.set_result(object_handle_base + 4 * static_cast<std::uint32_t>(state->objects.size()));
             return std::nullopt;
@@ -380,6 +401,57 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
             return std::nullopt;
         });
     }
+    if (config.scratch_base % Memory::page_size != 0 || config.scratch_size == 0 || config.scratch_size % Memory::page_size != 0)
+        throw std::invalid_argument("invalid JNI scratch region");
+    runtime.memory.map(config.scratch_base, config.scratch_size, Permissions::read_write);
+    state_->scratch_base = config.scratch_base;
+    state_->scratch_size = config.scratch_size;
+    const std::uint32_t scratch_end = config.scratch_base + config.scratch_size;
+    (void)scratch_end;
+    const auto string_of = [this](std::uint32_t h) { return string_text(h); };
+    // jstring NewStringUTF(env, const char* utf8)
+    dispatcher.bind("JNIEnv::NewStringUTF", [this, env_check](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::NewStringUTF called with a foreign JNIEnv pointer";
+        std::string text;
+        if (call.arg(1) == 0) { call.set_result(0); return std::nullopt; }
+        if (!read_guest_string(call.runtime().memory, call.arg(1), 1U << 20, text)) return "JNIEnv::NewStringUTF text is unreadable or too long";
+        const auto handle = new_string(text);
+        if (handle == 0) return "JNIEnv::NewStringUTF cannot create the string";
+        call.set_result(handle);
+        return std::nullopt;
+    });
+    // jsize GetStringUTFLength(env, jstring)
+    dispatcher.bind("JNIEnv::GetStringUTFLength", [env_check, string_of](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetStringUTFLength called with a foreign JNIEnv pointer";
+        const auto text = string_of(call.arg(1));
+        if (!text) return "JNIEnv::GetStringUTFLength argument is not a String";
+        call.set_result(static_cast<std::uint32_t>(text->size()));
+        return std::nullopt;
+    });
+    // const char* GetStringUTFChars(env, jstring, jboolean* isCopy): always a copy in guest scratch memory.
+    dispatcher.bind("JNIEnv::GetStringUTFChars", [state, env_check, string_of](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetStringUTFChars called with a foreign JNIEnv pointer";
+        const auto text = string_of(call.arg(1));
+        if (!text) return "JNIEnv::GetStringUTFChars argument is not a String";
+        const std::uint32_t size = static_cast<std::uint32_t>(text->size() + 1);
+        const std::uint32_t at = state->scratch_base + state->scratch_used;
+        if (state->scratch_used + std::uint64_t{size + 7} > state->scratch_size) return "JNIEnv::GetStringUTFChars scratch memory is exhausted";
+        std::vector<std::byte> bytes(size);
+        for (std::size_t i = 0; i < text->size(); ++i) bytes[i] = static_cast<std::byte>((*text)[i]);
+        if (!call.runtime().memory.write(at, bytes)) return "JNIEnv::GetStringUTFChars cannot write the copy";
+        if (call.arg(2) != 0 && !put_guest8(call.runtime().memory, call.arg(2), 1)) return "JNIEnv::GetStringUTFChars isCopy is not writable";
+        state->copies[at] = size;
+        state->scratch_used += (size + 7) & ~7U;
+        call.set_result(at);
+        return std::nullopt;
+    });
+    // void ReleaseStringUTFChars(env, jstring, const char*): space is reclaimed once all copies are released.
+    dispatcher.bind("JNIEnv::ReleaseStringUTFChars", [state, env_check](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::ReleaseStringUTFChars called with a foreign JNIEnv pointer";
+        if (state->copies.erase(call.arg(2)) != 1) return "JNIEnv::ReleaseStringUTFChars pointer is not a live copy";
+        if (state->copies.empty()) state->scratch_used = 0;
+        return std::nullopt;
+    });
     // jint JavaVM::GetEnv(JavaVM* vm, void** penv, jint version)
     const std::uint32_t vm = vm_, env = env_;
     dispatcher.bind("JavaVM::GetEnv", [vm, env](ImportCall& call) -> std::optional<std::string> {

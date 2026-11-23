@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "atlan/abi.hpp"
 #include "atlan/android_log.hpp"
 #include "atlan/elf.hpp"
 #include "atlan/files.hpp"
 #include "atlan/heap.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/libc_services.hpp"
+#include "atlan/mmap.hpp"
+#include "atlan/stdio.hpp"
+#include "atlan/string_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
 #include "atlan/threads.hpp"
@@ -27,13 +31,13 @@ std::uint32_t number(std::string_view text) {
         throw std::invalid_argument("invalid ARM32 integer argument");
     return result;
 }
-struct Call { std::string symbol; std::vector<std::uint32_t> args; };
+struct Call { std::string symbol; std::vector<std::uint32_t> args; std::vector<std::pair<std::size_t, std::string>> strings; };
 }
 int main(int argc, char* argv[]) {
     try {
         if (argc < 2 || std::string_view(argv[1]) == "--help") {
             std::cout << "atlan-elf <ELF32.so> [--trap-imports] [--initialize] [--bias N] [--budget N]\n"
-                         "          [--log] [--jni] [--call symbol [--arg N]...]...\n"
+                         "          [--log] [--jni] [--root DIR] [--call symbol [--arg N]...]...\n"
                          "Calls take up to 32 word arguments (extras go on the guest stack).\n"
                          "--log prints __android_log_* output; --jni maps a minimal JavaVM/JNIEnv and\n"
                          "passes the JavaVM pointer as the first argument of a JNI_OnLoad call.\n"
@@ -44,15 +48,21 @@ int main(int argc, char* argv[]) {
         std::vector<Call> calls;
         std::uint32_t budget = 100000;
         bool initialize = false, log = false, jni = false;
+        std::string root;
         for (int i = 2; i < argc; ++i) {
             const std::string_view arg = argv[i];
             if (arg == "--trap-imports") options.unresolved = atlan::elf::UnresolvedImports::diagnostic_traps;
             else if (arg == "--initialize") initialize = true;
             else if (arg == "--log") log = true;
+            else if (arg == "--root" && i + 1 < argc) root = argv[++i];
             else if (arg == "--jni") jni = true;
             else if (arg == "--bias" && i + 1 < argc) options.load_bias = number(argv[++i]);
             else if (arg == "--budget" && i + 1 < argc) budget = number(argv[++i]);
-            else if (arg == "--call" && i + 1 < argc) calls.push_back({argv[++i], {}});
+            else if (arg == "--call" && i + 1 < argc) calls.push_back({argv[++i], {}, {}});
+            else if (arg == "--str" && i + 1 < argc && !calls.empty()) {
+                calls.back().strings.emplace_back(calls.back().args.size(), argv[++i]);
+                calls.back().args.push_back(0);  // replaced by a jstring handle
+            }
             else if (arg == "--arg" && i + 1 < argc && !calls.empty()) calls.back().args.push_back(number(argv[++i]));
             else throw std::invalid_argument("unknown or incomplete option");
         }
@@ -86,6 +96,21 @@ int main(int argc, char* argv[]) {
         atlan::install_libc_services(dispatcher);
         atlan::GuestHeap heap;
         atlan::install_heap_services(dispatcher, heap);
+        atlan::install_string_services(dispatcher);
+        atlan::install_printf_services(dispatcher);
+        std::optional<atlan::GuestStdio> stdio;
+        if (!root.empty()) {
+            stdio.emplace(root, guard_page + 0x200, [&](const std::string& path, const std::string& mode, bool ok) {
+                if (log) std::cout << "[fopen] " << path << " mode=" << mode << (ok ? " ok" : " failed") << '\n';
+            });
+            stdio->install(dispatcher);
+        }
+        const std::map<std::string, std::string> properties;
+        atlan::install_system_properties(dispatcher, properties, [&](const std::string& name, bool known) {
+            if (log) std::cout << "[property] " << name << (known ? "" : " (unset)") << '\n';
+        });
+        atlan::GuestMmap mmap_arena;
+        mmap_arena.install(dispatcher);
         atlan::MutexTable mutexes;
         mutexes.install(dispatcher);
         atlan::VirtualFiles files(guard_page + 0x200);
@@ -135,6 +160,14 @@ int main(int argc, char* argv[]) {
             if (!symbol || symbol->type != 2) throw std::invalid_argument("function export not found: " + call.symbol);
             auto args = call.args;
             if (java && call.symbol == "JNI_OnLoad") args = {java->vm(), 0};
+            else if (java && call.symbol.starts_with("Java_")) {
+                // Java_<pkg>_<Class>_<method>: pass env and a host object of that class as `this`.
+                const auto cut = call.symbol.rfind('_');
+                std::string cls = call.symbol.substr(5, cut - 5);
+                for (auto& ch : cls) if (ch == '_') ch = '/';
+                for (const auto& [index, text] : call.strings) args[index] = java->new_string(text);
+                args.insert(args.begin(), {java->env(), java->new_object(java->class_handle(cls))});
+            }
             const bool ok = invoke(call.symbol, symbol->address, args);
             if (java) {
                 for (const auto& cls : java->classes()) std::cout << "jni class " << cls << '\n';

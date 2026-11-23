@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,8 @@ public:
     struct Config {
         std::uint32_t data_base{0xf1000000};  // one page of read-only tables
         std::uint32_t trap_base{0xf2000000};  // unmapped function trap range
+        std::uint32_t scratch_base{0xf4000000};  // read-write guest memory for string copies
+        std::uint32_t scratch_size{1U << 20};
     };
     // Maps the tables into runtime.memory and binds the implemented services.
     // Throws std::invalid_argument if the regions overlap existing mappings.
@@ -65,6 +68,11 @@ public:
     // that class. 0 means the reference tables are full.
     [[nodiscard]] std::uint32_t class_handle(const std::string& class_name);
     [[nodiscard]] std::uint32_t new_object(std::uint32_t class_handle);
+    // A java/lang/String host object with content (UTF-8, no embedded NUL).
+    // Returns 0 if the object table is full or the text is unusable.
+    [[nodiscard]] std::uint32_t new_string(const std::string& utf8);
+    // Content of a String object handle, if it is one.
+    [[nodiscard]] std::optional<std::string> string_text(std::uint32_t handle) const;
     // Live global references (NewGlobalRef minus DeleteGlobalRef).
     [[nodiscard]] std::size_t live_global_refs() const noexcept {
         std::size_t n = 0;
@@ -82,6 +90,10 @@ private:
         std::vector<NativeMethod> natives;
         std::vector<Member> members;
         std::vector<std::string> objects;  // object class names; index = handle slot
+        std::vector<std::string> texts;  // per object: String content ("" otherwise)
+        std::vector<bool> is_string;
+        std::map<std::uint32_t, std::uint32_t> copies;  // guest scratch copy address -> size
+        std::uint32_t scratch_base{}, scratch_size{}, scratch_used{};
         std::vector<std::map<std::uint32_t, std::uint64_t>> fields;  // per object: field id -> raw value
         std::map<std::string, MethodHandler> methods;  // "class\x1fname\x1fsignature"
         std::vector<std::uint32_t> globals;  // referent handle; 0 once deleted
