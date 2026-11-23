@@ -2,6 +2,8 @@
 #pragma once
 #include "atlan/imports.hpp"
 #include <array>
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,9 +41,25 @@ public:
     // addresses; they are never dereferenceable and never host pointers.
     [[nodiscard]] const std::vector<std::string>& classes() const noexcept { return state_->classes; }
     [[nodiscard]] const std::vector<NativeMethod>& native_methods() const noexcept { return state_->natives; }
-    // Objects created through NewObject*; only the minimal java/lang/String
-    // (empty, via the ()V constructor) exists so far. Handles are opaque.
+    // Objects created through NewObject*: opaque host objects holding only a class
+    // name and a field store (any class, via its ()V constructor). They have no
+    // behaviour beyond host-registered methods. Handles are opaque.
     [[nodiscard]] const std::vector<std::string>& objects() const noexcept { return state_->objects; }
+    // One Java-side method call made by the guest, for a host-registered method.
+    // `args` are raw values in signature order: 32-bit types zero-extended, J/D as
+    // 64-bit bits, F as float bits, references as opaque handles. The handler
+    // stores the raw return value in `result` (references as handles).
+    struct MethodCall {
+        std::string class_name, name, signature;
+        std::uint32_t receiver{};  // object handle, or class handle for static calls
+        std::vector<std::uint64_t> args;
+        std::uint64_t result{};
+    };
+    using MethodHandler = std::function<std::optional<std::string>(MethodCall&)>;
+    // Registers the host implementation of one Java method. Only registered
+    // methods can be called by the guest; any other call stops by name.
+    // False if (class, name, signature) is already registered.
+    bool register_method(std::string class_name, std::string name, std::string signature, MethodHandler handler);
     // Live global references (NewGlobalRef minus DeleteGlobalRef).
     [[nodiscard]] std::size_t live_global_refs() const noexcept {
         std::size_t n = 0;
@@ -59,6 +77,8 @@ private:
         std::vector<NativeMethod> natives;
         std::vector<Member> members;
         std::vector<std::string> objects;  // object class names; index = handle slot
+        std::vector<std::map<std::uint32_t, std::uint64_t>> fields;  // per object: field id -> raw value
+        std::map<std::string, MethodHandler> methods;  // "class\x1fname\x1fsignature"
         std::vector<std::uint32_t> globals;  // referent handle; 0 once deleted
     };
     std::shared_ptr<State> state_ = std::make_shared<State>();
