@@ -4,7 +4,7 @@ set(CMAKE_OBJCXX_STANDARD 20)
 set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_EXTENSIONS OFF)
 add_executable(AtlanRuntime MACOSX_BUNDLE main.mm)
-target_link_libraries(AtlanRuntime PRIVATE atlan_runtime "-framework UIKit" "-framework Foundation")
+target_link_libraries(AtlanRuntime PRIVATE atlan_shell "-framework UIKit" "-framework Foundation" "-framework UniformTypeIdentifiers")
 target_compile_options(AtlanRuntime PRIVATE -fobjc-arc -Wall -Wextra -Werror)
 set_target_properties(AtlanRuntime PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
