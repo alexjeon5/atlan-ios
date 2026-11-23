@@ -21,6 +21,8 @@ public:
     [[nodiscard]] bool read(std::uint32_t address, std::span<std::byte> out) noexcept;
     [[nodiscard]] bool write(std::uint32_t address, std::span<const std::byte> data) noexcept;
     void protect(std::uint32_t base, std::uint64_t size, Permissions permissions);
+    // Bumped by every map() and protect(); caches of decoded code compare it.
+    [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
 
 private:
     struct alignas(8) Page {
@@ -28,5 +30,6 @@ private:
         Permissions permissions{};
     };
     std::map<std::uint32_t, std::unique_ptr<Page>> pages_;
+    std::uint64_t generation_{};
 };
 }
