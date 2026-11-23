@@ -191,9 +191,8 @@ void memory_and_call_boundaries() {
     check(!memory.write(0x1000,data),"host write respects read-only protection");
     atlan::Runtime runtime;
     const std::array<std::uint32_t,5> args{};
-    rejected=false;
-    try {(void)runtime.call(0x1000,args,0x2000,0xffff0000,10);}catch(const std::exception&){rejected=true;}
-    check(rejected,"scalar call rejects stack arguments rather than dropping them");
+    check(runtime.call(0x1000,args,0x2000,0xffff0000,10).event==atlan::Event::memory_fault,
+          "stack arguments that cannot be stored fault instead of being dropped");
 }
 }
 int main() {

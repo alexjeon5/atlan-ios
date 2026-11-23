@@ -2,6 +2,7 @@
 #pragma once
 #include "atlan/elf.hpp"
 #include "atlan/runtime.hpp"
+#include <array>
 #include <functional>
 #include <optional>
 #include <string>
@@ -12,14 +13,25 @@ namespace atlan {
 class ImportDispatcher;
 
 // Arguments and result of one guest call into a host compatibility service.
-// Only the four AAPCS32 scalar argument registers are readable; a service that
-// needs more must be extended explicitly. Guest addresses are never host pointers.
+// arg() reads r0-r3 only. Word arguments past the fourth live on the guest
+// stack and are read with read_arg(), which can fail. Guest addresses are never
+// host pointers.
 class ImportCall {
 public:
     ImportCall(ImportDispatcher& dispatcher, Runtime& runtime, std::string_view name) noexcept
         : dispatcher_(dispatcher), runtime_(runtime), name_(name) {}
     [[nodiscard]] std::uint32_t arg(unsigned index) const noexcept {
         return index < 4 ? static_cast<std::uint32_t>(runtime_.cpu.registers[index]) : 0;
+    }
+    // Word argument `index` of a call on entry: r0-r3, then [sp], [sp+4], ...
+    [[nodiscard]] bool read_arg(unsigned index, std::uint32_t& out) noexcept {
+        if (index < 4) { out = arg(index); return true; }
+        std::array<std::byte, 4> bytes{};
+        const std::uint64_t at = std::uint64_t{static_cast<std::uint32_t>(runtime_.cpu.registers[13])} + 4ULL * (index - 4);
+        if (at + 4 > 0x100000000ULL || !runtime_.memory.read(static_cast<std::uint32_t>(at), bytes)) return false;
+        out = 0;
+        for (unsigned i = 0; i < 4; ++i) out |= std::to_integer<std::uint32_t>(bytes[i]) << (8 * i);
+        return true;
     }
     void set_result(std::uint32_t value) noexcept { runtime_.cpu.registers[0] = value; }
     [[nodiscard]] Runtime& runtime() noexcept { return runtime_; }
@@ -53,6 +65,9 @@ public:
     static constexpr unsigned max_depth = 16;
     // Registers a service for one symbol name; false if the name is already bound.
     bool bind(std::string name, ImportService service);
+    // Binds one host-reserved, unmapped, 4-byte aligned trap address to a name.
+    // False if the address is misaligned or already bound.
+    bool bind_trap(std::uint32_t address, std::string name);
     // Maps an image's trap addresses to symbol names. Function imports only.
     void attach(const elf::Image& image);
 

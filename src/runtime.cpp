@@ -3,6 +3,7 @@
 #include "atlan/vfp.hpp"
 #include "cpu/arm64/aarch32/guest_key.hpp"
 #include "cpu/arm64/aarch32/semantics.hpp"
+#include <array>
 #include <bit>
 #include <cstring>
 #include <stdexcept>
@@ -79,16 +80,29 @@ Result Runtime::run(std::uint64_t budget) noexcept {
     }
     return {Event::budget_exhausted, retired};
 }
+bool Runtime::load_arguments(std::span<const std::uint32_t> arguments, std::uint32_t stack_top) {
+    const std::size_t extra = arguments.size() > 4 ? arguments.size() - 4 : 0;
+    const std::uint32_t sp = (stack_top - static_cast<std::uint32_t>(4 * extra)) & ~7U;
+    if (extra != 0) {
+        if (stack_top < 4 * extra) return false;
+        std::array<std::byte, 4 * max_call_arguments> bytes{};
+        for (std::size_t i = 0; i < extra; ++i)
+            for (unsigned b = 0; b < 4; ++b) bytes[4 * i + b] = std::byte((arguments[4 + i] >> (8 * b)) & 255);
+        if (!memory.write(sp, std::span<const std::byte>(bytes.data(), 4 * extra))) return false;
+    }
+    for (std::size_t i = 0; i < 4; ++i) cpu.registers[i] = i < arguments.size() ? arguments[i] : 0;
+    cpu.registers[13] = sp;
+    return true;
+}
 Result Runtime::call(std::uint32_t target, std::span<const std::uint32_t> arguments,
                      std::uint32_t stack_top, std::uint32_t return_target,
                      std::uint64_t budget) {
-    if (arguments.size() > 4 || stack_top % 8 != 0 || return_target % 4 != 0 ||
+    if (arguments.size() > max_call_arguments || stack_top % 8 != 0 || return_target % 4 != 0 ||
         (target & ~1U) == return_target ||
         memory.translate(return_target, MemoryAccess::read) != nullptr)
         throw std::invalid_argument("invalid scalar AAPCS32 call frame");
-    for (std::size_t i = 0; i < 4; ++i)
-        cpu.registers[i] = i < arguments.size() ? arguments[i] : 0;
-    cpu.registers[13] = stack_top;
+    if (!load_arguments(arguments, stack_top))
+        return {Event::memory_fault, 0, stack_top, 0, MemoryAccess::write};
     cpu.registers[14] = return_target;
     start(target);
     std::uint64_t retired = 0;

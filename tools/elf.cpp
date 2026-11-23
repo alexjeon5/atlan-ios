@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "atlan/android_log.hpp"
 #include "atlan/elf.hpp"
 #include "atlan/files.hpp"
 #include "atlan/heap.hpp"
+#include "atlan/jni.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
@@ -12,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 namespace {
@@ -30,19 +33,23 @@ int main(int argc, char* argv[]) {
     try {
         if (argc < 2 || std::string_view(argv[1]) == "--help") {
             std::cout << "atlan-elf <ELF32.so> [--trap-imports] [--initialize] [--bias N] [--budget N]\n"
-                         "          [--call symbol [--arg N]...]...\n"
-                         "Scalar calls accept at most four 32-bit register arguments.\n"
+                         "          [--log] [--jni] [--call symbol [--arg N]...]...\n"
+                         "Calls take up to 32 word arguments (extras go on the guest stack).\n"
+                         "--log prints __android_log_* output; --jni maps a minimal JavaVM/JNIEnv and\n"
+                         "passes the JavaVM pointer as the first argument of a JNI_OnLoad call.\n"
                          "Constructors run only with --initialize; unresolved imports stop execution.\n";
             return argc < 2 ? 1 : 0;
         }
         atlan::elf::Options options;
         std::vector<Call> calls;
         std::uint32_t budget = 100000;
-        bool initialize = false;
+        bool initialize = false, log = false, jni = false;
         for (int i = 2; i < argc; ++i) {
             const std::string_view arg = argv[i];
             if (arg == "--trap-imports") options.unresolved = atlan::elf::UnresolvedImports::diagnostic_traps;
             else if (arg == "--initialize") initialize = true;
+            else if (arg == "--log") log = true;
+            else if (arg == "--jni") jni = true;
             else if (arg == "--bias" && i + 1 < argc) options.load_bias = number(argv[++i]);
             else if (arg == "--budget" && i + 1 < argc) budget = number(argv[++i]);
             else if (arg == "--call" && i + 1 < argc) calls.push_back({argv[++i], {}});
@@ -85,6 +92,10 @@ int main(int argc, char* argv[]) {
         files.install(dispatcher);
         atlan::ThreadKeys thread_keys;
         thread_keys.install(dispatcher);
+        atlan::AndroidLog android_log([&](const atlan::LogEntry& entry) {
+            if (log) std::cout << "[android_log " << entry.priority << "] " << entry.tag << ": " << entry.message << '\n';
+        });
+        android_log.install(dispatcher);
         dispatcher.attach(image);
         runtime.memory = std::move(image.memory);
         runtime.memory.map(guard_page, atlan::Memory::page_size, atlan::Permissions::read_write);
@@ -94,6 +105,8 @@ int main(int argc, char* argv[]) {
             if (!runtime.memory.write(guard_page, bytes)) throw std::runtime_error("cannot initialize stack guard");
         }
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
+        std::optional<atlan::JavaBootstrap> java;
+        if (jni) java.emplace(runtime, dispatcher, atlan::JavaBootstrap::Config{});
         const auto invoke = [&](std::string_view label, std::uint32_t address,
                                 std::span<const std::uint32_t> args) {
             const auto outcome = dispatcher.call(runtime, address, args, 0x70100000, 0xffff0000, budget);
@@ -120,7 +133,17 @@ int main(int argc, char* argv[]) {
         for (const auto& call : calls) {
             const auto* symbol = image.find(call.symbol);
             if (!symbol || symbol->type != 2) throw std::invalid_argument("function export not found: " + call.symbol);
-            if (!invoke(call.symbol, symbol->address, call.args)) return 2;
+            auto args = call.args;
+            if (java && call.symbol == "JNI_OnLoad") args = {java->vm(), 0};
+            const bool ok = invoke(call.symbol, symbol->address, args);
+            if (java) {
+                for (const auto& cls : java->classes()) std::cout << "jni class " << cls << '\n';
+                for (const auto& m : java->members())
+                    std::cout << "jni member kind=" << static_cast<int>(m.kind) << ' ' << m.class_name << '.' << m.name << ' ' << m.signature << '\n';
+                for (const auto& m : java->native_methods())
+                    std::cout << "jni native " << m.class_name << '.' << m.name << m.signature << " -> 0x" << std::hex << m.address << std::dec << '\n';
+            }
+            if (!ok) return 2;
         }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
