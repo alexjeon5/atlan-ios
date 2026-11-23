@@ -5,7 +5,9 @@
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
 #include "atlan/threads.hpp"
+#include <array>
 #include <charconv>
+#include <random>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -46,6 +48,14 @@ int main(int argc, char* argv[]) {
             else if (arg == "--arg" && i + 1 < argc && !calls.empty()) calls.back().args.push_back(number(argv[++i]));
             else throw std::invalid_argument("unknown or incomplete option");
         }
+        // __stack_chk_guard is a data import: the host provides one guest word, never a trap.
+        constexpr std::uint32_t guard_page = 0x6ffff000;
+        std::random_device entropy;
+        const std::uint32_t canary = entropy() & 0xffffff00U;
+        options.resolve = [&](std::string_view name, std::uint8_t) -> std::optional<std::uint32_t> {
+            if (name == "__stack_chk_guard") return guard_page;
+            return std::nullopt;
+        };
         std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
         if (!input) throw std::runtime_error("cannot open input ELF");
         const auto size = input.tellg();
@@ -70,6 +80,12 @@ int main(int argc, char* argv[]) {
         mutexes.install(dispatcher);
         dispatcher.attach(image);
         runtime.memory = std::move(image.memory);
+        runtime.memory.map(guard_page, atlan::Memory::page_size, atlan::Permissions::read_write);
+        {
+            std::array<std::byte, 4> bytes{};
+            for (unsigned i = 0; i < 4; ++i) bytes[i] = std::byte((canary >> (8 * i)) & 255);
+            if (!runtime.memory.write(guard_page, bytes)) throw std::runtime_error("cannot initialize stack guard");
+        }
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
         const auto invoke = [&](std::string_view label, std::uint32_t address,
                                 std::span<const std::uint32_t> args) {

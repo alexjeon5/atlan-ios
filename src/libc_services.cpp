@@ -50,6 +50,32 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         }
         return "strcpy exceeds service bound";
     });
+    // char* strcat(char* dest, const char* src): appends through the terminator.
+    dispatcher.bind("strcat", [](ImportCall& call) -> std::optional<std::string> {
+        const auto dest = call.arg(0), src = call.arg(1);
+        auto& memory = call.runtime().memory;
+        const auto scan = [&](std::uint32_t at, std::vector<std::byte>* out) -> std::optional<std::uint32_t> {
+            for (std::uint32_t i = 0; i < max_block; ++i) {
+                std::byte value{};
+                if (std::uint64_t{at} + i > 0xffffffffULL || !memory.read(at + i, std::span<std::byte>(&value, 1)))
+                    return std::nullopt;
+                if (out) out->push_back(value);
+                if (value == std::byte{0}) return i;
+            }
+            return std::nullopt;
+        };
+        const auto end = scan(dest, nullptr);
+        std::vector<std::byte> text;
+        if (!end || !scan(src, &text)) return "strcat read left mapped or bounded guest memory";
+        if (std::uint64_t{dest} + *end + text.size() > 0x100000000ULL || !memory.write(dest + *end, text))
+            return "strcat guest memory fault";
+        call.set_result(dest);
+        return std::nullopt;
+    });
+    // void __stack_chk_fail(void): the guest's stack canary was overwritten.
+    dispatcher.bind("__stack_chk_fail", [](ImportCall&) -> std::optional<std::string> {
+        return "guest stack protector failure (__stack_chk_fail)";
+    });
     // int clock_gettime(clockid_t clock, struct timespec* out), 32-bit Linux ABI.
     // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) are supported.
     dispatcher.bind("clock_gettime", [](ImportCall& call) -> std::optional<std::string> {
