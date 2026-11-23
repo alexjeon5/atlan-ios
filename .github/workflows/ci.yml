@@ -7,7 +7,7 @@ jobs:
   correctness:
     strategy:
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-26-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -15,7 +15,7 @@ jobs:
       - run: cmake --build build --parallel 4
       - run: ctest --test-dir build --output-on-failure
   ios-build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - run: >-
@@ -25,3 +25,25 @@ jobs:
           -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
           -DATLAN_BUILD_IOS=ON -DBUILD_TESTING=OFF
       - run: cmake --build build-ios --config Debug -- CODE_SIGNING_ALLOWED=NO
+  macos-universal:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DATLAN_BUILD_MACOS=ON
+      - run: cmake --build build-macos --parallel 3
+      - run: ctest --test-dir build-macos --output-on-failure
+      - run: |
+          lipo -verify_arch arm64 x86_64 build-macos/atlan-poc
+          lipo -verify_arch arm64 x86_64 build-macos/runtime-tests
+          lipo -verify_arch arm64 x86_64 build-macos/platform/macos/AtlanRuntimeMac.app/Contents/MacOS/AtlanRuntimeMac
+          cmake --install build-macos --prefix out/macos
+          codesign --force --deep --sign - out/macos/AtlanRuntimeMac.app
+          ditto -c -k --keepParent out/macos out/atlan-runtime-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atlan-runtime-macos-universal
+          path: out/atlan-runtime-macos-universal.zip
+          if-no-files-found: error
