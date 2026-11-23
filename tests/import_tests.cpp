@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/heap.hpp"
 #include "atlan/libc_services.hpp"
+#include "atlan/threads.hpp"
 #include "atlan/lifetime.hpp"
 #include <array>
 #include <iostream>
@@ -29,12 +30,13 @@ constexpr std::uint32_t atexit_aeabi = 0xf0000000, atexit_cxa = 0xf0000010, fina
                         unknown = 0xf0000030, memset_trap = 0xf0000050, clock_trap = 0xf0000060, strlen_trap = 0xf0000070, log_word = 0x4000, dtor_log = 0x2000, dtor_loop = 0x2040,
                         dtor_thumb = 0x2101, atexit_data = 0xf0000040,
                         malloc_trap = 0xf0000080, free_trap = 0xf0000090, calloc_trap = 0xf00000a0,
-                        realloc_trap = 0xf00000b0, strcpy_trap = 0xf00000c0;
+                        realloc_trap = 0xf00000b0, strcpy_trap = 0xf00000c0, lock_trap = 0xf00000d0, unlock_trap = 0xf00000e0;
 
 struct Fixture {
     atlan::Runtime runtime;
     atlan::ImportDispatcher dispatcher;
     atlan::ObjectLifetime lifetime;
+    atlan::MutexTable mutexes;
     atlan::GuestHeap heap{0x20000000, 4U * 1024 * 1024};
     Fixture() {
         runtime.memory.map(code, 0x2000, atlan::Permissions::read_write);
@@ -53,11 +55,13 @@ struct Fixture {
                                  {"data_symbol", atexit_data, 1},
                                  {"memset", memset_trap, 2}, {"clock_gettime", clock_trap, 2}, {"strlen", strlen_trap, 2},
                                  {"malloc", malloc_trap, 2}, {"free", free_trap, 2}, {"calloc", calloc_trap, 2},
-                                 {"realloc", realloc_trap, 2}, {"strcpy", strcpy_trap, 2}};
+                                 {"realloc", realloc_trap, 2}, {"strcpy", strcpy_trap, 2},
+                                 {"pthread_mutex_lock", lock_trap, 2}, {"pthread_mutex_unlock", unlock_trap, 2}};
         dispatcher.attach(image);
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
         atlan::install_heap_services(dispatcher, heap);
+        mutexes.install(dispatcher);
     }
     atlan::CallOutcome call(std::uint32_t target, std::initializer_list<std::uint32_t> args,
                             std::uint64_t budget = 10000) {
@@ -178,6 +182,11 @@ void heap_and_strings() {
     (void)g.call(free_trap, {q}); (void)g.call(free_trap, {p});
     g.call(malloc_trap, {64});
     check(g.runtime.cpu.registers[0] == p, "adjacent free blocks coalesce");
+    check(g.call(lock_trap, {0x4400}).stop == atlan::Stop::returned && g.mutexes.held(0x4400), "mutex lock");
+    check(g.call(lock_trap, {0x4400}).stop == atlan::Stop::service_error, "relocking a held mutex reports deadlock");
+    check(g.call(unlock_trap, {0x4400}).stop == atlan::Stop::returned && !g.mutexes.held(0x4400), "mutex unlock");
+    check(g.call(unlock_trap, {0x4400}).stop == atlan::Stop::service_error, "unlocking a free mutex is reported");
+    check(g.call(lock_trap, {0}).stop == atlan::Stop::service_error, "null mutex is reported");
     // strcpy
     put32(g.runtime.memory, 0x4300, 0x00636261);
     check(g.call(strcpy_trap, {p, 0x4300}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == p &&

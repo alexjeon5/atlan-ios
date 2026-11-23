@@ -23,7 +23,7 @@ if(ATLAN_SANITIZERS)
 endif()
 
 add_subdirectory(third_party/kernarium)
-add_library(atlan_runtime STATIC src/memory.cpp src/runtime.cpp src/demo.cpp src/elf.cpp src/imports.cpp src/lifetime.cpp src/libc_services.cpp src/vfp.cpp src/heap.cpp)
+add_library(atlan_runtime STATIC src/memory.cpp src/runtime.cpp src/demo.cpp src/elf.cpp src/imports.cpp src/lifetime.cpp src/libc_services.cpp src/vfp.cpp src/heap.cpp src/threads.cpp)
 set_source_files_properties(src/vfp.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 target_include_directories(atlan_runtime PUBLIC include)
 target_link_libraries(atlan_runtime PRIVATE kernarium_aarch32)
