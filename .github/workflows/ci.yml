@@ -36,9 +36,9 @@ jobs:
       - run: cmake --build build-macos --parallel 3
       - run: ctest --test-dir build-macos --output-on-failure
       - run: |
-          lipo -verify_arch arm64 x86_64 build-macos/atlan-poc
-          lipo -verify_arch arm64 x86_64 build-macos/runtime-tests
-          lipo -verify_arch arm64 x86_64 build-macos/platform/macos/AtlanRuntimeMac.app/Contents/MacOS/AtlanRuntimeMac
+          lipo build-macos/atlan-poc -verify_arch arm64 x86_64
+          lipo build-macos/runtime-tests -verify_arch arm64 x86_64
+          lipo build-macos/platform/macos/AtlanRuntimeMac.app/Contents/MacOS/AtlanRuntimeMac -verify_arch arm64 x86_64
           cmake --install build-macos --prefix out/macos
           codesign --force --deep --sign - out/macos/AtlanRuntimeMac.app
           ditto -c -k --keepParent out/macos out/atlan-runtime-macos-universal.zip
