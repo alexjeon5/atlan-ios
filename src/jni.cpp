@@ -72,6 +72,22 @@ bool JavaBootstrap::register_method(std::string class_name, std::string name, st
     if (!handler) return false;
     return state_->methods.emplace(class_name + '\x1f' + name + '\x1f' + signature, std::move(handler)).second;
 }
+std::uint32_t JavaBootstrap::class_handle(const std::string& class_name) {
+    auto& classes = state_->classes;
+    for (std::size_t i = 0; i < classes.size(); ++i)
+        if (classes[i] == class_name) return class_handle_base + 4 * static_cast<std::uint32_t>(i + 1);
+    if (class_name.empty() || class_name.size() > 256 || classes.size() >= 4096) return 0;
+    classes.push_back(class_name);
+    return class_handle_base + 4 * static_cast<std::uint32_t>(classes.size());
+}
+std::uint32_t JavaBootstrap::new_object(std::uint32_t handle) {
+    if (handle < class_handle_base + 4 || (handle - class_handle_base) % 4 != 0 ||
+        (handle - class_handle_base) / 4 > state_->classes.size() || state_->objects.size() >= 65536)
+        return 0;
+    state_->objects.push_back(state_->classes[(handle - class_handle_base) / 4 - 1]);
+    state_->fields.emplace_back();
+    return object_handle_base + 4 * static_cast<std::uint32_t>(state_->objects.size());
+}
 const std::string& JavaBootstrap::invoke_name(std::size_t slot) { return invoke_names().at(slot); }
 const std::string& JavaBootstrap::native_name(std::size_t slot) { return native_names().at(slot); }
 
