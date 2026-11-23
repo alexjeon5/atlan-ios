@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+cmake_minimum_required(VERSION 3.22)
+project(atlan_ios VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+option(ATLAN_BUILD_IOS "Build the native iOS proof of concept" OFF)
+option(ATLAN_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
+include(CTest)
+
+if(ATLAN_SANITIZERS)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
+add_subdirectory(third_party/kernarium)
+add_library(atlan_runtime STATIC src/memory.cpp src/runtime.cpp src/demo.cpp)
+target_include_directories(atlan_runtime PUBLIC include)
+target_link_libraries(atlan_runtime PRIVATE kernarium_aarch32)
+target_compile_options(atlan_runtime PRIVATE -Wall -Wextra -Werror)
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  add_executable(atlan-poc tools/poc.cpp)
+  target_link_libraries(atlan-poc PRIVATE atlan_runtime)
+endif()
+
+if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  add_executable(runtime-tests tests/runtime_tests.cpp)
+  target_link_libraries(runtime-tests PRIVATE atlan_runtime kernarium_aarch32)
+  target_compile_options(runtime-tests PRIVATE -Wall -Wextra -Werror)
+  add_test(NAME runtime-correctness COMMAND runtime-tests)
+  add_test(NAME arm32-proof-of-concept COMMAND atlan-poc)
+endif()
+
+if(ATLAN_BUILD_IOS)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    message(FATAL_ERROR "ATLAN_BUILD_IOS requires an iOS toolchain")
+  endif()
+  add_subdirectory(platform/ios)
+endif()

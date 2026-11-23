@@ -1,0 +1,25 @@
+{
+  "repository": "https://github.com/alexjeon5/Kernarium",
+  "upstream": "https://github.com/imxieyi/Kernarium",
+  "revision": "5aa987dbca2ee1af8ab57986aa221e8df8db18e5",
+  "license": "GPL-2.0-or-later",
+  "original_sha256": {
+    "darwin/cpu/arm64/aarch32/a32_encodings.cpp": "48f2c1fc5cba15e9d184cc4f0b1716a6e7b151dde253997e699be652e4cce998",
+    "darwin/cpu/arm64/aarch32/a32_encodings.hpp": "96b31e381812a9496d876dc76b59132afcf9a010fa9ed23a86da93595ac279bc",
+    "darwin/cpu/arm64/aarch32/a32_operand_decode.cpp": "5546c2699384f5e513d25210b5fdf0907f925e34235de5389eb1f53a357be81d",
+    "darwin/cpu/arm64/aarch32/decode.cpp": "31770b03e94aa356c3a002bcb631946b2e90a39381e53000ab829057ac9df3a2",
+    "darwin/cpu/arm64/aarch32/decode.hpp": "7adeae3542db690b8dc00de88bf2d84951b0133837270ce540721affec0af841",
+    "darwin/cpu/arm64/aarch32/decode_support.hpp": "f2081452583bb9d7e66bfd4c3a375893d6021380d9c9ee31d2df3da289913525",
+    "darwin/cpu/arm64/aarch32/decode_types.hpp": "1ad2e21b1b299fc6ddc551297a8f9ff4661bd6e22a693ba695970d2e4afd82af",
+    "darwin/cpu/arm64/aarch32/form_operation.cpp": "f1d37746b76dd595f4482aa148dd3a2db849ac31dcb79700b4501c415cc600ff",
+    "darwin/cpu/arm64/aarch32/form_operation.hpp": "c92ede4db8a84b06b139e863443dbbb96d002c1e338def3ae6012d4ac3f12165",
+    "darwin/cpu/arm64/aarch32/semantics.cpp": "d526713386cfa100f2858e69a0e6ac69ab8baa35452f6c7dbf41e0caf8be4e0f",
+    "darwin/cpu/arm64/aarch32/semantics.hpp": "bc3cbd12603c247fb17bcdf06295f2092a6d776e543040de0ebabe62e7c3af89",
+    "darwin/cpu/arm64/aarch32/semantics_internal.hpp": "775faad2c45349c3c52f232e6a992925e42551fdf60f4947f7352134e4bf5e04",
+    "darwin/cpu/arm64/aarch32/semantics_integer.cpp": "84706c70f1ab969890ec3541b6bc920fe282e3aa7984eb09639b8ddcbb8bc599",
+    "darwin/cpu/arm64/aarch32/semantics_memory.cpp": "a8e26ae1a779dedc1f629e193a3e5009c7519a8eafd7cbe7025434dba02b5016",
+    "darwin/cpu/arm64/aarch32/semantics_control.cpp": "a252d81ec26ac40efb2b625e97e184fac2eefd1c88d2eea12639f68b6ee96afb",
+    "darwin/cpu/arm64/aarch32/semantics_table.cpp": "bff92f00371c1dc1f7c4988b1f107f6195f675e47a6f30f1d2bb8a358aaf745d",
+    "darwin/cpu/arm64/aarch32/guest_key.hpp": "e83381bd65a0aa0dc3472745d5e8372372340237d7a890d10ecbbc18b8679ac3"
+  }
+}
