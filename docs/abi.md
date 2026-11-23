@@ -28,3 +28,11 @@
 - `JNIEnv::DeleteLocalRef`: 핸들만 검증한다. 클래스·객체 테이블은 회수하지 않는다(상한 있음).
 
 문자열 내용, 배열, 예외 등 나머지 Java 객체 모델은 없다. 관찰된 호출이 필요로 할 때만 하나씩 추가한다.
+
+## 추가된 JNI 동작
+
+- `GetVersion`은 JNI 1.6을 반환한다. 호스트 코드는 예외를 던지지 않으므로(`Throw`/`ThrowNew`는 이름으로 멈춤) `ExceptionCheck`·`ExceptionOccurred`는 항상 없음, `ExceptionClear`는 변화 없음이다.
+- `GetObjectClass`는 호스트 객체의 클래스 핸들을 준다.
+- `CallNonvirtual<T>Method{,V,A}`는 `(env, obj, clazz, id, …)` 순서로 읽고 `clazz`가 메서드의 클래스와 같아야 한다. 이후는 일반 호출과 같다(등록된 호스트 메서드만 실행).
+- `byte[]`만 모델링한다: `NewByteArray`, `GetArrayLength`, `Get/SetByteArrayRegion`(범위 밖은 오류), `Get/ReleaseByteArrayElements`(스크래치 복사본, 모드 0 복사 후 해제·1 복사만·2 버림). 호스트에서는 `new_byte_array`/`byte_array`로 만들고 읽는다. 다른 배열 타입과 객체 배열은 이름으로 멈춘다.
+- 문자열은 `NewStringUTF`, `GetStringUTFChars`/`Release`, `GetStringUTFLength`, 호스트의 `new_string`/`string_text`를 쓴다(UTF-8, 복사본은 스크래치 메모리).

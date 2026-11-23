@@ -73,6 +73,9 @@ public:
     [[nodiscard]] std::uint32_t new_string(const std::string& utf8);
     // Content of a String object handle, if it is one.
     [[nodiscard]] std::optional<std::string> string_text(std::uint32_t handle) const;
+    // byte[] host objects (the only array type modelled so far).
+    [[nodiscard]] std::uint32_t new_byte_array(const std::vector<std::uint8_t>& bytes);
+    [[nodiscard]] std::optional<std::vector<std::uint8_t>> byte_array(std::uint32_t handle) const;
     // Live global references (NewGlobalRef minus DeleteGlobalRef).
     [[nodiscard]] std::size_t live_global_refs() const noexcept {
         std::size_t n = 0;
@@ -92,6 +95,8 @@ private:
         std::vector<std::string> objects;  // object class names; index = handle slot
         std::vector<std::string> texts;  // per object: String content ("" otherwise)
         std::vector<bool> is_string;
+        std::vector<std::vector<std::uint8_t>> byte_arrays;  // handle slot -> contents
+        std::map<std::uint32_t, std::uint32_t> array_copies;  // scratch address -> array handle
         std::map<std::uint32_t, std::uint32_t> copies;  // guest scratch copy address -> size
         std::uint32_t scratch_base{}, scratch_size{}, scratch_used{};
         std::vector<std::map<std::uint32_t, std::uint64_t>> fields;  // per object: field id -> raw value

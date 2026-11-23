@@ -180,6 +180,47 @@ void jni_strings() {
           java.string_text(f.r0()) == "from guest", "NewStringUTF");
     check(f.dispatcher.call(f.runtime, slot(169), std::vector<std::uint32_t>{java.env(), 0xe0000abc, 0}, stack, sentinel, 1000).stop == atlan::Stop::service_error, "non-string is rejected");
 }
+void jni_arrays_and_misc() {
+    Fixture f;
+    atlan::JavaBootstrap java(f.runtime, f.dispatcher, {});
+    const auto slot = [&](std::size_t index) { return get32(f.runtime.memory, get32(f.runtime.memory, java.env()) + 4 * static_cast<std::uint32_t>(index)); };
+    const auto invoke = [&](std::size_t index, std::vector<std::uint32_t> args) { args.insert(args.begin(), java.env()); return f.dispatcher.call(f.runtime, slot(index), args, stack, sentinel, 1000); };
+    check(invoke(4, {}).stop == atlan::Stop::returned && f.r0() == 0x10006, "GetVersion");
+    for (std::size_t i : {228u, 15u, 17u}) check(invoke(i, {}).stop == atlan::Stop::returned && f.r0() == 0, "no exception is ever pending");
+    const auto arr = java.new_byte_array({1, 2, 3, 4});
+    check(arr != 0 && java.byte_array(arr)->size() == 4 && !java.byte_array(0x1234), "host byte array");
+    check(invoke(171, {arr}).stop == atlan::Stop::returned && f.r0() == 4, "GetArrayLength");
+    check(invoke(171, {0xe6000abc}).stop == atlan::Stop::service_error, "GetArrayLength rejects a forged array");
+    check(invoke(199 + 1, {arr, 1, 2, data}).stop == atlan::Stop::returned && get32(f.runtime.memory, data) % 65536 == 0x0302, "GetByteArrayRegion");
+    check(invoke(199 + 1, {arr, 3, 2, data}).stop == atlan::Stop::service_error, "region past the end stops");
+    put32(f.runtime.memory, data + 0x10, 0x0a0b0c0d);
+    check(invoke(207 + 1, {arr, 0, 4, data + 0x10}).stop == atlan::Stop::returned && (*java.byte_array(arr))[0] == 0x0d && (*java.byte_array(arr))[3] == 0x0a, "SetByteArrayRegion");
+    check(invoke(184, {arr, data + 0x20}).stop == atlan::Stop::returned, "GetByteArrayElements");
+    const auto copy = f.r0();
+    check(copy >= 0xf4000000 && get32(f.runtime.memory, copy) == 0x0a0b0c0d, "elements copy has the contents");
+    put32(f.runtime.memory, copy, 0x01010101);
+    check(invoke(192, {arr, copy, 2}).stop == atlan::Stop::returned && (*java.byte_array(arr))[0] == 0x0d, "JNI_ABORT discards changes");
+    check(invoke(184, {arr, 0}).stop == atlan::Stop::returned, "second elements copy");
+    const auto copy2 = f.r0();
+    put32(f.runtime.memory, copy2, 0x05050505);
+    check(invoke(192, {arr, copy2, 0}).stop == atlan::Stop::returned && (*java.byte_array(arr))[0] == 5, "mode 0 copies back");
+    check(invoke(192, {arr, copy2, 0}).stop == atlan::Stop::service_error, "double release is rejected");
+    check(invoke(176, {3}).stop == atlan::Stop::returned && java.byte_array(f.r0())->size() == 3, "NewByteArray");
+    check(invoke(176, {0xffffffff}).stop == atlan::Stop::service_error, "negative length is rejected");
+    // GetObjectClass and CallNonvirtual*.
+    put_text(f.runtime.memory, data + 0x100, "pkg/Base");
+    put_text(f.runtime.memory, data + 0x140, "ping");
+    put_text(f.runtime.memory, data + 0x160, "(I)I");
+    const auto cls = java.class_handle("pkg/Base");
+    const auto obj = java.new_object(cls);
+    check(invoke(31, {obj}).stop == atlan::Stop::returned && f.r0() == cls, "GetObjectClass");
+    check(invoke(33, {cls, data + 0x140, data + 0x160}).stop == atlan::Stop::returned, "method id");
+    const auto mid = f.r0();
+    java.register_method("pkg/Base", "ping", "(I)I", [](atlan::JavaBootstrap::MethodCall& c) -> std::optional<std::string> { c.result = c.args.at(0) * 2; return std::nullopt; });
+    check(invoke(49, {obj, mid, 21}).stop == atlan::Stop::returned && f.r0() == 42, "CallIntMethod");
+    check(invoke(79, {obj, cls, mid, 8}).stop == atlan::Stop::returned && f.r0() == 16, "CallNonvirtualIntMethod passes clazz before the id");
+    check(invoke(79, {obj, java.class_handle("pkg/Other"), mid, 8}).stop == atlan::Stop::service_error, "CallNonvirtual class mismatch stops");
+}
 }
 int main() {
     try {
@@ -189,6 +230,7 @@ int main() {
         files();
         properties_and_strings();
         jni_strings();
+        jni_arrays_and_misc();
     } catch (const std::exception& error) {
         std::cerr << "service test failed: " << error.what() << '\n';
         return 1;

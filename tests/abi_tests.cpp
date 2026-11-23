@@ -53,8 +53,8 @@ struct Fixture {
                                          0xe12fff33, 0xe3500000, 0x1a000004, 0xe59d0000, 0xe3500000, 0x0a000001,
                                          0xe59f000c, 0xea000000, 0xe3e00000, 0xe28dd008, 0xe8bd8010, 0x00010006};
         for (unsigned i = 0; i < 18; ++i) put32(runtime.memory, 0x1100 + 4 * i, on_load[i]);
-        // env->NewStringUTF (slot 171, not implemented): ldr r1,[r0]; ldr r1,[r1,#684]; bx r1
-        const std::uint32_t find_class[] = {0xe5901000, 0xe59112ac, 0xe12fff11};
+        // env->NewStringUTF (slot 172, not implemented): ldr r1,[r0]; ldr r1,[r1,#688]; bx r1
+        const std::uint32_t find_class[] = {0xe5901000, 0xe59112b0, 0xe12fff11};
         for (unsigned i = 0; i < 3; ++i) put32(runtime.memory, 0x1300 + 4 * i, find_class[i]);
         runtime.memory.protect(code, 0x2000, atlan::Permissions::read_execute);
         atlan::elf::Image image;
@@ -177,7 +177,7 @@ void jni_bootstrap() {
     check(f.call(get_env, {java.vm(), 0x9000000, 0x10006}).stop == atlan::Stop::service_error, "unwritable output pointer is rejected");
     // An unobserved JNI function stops by name; it is never a silent success.
     r = f.call(0x1300, {java.env()});
-    check(r.stop == atlan::Stop::unresolved_import && r.import == "JNIEnv::GetArrayLength", "unimplemented JNI function stops by name");
+    check(r.stop == atlan::Stop::unresolved_import && r.import == "JNIEnv::NewObjectArray", "unimplemented JNI function stops by name");
     // Class, member and native-method registration through the env table.
     const auto slot = [&](std::size_t index) { return get32(f.runtime.memory, get32(f.runtime.memory, java.env()) + 4 * static_cast<std::uint32_t>(index)); };
     put_text(f.runtime.memory, data + 0x100, "pkg/Thing");
