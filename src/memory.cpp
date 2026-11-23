@@ -52,4 +52,34 @@ bool Memory::read(std::uint32_t address, std::span<std::byte> out) noexcept {
         out[i] = *translate(std::uint64_t{address} + i, MemoryAccess::read);
     return true;
 }
+
+bool Memory::write(std::uint32_t address, std::span<const std::byte> data) noexcept {
+    if (data.size() > (std::uint64_t{1} << 32) - address) return false;
+    for (std::size_t i = 0; i < data.size();) {
+        const auto at = std::uint64_t{address} + i;
+        if (!translate(at, MemoryAccess::write)) return false;
+        i += std::min<std::size_t>(page_size - (at % page_size), data.size() - i);
+    }
+    for (std::size_t i = 0; i < data.size();) {
+        const auto at = std::uint64_t{address} + i;
+        const auto count = std::min<std::size_t>(page_size - (at % page_size), data.size() - i);
+        std::copy_n(data.data() + i, count, translate(at, MemoryAccess::write));
+        i += count;
+    }
+    return true;
+}
+
+void Memory::protect(std::uint32_t base, std::uint64_t size, Permissions permissions) {
+    if (size == 0 || size > (std::uint64_t{1} << 32) - base ||
+        base % page_size != 0 || size % page_size != 0 ||
+        (permissions != Permissions::read && permissions != Permissions::read_write &&
+         permissions != Permissions::read_execute))
+        throw std::invalid_argument("invalid ARM32 protection range");
+    const auto end = std::uint64_t{base} + size;
+    for (std::uint64_t at = base; at < end; at += page_size)
+        if (!pages_.contains(static_cast<std::uint32_t>(at)))
+            throw std::invalid_argument("unmapped ARM32 protection range");
+    for (std::uint64_t at = base; at < end; at += page_size)
+        pages_.at(static_cast<std::uint32_t>(at))->permissions = permissions;
+}
 }

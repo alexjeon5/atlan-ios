@@ -20,7 +20,7 @@ CPU 상태는 R0–R14의 32비트 값, NZCV·Q·GE·ITSTATE, TLS, exclusive mon
 
 | 모듈 | 입력과 출력 | 상태 |
 | --- | --- | --- |
-| ELF 로더 | ELF32 ARM 바이트·의존성 resolver → 게스트 매핑·entry·재배치 | 미구현 |
+| ELF 로더 | ELF32 ARM 바이트·심볼 resolver → 게스트 매핑·export·재배치·생성자 목록 | EABI5·SysV hash·네 가지 REL 재배치 구현. [범위와 제약](elf.md) |
 | Android 호환 계층 | SVC·Bionic import·JNI 호출 → 명시적 호스트 서비스 | 미구현 |
 | Java/DEX 처리 | DEX·native method 연결 → 필요한 Java 객체와 JNI 동작 | 미구현 |
 | iOS 플랫폼 | 수명주기·입력·파일·네트워크·그래픽·오디오 서비스 | 합성 CPU 데모만 연결 |
@@ -28,3 +28,5 @@ CPU 상태는 R0–R14의 32비트 값, NZCV·Q·GE·ITSTATE, TLS, exclusive mon
 | Android ARM64 | 동일 CPU 코어와 별도 플랫폼 서비스 → 보조 타깃 | 조사 예정 |
 
 AOT는 코드와 데이터를 구별하고 간접 분기·예외·자기 수정 코드·주소 매핑을 보존해야 한다. 안전하게 번역할 수 없는 구간은 현재 인터프리터로 되돌리는 구조를 목표로 한다. LLVM에 원본 바이너리를 넘기는 것만으로 해결된다고 가정하지 않는다. 현재 성능 우위를 주장할 측정 자료는 없다.
+
+다음 구현 순서는 scalar ELF 함수 호출 → 필요한 Bionic import → 정적 생성자 → JavaVM/JNI bootstrap → 파일·그래픽·입력 서비스다. 한 단계의 성공이 전체 앱 초기화 성공을 뜻하지 않는다. 앱별 의존성과 호출 결과는 로컬 분석 자료로 보관하며, 공개 회귀 검사는 합성 입력으로 수행한다.

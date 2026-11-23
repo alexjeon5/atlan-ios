@@ -38,6 +38,8 @@ jobs:
       - run: |
           lipo build-macos/atlan-poc -verify_arch arm64 x86_64
           lipo build-macos/runtime-tests -verify_arch arm64 x86_64
+          lipo build-macos/atlan-elf -verify_arch arm64 x86_64
+          lipo build-macos/elf-tests -verify_arch arm64 x86_64
           lipo build-macos/platform/macos/AtlanRuntimeMac.app/Contents/MacOS/AtlanRuntimeMac -verify_arch arm64 x86_64
           cmake --install build-macos --prefix out/macos
           codesign --force --deep --sign - out/macos/AtlanRuntimeMac.app

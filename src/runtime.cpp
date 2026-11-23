@@ -3,6 +3,7 @@
 #include "cpu/arm64/aarch32/guest_key.hpp"
 #include "cpu/arm64/aarch32/semantics.hpp"
 #include <bit>
+#include <stdexcept>
 
 namespace atlan {
 namespace a32 = uml::cpu::arm64::aarch32;
@@ -59,6 +60,30 @@ Result Runtime::run(std::uint64_t budget) noexcept {
     }
     return {Event::budget_exhausted, retired};
 }
+Result Runtime::call(std::uint32_t target, std::span<const std::uint32_t> arguments,
+                     std::uint32_t stack_top, std::uint32_t return_target,
+                     std::uint64_t budget) {
+    if (arguments.size() > 4 || stack_top % 8 != 0 || return_target % 4 != 0 ||
+        (target & ~1U) == return_target ||
+        memory.translate(return_target, MemoryAccess::read) != nullptr)
+        throw std::invalid_argument("invalid scalar AAPCS32 call frame");
+    for (std::size_t i = 0; i < 4; ++i)
+        cpu.registers[i] = i < arguments.size() ? arguments[i] : 0;
+    cpu.registers[13] = stack_top;
+    cpu.registers[14] = return_target;
+    start(target);
+    std::uint64_t retired = 0;
+    while (true) {
+        if (!thumb() && pc() == return_target) return {Event::function_return, retired};
+        if (retired == budget) return {Event::budget_exhausted, retired};
+        auto result = step();
+        retired += result.retired;
+        if (result.event != Event::retired) {
+            result.retired = retired;
+            return result;
+        }
+    }
+}
 const char* event_name(Event event) noexcept {
     switch (event) {
     case Event::retired: return "retired";
@@ -69,6 +94,7 @@ const char* event_name(Event event) noexcept {
     case Event::pc_alignment: return "pc_alignment";
     case Event::unsupported_instruction: return "unsupported_instruction";
     case Event::budget_exhausted: return "budget_exhausted";
+    case Event::function_return: return "function_return";
     }
     return "unknown";
 }
