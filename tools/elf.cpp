@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/android_log.hpp"
 #include "atlan/elf.hpp"
+#include "atlan/files.hpp"
+#include "atlan/heap.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
+#include "atlan/threads.hpp"
+#include <array>
 #include <charconv>
+#include <random>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -51,6 +56,16 @@ int main(int argc, char* argv[]) {
             else if (arg == "--arg" && i + 1 < argc && !calls.empty()) calls.back().args.push_back(number(argv[++i]));
             else throw std::invalid_argument("unknown or incomplete option");
         }
+        // __stack_chk_guard is a data import: the host provides one guest word, never a trap.
+        constexpr std::uint32_t guard_page = 0x6ffff000;
+        std::random_device entropy;
+        const std::uint32_t canary = entropy() & 0xffffff00U;
+        options.resolve = [&](std::string_view name, std::uint8_t) -> std::optional<std::uint32_t> {
+            if (name == "__stack_chk_guard") return guard_page;
+            // Bionic's stdin/stdout/stderr FILE array (3 x 84 bytes); stdio services identify streams by address.
+            if (name == "__sF") return guard_page + 0x100;
+            return std::nullopt;
+        };
         std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
         if (!input) throw std::runtime_error("cannot open input ELF");
         const auto size = input.tellg();
@@ -69,12 +84,26 @@ int main(int argc, char* argv[]) {
         atlan::ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
+        atlan::GuestHeap heap;
+        atlan::install_heap_services(dispatcher, heap);
+        atlan::MutexTable mutexes;
+        mutexes.install(dispatcher);
+        atlan::VirtualFiles files(guard_page + 0x200);
+        files.install(dispatcher);
+        atlan::ThreadKeys thread_keys;
+        thread_keys.install(dispatcher);
         atlan::AndroidLog android_log([&](const atlan::LogEntry& entry) {
             if (log) std::cout << "[android_log " << entry.priority << "] " << entry.tag << ": " << entry.message << '\n';
         });
         android_log.install(dispatcher);
         dispatcher.attach(image);
         runtime.memory = std::move(image.memory);
+        runtime.memory.map(guard_page, atlan::Memory::page_size, atlan::Permissions::read_write);
+        {
+            std::array<std::byte, 4> bytes{};
+            for (unsigned i = 0; i < 4; ++i) bytes[i] = std::byte((canary >> (8 * i)) & 255);
+            if (!runtime.memory.write(guard_page, bytes)) throw std::runtime_error("cannot initialize stack guard");
+        }
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
         std::optional<atlan::JavaBootstrap> java;
         if (jni) java.emplace(runtime, dispatcher, atlan::JavaBootstrap::Config{});
@@ -86,7 +115,7 @@ int main(int argc, char* argv[]) {
                       << " r0=" << runtime.cpu.registers[0] << " retired=" << result.retired
                       << " pc=0x" << std::hex << runtime.pc() << std::dec;
             if (!outcome.message.empty()) std::cout << " service_error=\"" << outcome.message << '"';
-            if (outcome.stop == atlan::Stop::unresolved_import) std::cout << " missing_service=" << outcome.import;
+            if (outcome.stop == atlan::Stop::unresolved_import) std::cout << " missing_service=" << outcome.import << " args=" << runtime.cpu.registers[0] << "," << runtime.cpu.registers[1] << "," << runtime.cpu.registers[2];
             if (outcome.stop == atlan::Stop::service_error) std::cout << " failing_service=" << outcome.import;
             if (result.event != atlan::Event::function_return) {
                 std::cout << " fault=0x" << std::hex << result.address << std::dec;
