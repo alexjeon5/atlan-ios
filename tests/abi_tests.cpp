@@ -211,6 +211,35 @@ void jni_bootstrap() {
     check(r.stop == atlan::Stop::returned && f.runtime.cpu.registers[0] == 0 && java.native_methods().size() == 2 &&
           java.native_methods()[0].address == 0x1001 && java.native_methods()[1].name == "count" && java.native_methods()[1].class_name == "pkg/Thing",
           "RegisterNatives records guest function addresses");
+    // Minimal String instance, global references and local deletion.
+    put_text(f.runtime.memory, data + 0x240, "java/lang/String");
+    put_text(f.runtime.memory, data + 0x280, "<init>");
+    put_text(f.runtime.memory, data + 0x2a0, "()V");
+    put_text(f.runtime.memory, data + 0x2c0, "(I)V");
+    check(f.call(slot(6), {java.env(), data + 0x240}).stop == atlan::Stop::returned, "FindClass String");
+    const auto str_cls = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(f.call(slot(33), {java.env(), str_cls, data + 0x280, data + 0x2a0}).stop == atlan::Stop::returned, "String ctor id");
+    const auto ctor = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(f.call(slot(33), {java.env(), str_cls, data + 0x280, data + 0x2c0}).stop == atlan::Stop::returned, "other ctor id");
+    const auto other_ctor = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    for (std::size_t index : {28u, 29u, 30u}) {
+        r = f.call(slot(index), {java.env(), str_cls, ctor, 0});
+        check(r.stop == atlan::Stop::returned && f.runtime.cpu.registers[0] != 0, "NewObject* creates a String");
+    }
+    check(java.objects().size() == 3 && java.objects()[0] == "java/lang/String", "objects are recorded");
+    const auto obj = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(f.call(slot(29), {java.env(), str_cls, other_ctor, 0}).stop == atlan::Stop::service_error, "unmodelled constructor stops");
+    check(f.call(slot(29), {java.env(), cls, method, 0}).stop == atlan::Stop::service_error, "non-constructor id stops");
+    check(f.call(slot(21), {java.env(), obj}).stop == atlan::Stop::returned, "NewGlobalRef");
+    const auto global = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(global != obj && global != 0 && java.live_global_refs() == 1, "global reference is distinct and counted");
+    check(f.call(slot(21), {java.env(), 0}).stop == atlan::Stop::returned && f.runtime.cpu.registers[0] == 0, "NewGlobalRef(NULL) is NULL");
+    check(f.call(slot(21), {java.env(), 0xe0001000}).stop == atlan::Stop::service_error, "forged reference rejected");
+    check(f.call(slot(23), {java.env(), obj}).stop == atlan::Stop::returned, "DeleteLocalRef accepts a valid reference");
+    check(f.call(slot(23), {java.env(), 0xe0001000}).stop == atlan::Stop::service_error, "DeleteLocalRef rejects a forged reference");
+    check(f.call(slot(22), {java.env(), obj}).stop == atlan::Stop::service_error, "DeleteGlobalRef rejects a non-global");
+    check(f.call(slot(22), {java.env(), global}).stop == atlan::Stop::returned && java.live_global_refs() == 0, "DeleteGlobalRef");
+    check(f.call(slot(22), {java.env(), global}).stop == atlan::Stop::service_error, "double DeleteGlobalRef rejected");
     check(f.call(slot(215), {java.env(), 0xc0001000, data + 0x200, 1}).stop == atlan::Stop::service_error, "RegisterNatives rejects an unknown class");
     bool overlap = false;
     try { atlan::JavaBootstrap again(f.runtime, f.dispatcher, {}); } catch (const std::invalid_argument&) { overlap = true; }

@@ -39,6 +39,15 @@ public:
     // addresses; they are never dereferenceable and never host pointers.
     [[nodiscard]] const std::vector<std::string>& classes() const noexcept { return state_->classes; }
     [[nodiscard]] const std::vector<NativeMethod>& native_methods() const noexcept { return state_->natives; }
+    // Objects created through NewObject*; only the minimal java/lang/String
+    // (empty, via the ()V constructor) exists so far. Handles are opaque.
+    [[nodiscard]] const std::vector<std::string>& objects() const noexcept { return state_->objects; }
+    // Live global references (NewGlobalRef minus DeleteGlobalRef).
+    [[nodiscard]] std::size_t live_global_refs() const noexcept {
+        std::size_t n = 0;
+        for (auto g : state_->globals) n += g != 0;
+        return n;
+    }
     [[nodiscard]] std::uint32_t vm() const noexcept { return vm_; }
     [[nodiscard]] std::uint32_t env() const noexcept { return env_; }
     // Names of table slots, e.g. "JavaVM::GetEnv"; empty for reserved slots.
@@ -49,6 +58,8 @@ private:
         std::vector<std::string> classes;
         std::vector<NativeMethod> natives;
         std::vector<Member> members;
+        std::vector<std::string> objects;  // object class names; index = handle slot
+        std::vector<std::uint32_t> globals;  // referent handle; 0 once deleted
     };
     std::shared_ptr<State> state_ = std::make_shared<State>();
     std::uint32_t vm_{}, env_{};

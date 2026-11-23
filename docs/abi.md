@@ -21,4 +21,8 @@
 - `JNIEnv::GetMethodID` / `GetStaticMethodID` / `GetFieldID` / `GetStaticFieldID`: 클래스 핸들을 확인하고 (종류, 클래스, 이름, 시그니처)를 기록해 불투명 id를 준다. 멤버 존재 여부는 검증하지 않는다.
 - `JNIEnv::RegisterNatives`: `JNINativeMethod` 표를 읽어 전부 유효할 때만 기록한다. 게스트 함수 주소는 Thumb 비트를 보존한다.
 
-Java 객체 모델(`NewObject*`, 문자열, 배열, 예외)은 아직 없다.
+- `JNIEnv::NewObject` / `NewObjectV` / `NewObjectA`: 빈 `java/lang/String`(`()V` 생성자)만 만든다. 다른 클래스·생성자는 오류로 멈춘다.
+- `JNIEnv::NewGlobalRef` / `DeleteGlobalRef`: 클래스·객체 핸들에 대한 별도 전역 참조. 위조·이중 삭제는 오류다.
+- `JNIEnv::DeleteLocalRef`: 핸들만 검증한다. 클래스·객체 테이블은 회수하지 않는다(상한 있음).
+
+문자열 내용, 배열, 예외, 앱 고유 클래스의 인스턴스 등 나머지 Java 객체 모델은 없다. 관찰된 호출이 필요로 할 때만 하나씩 추가한다.

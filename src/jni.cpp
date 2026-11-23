@@ -5,7 +5,7 @@
 
 namespace atlan {
 namespace {
-constexpr std::uint32_t class_handle_base = 0xc0000000, member_handle_base = 0xd0000000;
+constexpr std::uint32_t class_handle_base = 0xc0000000, member_handle_base = 0xd0000000, object_handle_base = 0xe0000000, global_handle_base = 0xe8000000;
 std::vector<std::string> make_native_names() {
     std::vector<std::string> names(4);  // reserved0-3
     const auto add = [&](std::string name) { names.push_back("JNIEnv::" + std::move(name)); };
@@ -92,7 +92,7 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
     for (std::size_t i = 0; i < native_slots; ++i)
         if (!native_names()[i].empty()) (void)dispatcher.bind_trap(native_traps + 4 * static_cast<std::uint32_t>(i), native_names()[i]);
 
-    constexpr std::size_t max_classes = 4096, max_natives = 4096, max_members = 16384, max_name = 256;
+    constexpr std::size_t max_classes = 4096, max_natives = 4096, max_members = 16384, max_objects = 65536, max_globals = 65536, max_name = 256;
     const std::uint32_t env_check = env_;
     const auto state = state_;
     // jclass JNIEnv::FindClass(JNIEnv* env, const char* name): returns an opaque
@@ -181,6 +181,64 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
     bind_member("JNIEnv::GetStaticMethodID", JavaBootstrap::Member::Kind::static_method);
     bind_member("JNIEnv::GetFieldID", JavaBootstrap::Member::Kind::field);
     bind_member("JNIEnv::GetStaticFieldID", JavaBootstrap::Member::Kind::static_field);
+    // NewObject / NewObjectV / NewObjectA(env, clazz, ctor, ...): only the empty
+    // java/lang/String via its ()V constructor is modelled. Any other class or
+    // constructor stops explicitly instead of producing a fake instance.
+    for (const char* function : {"JNIEnv::NewObject", "JNIEnv::NewObjectV", "JNIEnv::NewObjectA"}) {
+        dispatcher.bind(function, [state, env_check, function](ImportCall& call) -> std::optional<std::string> {
+            const std::string label = function;
+            if (call.arg(0) != env_check) return label + " called with a foreign JNIEnv pointer";
+            const auto handle = call.arg(1), ctor = call.arg(2);
+            if (handle < class_handle_base + 4 || (handle - class_handle_base) % 4 != 0 ||
+                (handle - class_handle_base) / 4 > state->classes.size())
+                return label + " class reference is not valid";
+            if (ctor < member_handle_base + 4 || (ctor - member_handle_base) % 4 != 0 ||
+                (ctor - member_handle_base) / 4 > state->members.size())
+                return label + " constructor id is not valid";
+            const auto& cls = state->classes[(handle - class_handle_base) / 4 - 1];
+            const auto& member = state->members[(ctor - member_handle_base) / 4 - 1];
+            if (member.kind != JavaBootstrap::Member::Kind::method || member.class_name != cls || member.name != "<init>")
+                return label + " method id is not a constructor of the class";
+            if (cls != "java/lang/String" || member.signature != "()V")
+                return label + " does not model " + cls + "." + member.signature;
+            if (state->objects.size() >= max_objects) return label + " object table is full";
+            state->objects.push_back(cls);
+            call.set_result(object_handle_base + 4 * static_cast<std::uint32_t>(state->objects.size()));
+            return std::nullopt;
+        });
+    }
+    const auto referent_ok = [state](std::uint32_t h) {
+        const auto in = [h](std::uint32_t base, std::size_t count) { return h >= base + 4 && (h - base) % 4 == 0 && (h - base) / 4 <= count; };
+        return in(class_handle_base, state->classes.size()) || in(object_handle_base, state->objects.size());
+    };
+    // jobject NewGlobalRef(env, obj): a distinct reference to the same class/object.
+    dispatcher.bind("JNIEnv::NewGlobalRef", [state, env_check, referent_ok](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::NewGlobalRef called with a foreign JNIEnv pointer";
+        if (call.arg(1) == 0) { call.set_result(0); return std::nullopt; }  // NewGlobalRef(NULL) is NULL
+        if (!referent_ok(call.arg(1))) return "JNIEnv::NewGlobalRef reference is not valid";
+        if (state->globals.size() >= max_globals) return "JNIEnv::NewGlobalRef reference table is full";
+        state->globals.push_back(call.arg(1));
+        call.set_result(global_handle_base + 4 * static_cast<std::uint32_t>(state->globals.size()));
+        return std::nullopt;
+    });
+    // void DeleteGlobalRef(env, globalRef): deleting twice or a non-global is an error.
+    dispatcher.bind("JNIEnv::DeleteGlobalRef", [state, env_check](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::DeleteGlobalRef called with a foreign JNIEnv pointer";
+        const auto h = call.arg(1);
+        if (h == 0) return std::nullopt;
+        if (h < global_handle_base + 4 || (h - global_handle_base) % 4 != 0 || (h - global_handle_base) / 4 > state->globals.size() ||
+            state->globals[(h - global_handle_base) / 4 - 1] == 0)
+            return "JNIEnv::DeleteGlobalRef reference is not a live global reference";
+        state->globals[(h - global_handle_base) / 4 - 1] = 0;
+        return std::nullopt;
+    });
+    // void DeleteLocalRef(env, localRef): validates the reference. Class and object
+    // table entries are not reclaimed (bounded tables), so deletion changes nothing else.
+    dispatcher.bind("JNIEnv::DeleteLocalRef", [env_check, referent_ok](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::DeleteLocalRef called with a foreign JNIEnv pointer";
+        if (call.arg(1) != 0 && !referent_ok(call.arg(1))) return "JNIEnv::DeleteLocalRef reference is not valid";
+        return std::nullopt;
+    });
     // jint JavaVM::GetEnv(JavaVM* vm, void** penv, jint version)
     const std::uint32_t vm = vm_, env = env_;
     dispatcher.bind("JavaVM::GetEnv", [vm, env](ImportCall& call) -> std::optional<std::string> {
