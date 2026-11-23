@@ -26,3 +26,7 @@ Linux ARM64에서 CPU 코어를 실행한 결과는 iOS 기기 검증을 대체�
 - 위치 같은 호스트 서비스(CoreLocation)는 `shell` 계층에 서비스 자리만 두고 구현하지 않았다.
 
 CI는 `Release-iphoneos` 앱을 `Payload/`로 압축한 서명 없는 IPA(`atlan-runtime-ios-unsigned`)를 아티팩트로 올린다. 사이드로딩 도구(iloader 등)로 서명·설치한다.
+
+## 화면
+
+가로 모드 전용(`LandscapeLeft/Right`)이며 iPhone·iPad 모두 지원한다(`TARGETED_DEVICE_FAMILY` 1,2, iPad는 가로 전용을 위해 `UIRequiresFullScreen`). 렌더링 해상도의 기본값은 기기 실제 픽셀(points × `nativeScale`)이고, 발열 대비 내부 해상도 배율은 `shell/render_config.hpp`의 `render_size`에서 0.25~1.0으로 줄일 수 있게 자리만 두었다(UI 옵션은 아직 없다). 그래픽 서비스(M4) 전까지 이 값은 쓰이지 않는다.

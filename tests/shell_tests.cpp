@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/data_file.hpp"
+#include "shell/render_config.hpp"
 #include "shell/session.hpp"
 #include <array>
 #include <cstdio>
@@ -136,6 +137,9 @@ int main() {
     try {
         scratch = fs::temp_directory_path() / ("atlan-shell-" + std::to_string(::getpid()));
         fs::create_directories(scratch);
+        static_assert(atlan::shell::render_size(852, 393, 3).width == 2556);
+        static_assert(atlan::shell::render_size(852, 393, 3, 0.5).height == 590);
+        static_assert(atlan::shell::render_size(852, 393, 3, 0.01).width == 639);
         data_files();
         sessions();
         fs::remove_all(scratch);
