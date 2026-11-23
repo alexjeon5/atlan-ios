@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "atlan/heap.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/lifetime.hpp"
 #include <array>
@@ -26,12 +27,15 @@ std::uint32_t get32(atlan::Memory& memory, std::uint32_t at) {
 constexpr std::uint32_t code = 0x1000, stack = 0x80000, sentinel = 0xffff0000;
 constexpr std::uint32_t atexit_aeabi = 0xf0000000, atexit_cxa = 0xf0000010, finalize = 0xf0000020,
                         unknown = 0xf0000030, memset_trap = 0xf0000050, clock_trap = 0xf0000060, strlen_trap = 0xf0000070, log_word = 0x4000, dtor_log = 0x2000, dtor_loop = 0x2040,
-                        dtor_thumb = 0x2101, atexit_data = 0xf0000040;
+                        dtor_thumb = 0x2101, atexit_data = 0xf0000040,
+                        malloc_trap = 0xf0000080, free_trap = 0xf0000090, calloc_trap = 0xf00000a0,
+                        realloc_trap = 0xf00000b0, strcpy_trap = 0xf00000c0;
 
 struct Fixture {
     atlan::Runtime runtime;
     atlan::ImportDispatcher dispatcher;
     atlan::ObjectLifetime lifetime;
+    atlan::GuestHeap heap{0x20000000, 4U * 1024 * 1024};
     Fixture() {
         runtime.memory.map(code, 0x2000, atlan::Permissions::read_write);
         runtime.memory.map(0x4000, 0x1000, atlan::Permissions::read_write);
@@ -47,10 +51,13 @@ struct Fixture {
         image.trapped_imports = {{"__aeabi_atexit", atexit_aeabi, 2}, {"__cxa_atexit", atexit_cxa, 2},
                                  {"__cxa_finalize", finalize, 2}, {"__never_registered", unknown, 2},
                                  {"data_symbol", atexit_data, 1},
-                                 {"memset", memset_trap, 2}, {"clock_gettime", clock_trap, 2}, {"strlen", strlen_trap, 2}};
+                                 {"memset", memset_trap, 2}, {"clock_gettime", clock_trap, 2}, {"strlen", strlen_trap, 2},
+                                 {"malloc", malloc_trap, 2}, {"free", free_trap, 2}, {"calloc", calloc_trap, 2},
+                                 {"realloc", realloc_trap, 2}, {"strcpy", strcpy_trap, 2}};
         dispatcher.attach(image);
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
+        atlan::install_heap_services(dispatcher, heap);
     }
     atlan::CallOutcome call(std::uint32_t target, std::initializer_list<std::uint32_t> args,
                             std::uint64_t budget = 10000) {
@@ -128,6 +135,55 @@ void libc() {
     check(f.call(clock_trap, {2, 0x4200}).stop == atlan::Stop::service_error, "unsupported clock rejected");
     check(f.call(clock_trap, {1, 0x9000000}).stop == atlan::Stop::service_error, "clock_gettime faults on bad pointer");
 }
+void heap_and_strings() {
+    Fixture f;
+    check(f.call(malloc_trap, {10}).stop == atlan::Stop::returned, "malloc returns");
+    const auto a = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(a == 0x20000000 && a % 16 == 0, "first block is aligned at the heap base");
+    f.call(malloc_trap, {0});
+    const auto b = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(b == a + 16, "malloc(0) returns a distinct block");
+    put32(f.runtime.memory, a, 0x11223344);
+    check(f.call(realloc_trap, {a, 100}).stop == atlan::Stop::returned, "realloc grows");
+    const auto c = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(c != a && get32(f.runtime.memory, c) == 0x11223344, "realloc preserves contents when moving");
+    check(f.heap.block_size(a) == 0, "moved realloc frees the old block");
+    f.call(realloc_trap, {c, 8});
+    check(f.runtime.cpu.registers[0] == c, "shrinking realloc keeps the block");
+    check(f.call(free_trap, {c}).stop == atlan::Stop::returned, "free");
+    check(f.call(free_trap, {c}).stop == atlan::Stop::service_error, "double free is reported");
+    check(f.call(free_trap, {0x20000001}).stop == atlan::Stop::service_error, "interior pointer free is reported");
+    check(f.call(free_trap, {0}).stop == atlan::Stop::returned, "free(NULL) is a no-op");
+    f.call(calloc_trap, {4, 8});
+    const auto d = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(d == c, "freed block is reused first-fit");
+    f.call(malloc_trap, {16}); const auto e = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    put32(f.runtime.memory, e, 0xffffffff); (void)f.call(free_trap, {e});
+    f.call(calloc_trap, {4, 4});
+    check(f.runtime.cpu.registers[0] == e && get32(f.runtime.memory, e) == 0, "calloc clears reused memory");
+    f.call(calloc_trap, {0x10000, 0x10000});
+    check(f.runtime.cpu.registers[0] == 0, "calloc overflow returns NULL");
+    f.call(malloc_trap, {0x40000000});
+    check(f.runtime.cpu.registers[0] == 0, "oversized malloc returns NULL");
+    f.call(realloc_trap, {0, 32});
+    check(f.runtime.cpu.registers[0] != 0, "realloc(NULL) allocates");
+    f.call(realloc_trap, {d, 0});
+    check(f.runtime.cpu.registers[0] == 0 && f.heap.block_size(d) == 0, "realloc(p,0) frees");
+    check(f.call(realloc_trap, {0x20000001, 4}).stop == atlan::Stop::service_error, "realloc of a non-block is reported");
+    // Coalescing: two adjacent frees satisfy a larger request in place.
+    Fixture g;
+    g.call(malloc_trap, {32}); const auto p = static_cast<std::uint32_t>(g.runtime.cpu.registers[0]);
+    g.call(malloc_trap, {32}); const auto q = static_cast<std::uint32_t>(g.runtime.cpu.registers[0]);
+    g.call(malloc_trap, {16});
+    (void)g.call(free_trap, {q}); (void)g.call(free_trap, {p});
+    g.call(malloc_trap, {64});
+    check(g.runtime.cpu.registers[0] == p, "adjacent free blocks coalesce");
+    // strcpy
+    put32(g.runtime.memory, 0x4300, 0x00636261);
+    check(g.call(strcpy_trap, {p, 0x4300}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == p &&
+          get32(g.runtime.memory, p) == 0x00636261, "strcpy copies the terminator");
+    check(g.call(strcpy_trap, {0x9000000, 0x4300}).stop == atlan::Stop::service_error, "strcpy to unmapped memory fails");
+}
 }
 int main() {
     try {
@@ -135,6 +191,7 @@ int main() {
         thumb_destructor();
         explicit_failures();
         libc();
+        heap_and_strings();
     } catch (const std::exception& error) {
         std::cerr << "import test failed: " << error.what() << '\n';
         return 1;

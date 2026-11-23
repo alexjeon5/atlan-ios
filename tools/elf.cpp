@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/elf.hpp"
+#include "atlan/heap.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
@@ -62,6 +63,8 @@ int main(int argc, char* argv[]) {
         atlan::ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
+        atlan::GuestHeap heap;
+        atlan::install_heap_services(dispatcher, heap);
         dispatcher.attach(image);
         runtime.memory = std::move(image.memory);
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);

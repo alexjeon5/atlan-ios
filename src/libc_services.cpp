@@ -31,6 +31,25 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         }
         return "strlen exceeds service bound";
     });
+    // char* strcpy(char* dest, const char* src): copies through the terminator.
+    dispatcher.bind("strcpy", [](ImportCall& call) -> std::optional<std::string> {
+        const auto dest = call.arg(0), src = call.arg(1);
+        auto& memory = call.runtime().memory;
+        std::vector<std::byte> text;
+        for (std::uint32_t i = 0; i < max_block; ++i) {
+            std::byte value{};
+            if (std::uint64_t{src} + i > 0xffffffffULL || !memory.read(src + i, std::span<std::byte>(&value, 1)))
+                return "strcpy read left mapped guest memory";
+            text.push_back(value);
+            if (value == std::byte{0}) {
+                if (std::uint64_t{dest} + text.size() > 0x100000000ULL || !memory.write(dest, text))
+                    return "strcpy guest memory fault";
+                call.set_result(dest);
+                return std::nullopt;
+            }
+        }
+        return "strcpy exceeds service bound";
+    });
     // int clock_gettime(clockid_t clock, struct timespec* out), 32-bit Linux ABI.
     // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) are supported.
     dispatcher.bind("clock_gettime", [](ImportCall& call) -> std::optional<std::string> {
