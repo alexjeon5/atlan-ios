@@ -173,7 +173,7 @@ void exits() {
     auto udf = program(std::array<std::uint32_t, 1>{0xe7f000f0});
     check(udf.step().event == Event::undefined_instruction && udf.pc() == 0x1000,
           "undefined instruction preserves PC");
-    auto vector = program(std::array<std::uint32_t, 1>{0xee000a10}); // vmov s0,r0
+    auto vector = program(std::array<std::uint32_t, 1>{0xf2200840}); // vadd.i32 q0,q0,q0 (Advanced SIMD)
     check(vector.step().event == Event::unsupported_instruction && vector.pc() == 0x1000,
           "unimported VFP instruction fails explicitly");
 }

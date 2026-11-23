@@ -15,6 +15,7 @@ struct Result {
     std::uint32_t syndrome{};
     MemoryAccess access{MemoryAccess::read};
     bool alignment{};
+    const char* detail{};  // static reason for unsupported_instruction, when known
 };
 
 // One CPU and memory instance belong to one host thread. SVC returns to the

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/runtime.hpp"
+#include "atlan/vfp.hpp"
 #include "cpu/arm64/aarch32/guest_key.hpp"
 #include "cpu/arm64/aarch32/semantics.hpp"
 #include <bit>
+#include <cstring>
 #include <stdexcept>
 
 namespace atlan {
@@ -32,6 +34,23 @@ void Runtime::start(std::uint32_t target) noexcept {
 std::uint32_t Runtime::pc() const noexcept { return a32::key_pc(cpu.pc); }
 bool Runtime::thumb() const noexcept { return a32::key_is_thumb(cpu.pc); }
 Result Runtime::step() noexcept {
+    if (!a32::key_is_thumb(cpu.pc) && a32::key_is_canonical(cpu.pc)) {
+        // The integer core does not execute VFP; route those A32 words first.
+        std::uint32_t word{};
+        const std::uint32_t at = a32::key_pc(cpu.pc);
+        if (const auto* host = memory.translate(at, MemoryAccess::execute)) {
+            std::memcpy(&word, host, 4);
+            const auto done = vfp::execute_a32(cpu, memory, word, at);
+            switch (done.kind) {
+            case vfp::Execution::Kind::not_vfp: break;
+            case vfp::Execution::Kind::retired: return {Event::retired, 1};
+            case vfp::Execution::Kind::fault:
+                return {Event::memory_fault, 0, done.address, 0, done.access, done.alignment};
+            case vfp::Execution::Kind::unsupported:
+                return {Event::unsupported_instruction, 0, at, word, MemoryAccess::execute, false, done.reason};
+            }
+        }
+    }
     MemoryAdapter adapter(memory, cpu);
     const auto result = a32::step_a32(cpu, adapter, a32::Profile{a32::FeatureSet{}});
     Event event;

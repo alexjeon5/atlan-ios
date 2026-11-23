@@ -15,6 +15,7 @@ struct CpuState {
     std::array<std::uint64_t, 16> registers{};
     std::uint64_t pc{};
     std::uint32_t nzcv{};
+    std::uint32_t fpscr{};  // VFP status and control; see docs/vfp.md
     std::array<VectorRegister, 16> vectors{};
     std::uint64_t tls{};
     std::uint32_t a32_ge_mask{};
