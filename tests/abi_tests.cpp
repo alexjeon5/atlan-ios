@@ -240,6 +240,40 @@ void jni_bootstrap() {
     check(f.call(slot(22), {java.env(), obj}).stop == atlan::Stop::service_error, "DeleteGlobalRef rejects a non-global");
     check(f.call(slot(22), {java.env(), global}).stop == atlan::Stop::returned && java.live_global_refs() == 0, "DeleteGlobalRef");
     check(f.call(slot(22), {java.env(), global}).stop == atlan::Stop::service_error, "double DeleteGlobalRef rejected");
+    // Opaque host objects of any class, field store and registered methods.
+    check(f.call(slot(33), {java.env(), cls, data + 0x280, data + 0x2a0}).stop == atlan::Stop::returned, "Thing ctor id");
+    const auto thing_ctor = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(f.call(slot(28), {java.env(), cls, thing_ctor}).stop == atlan::Stop::returned, "app-style class instance");
+    const auto thing = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    put_text(f.runtime.memory, data + 0x300, "J");
+    check(f.call(slot(94), {java.env(), cls, data + 0x1c0, data + 0x1e0}).stop == atlan::Stop::returned, "int field id");
+    const auto ifield = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    check(f.call(slot(100), {java.env(), thing, ifield}).stop == atlan::Stop::returned && f.runtime.cpu.registers[0] == 0, "unset field reads zero");
+    check(f.call(slot(109), {java.env(), thing, ifield, 77}).stop == atlan::Stop::returned, "SetIntField");
+    check(f.call(slot(100), {java.env(), thing, ifield}).stop == atlan::Stop::returned && f.runtime.cpu.registers[0] == 77, "GetIntField reads the stored value");
+    check(f.call(slot(100), {java.env(), obj, ifield}).stop == atlan::Stop::service_error, "field of another class is rejected");
+    check(f.call(slot(100), {java.env(), 0xe0000abc, ifield}).stop == atlan::Stop::service_error, "forged object is rejected");
+    check(f.call(slot(94), {java.env(), cls, data + 0x180, data + 0x300}).stop == atlan::Stop::returned, "long field id");
+    const auto jfield = static_cast<std::uint32_t>(f.runtime.cpu.registers[0]);
+    // SetLongField: jlong on the stack because r3 is skipped for doubleword alignment.
+    check(f.call(slot(110), {java.env(), thing, jfield, 0xbad, 0x11112222, 0x33334444}).stop == atlan::Stop::returned, "SetLongField");
+    check(f.call(slot(101), {java.env(), thing, jfield}).stop == atlan::Stop::returned && f.runtime.cpu.registers[0] == 0x11112222 &&
+          f.runtime.cpu.registers[1] == 0x33334444, "GetLongField returns r0:r1");
+    // Registered method "run(I)V" on Thing: unregistered -> named stop, registered -> runs.
+    auto run_id = [&]() { check(f.call(slot(33), {java.env(), cls, data + 0x180, data + 0x1a0}).stop == atlan::Stop::returned, "run id"); return static_cast<std::uint32_t>(f.runtime.cpu.registers[0]); }();
+    r = f.call(slot(61), {java.env(), thing, run_id, 5});
+    check(r.stop == atlan::Stop::service_error && r.message.find("no host implementation for pkg/Thing.run(I)V") != std::string::npos, "unregistered method stops by name");
+    std::uint64_t seen{};
+    check(java.register_method("pkg/Thing", "run", "(I)V", [&](atlan::JavaBootstrap::MethodCall& c) -> std::optional<std::string> { seen = c.args.at(0) + 1000ULL * c.receiver; return std::nullopt; }), "register method");
+    check(!java.register_method("pkg/Thing", "run", "(I)V", [](atlan::JavaBootstrap::MethodCall&) { return std::nullopt; }), "duplicate registration refused");
+    r = f.call(slot(61), {java.env(), thing, run_id, 5});
+    check(r.stop == atlan::Stop::returned && seen == 5 + 1000ULL * thing, "CallVoidMethod runs the host method with its arguments");
+    put32(f.runtime.memory, data + 0x700, 9);
+    check(f.call(slot(62), {java.env(), thing, run_id, data + 0x700}).stop == atlan::Stop::returned && seen == 9 + 1000ULL * thing, "CallVoidMethodV reads the va_list");
+    put64(f.runtime.memory, data + 0x710, 11);
+    check(f.call(slot(63), {java.env(), thing, run_id, data + 0x710}).stop == atlan::Stop::returned && seen == 11 + 1000ULL * thing, "CallVoidMethodA reads jvalues");
+    check(f.call(slot(49), {java.env(), thing, run_id, 5}).stop == atlan::Stop::service_error, "return type mismatch stops");
+    check(f.call(slot(61), {java.env(), obj, run_id, 5}).stop == atlan::Stop::service_error, "receiver of another class stops");
     check(f.call(slot(215), {java.env(), 0xc0001000, data + 0x200, 1}).stop == atlan::Stop::service_error, "RegisterNatives rejects an unknown class");
     bool overlap = false;
     try { atlan::JavaBootstrap again(f.runtime, f.dispatcher, {}); } catch (const std::invalid_argument&) { overlap = true; }

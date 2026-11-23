@@ -21,8 +21,10 @@
 - `JNIEnv::GetMethodID` / `GetStaticMethodID` / `GetFieldID` / `GetStaticFieldID`: 클래스 핸들을 확인하고 (종류, 클래스, 이름, 시그니처)를 기록해 불투명 id를 준다. 멤버 존재 여부는 검증하지 않는다.
 - `JNIEnv::RegisterNatives`: `JNINativeMethod` 표를 읽어 전부 유효할 때만 기록한다. 게스트 함수 주소는 Thumb 비트를 보존한다.
 
-- `JNIEnv::NewObject` / `NewObjectV` / `NewObjectA`: 빈 `java/lang/String`(`()V` 생성자)만 만든다. 다른 클래스·생성자는 오류로 멈춘다.
+- `JNIEnv::NewObject` / `NewObjectV` / `NewObjectA`: `()V` 생성자로 어떤 클래스든 **불투명 호스트 객체**(클래스 이름 + 필드 저장소)를 만든다. Java 코드는 실행하지 않으며, 인자가 있는 생성자는 오류로 멈춘다.
+- `Get<T>Field` / `Set<T>Field`: 호스트 객체의 필드 저장소를 읽고 쓴다. 쓰지 않은 필드는 0이다. 객체와 필드 id의 클래스가 다르면 오류다. `jlong`/`jdouble`은 r3를 건너뛰어 스택으로 오고 r0:r1로 반환한다.
+- `Call<T>Method{,V,A}`와 `CallStatic<T>Method{,V,A}`: `JavaBootstrap::register_method`로 호스트가 등록한 (클래스, 이름, 시그니처)만 실행한다. 인자는 시그니처에 따라 가변 인자·`va_list`·`jvalue[]`에서 읽는다. 등록되지 않았으면 `JNIEnv::CallVoidMethod: no host implementation for …`처럼 이름을 붙여 멈춘다. `CallNonvirtual*`은 아직 없다.
 - `JNIEnv::NewGlobalRef` / `DeleteGlobalRef`: 클래스·객체 핸들에 대한 별도 전역 참조. 위조·이중 삭제는 오류다.
 - `JNIEnv::DeleteLocalRef`: 핸들만 검증한다. 클래스·객체 테이블은 회수하지 않는다(상한 있음).
 
-문자열 내용, 배열, 예외, 앱 고유 클래스의 인스턴스 등 나머지 Java 객체 모델은 없다. 관찰된 호출이 필요로 할 때만 하나씩 추가한다.
+문자열 내용, 배열, 예외 등 나머지 Java 객체 모델은 없다. 관찰된 호출이 필요로 할 때만 하나씩 추가한다.
