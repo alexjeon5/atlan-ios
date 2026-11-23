@@ -109,6 +109,12 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         call.set_result(dest);
         return std::nullopt;
     });
+    // long sysconf(int name): only _SC_PAGESIZE (39 in Bionic ARM) is modelled; other names stop explicitly.
+    dispatcher.bind("sysconf", [](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != 39) return "sysconf name " + std::to_string(call.arg(0)) + " is not modelled";
+        call.set_result(Memory::page_size);
+        return std::nullopt;
+    });
     // char* strcat(char* dest, const char* src): appends through the terminator.
     dispatcher.bind("strcat", [](ImportCall& call) -> std::optional<std::string> {
         const auto dest = call.arg(0), src = call.arg(1);

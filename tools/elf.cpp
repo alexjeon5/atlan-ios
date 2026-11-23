@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/elf.hpp"
+#include "atlan/files.hpp"
 #include "atlan/heap.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/lifetime.hpp"
@@ -80,6 +81,8 @@ int main(int argc, char* argv[]) {
         atlan::install_heap_services(dispatcher, heap);
         atlan::MutexTable mutexes;
         mutexes.install(dispatcher);
+        atlan::VirtualFiles files(guard_page + 0x200);
+        files.install(dispatcher);
         atlan::ThreadKeys thread_keys;
         thread_keys.install(dispatcher);
         dispatcher.attach(image);
@@ -99,7 +102,7 @@ int main(int argc, char* argv[]) {
                       << " r0=" << runtime.cpu.registers[0] << " retired=" << result.retired
                       << " pc=0x" << std::hex << runtime.pc() << std::dec;
             if (!outcome.message.empty()) std::cout << " service_error=\"" << outcome.message << '"';
-            if (outcome.stop == atlan::Stop::unresolved_import) std::cout << " missing_service=" << outcome.import;
+            if (outcome.stop == atlan::Stop::unresolved_import) std::cout << " missing_service=" << outcome.import << " args=" << runtime.cpu.registers[0] << "," << runtime.cpu.registers[1] << "," << runtime.cpu.registers[2];
             if (outcome.stop == atlan::Stop::service_error) std::cout << " failing_service=" << outcome.import;
             if (result.event != atlan::Event::function_return) {
                 std::cout << " fault=0x" << std::hex << result.address << std::dec;
