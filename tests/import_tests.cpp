@@ -31,13 +31,17 @@ constexpr std::uint32_t atexit_aeabi = 0xf0000000, atexit_cxa = 0xf0000010, fina
                         dtor_thumb = 0x2101, atexit_data = 0xf0000040,
                         malloc_trap = 0xf0000080, free_trap = 0xf0000090, calloc_trap = 0xf00000a0,
                         realloc_trap = 0xf00000b0, strcpy_trap = 0xf00000c0, lock_trap = 0xf00000d0, unlock_trap = 0xf00000e0,
-                        attr_init_trap = 0xf00000f0, attr_type_trap = 0xf0000100, mutex_init_trap = 0xf0000110;
+                        attr_init_trap = 0xf00000f0, attr_type_trap = 0xf0000100, mutex_init_trap = 0xf0000110,
+                        memcpy_trap = 0xf0000120, once_trap = 0xf0000130, key_create_trap = 0xf0000140,
+                        setspecific_trap = 0xf0000150, getspecific_trap = 0xf0000160, isalpha_trap = 0xf0000170,
+                        ispunct_trap = 0xf0000180, wcslen_trap = 0xf0000190, wmemmove_trap = 0xf00001a0;
 
 struct Fixture {
     atlan::Runtime runtime;
     atlan::ImportDispatcher dispatcher;
     atlan::ObjectLifetime lifetime;
     atlan::MutexTable mutexes;
+    atlan::ThreadKeys keys;
     atlan::GuestHeap heap{0x20000000, 4U * 1024 * 1024};
     Fixture() {
         runtime.memory.map(code, 0x2000, atlan::Permissions::read_write);
@@ -59,12 +63,17 @@ struct Fixture {
                                  {"realloc", realloc_trap, 2}, {"strcpy", strcpy_trap, 2},
                                  {"pthread_mutex_lock", lock_trap, 2}, {"pthread_mutex_unlock", unlock_trap, 2},
                                  {"pthread_mutexattr_init", attr_init_trap, 2}, {"pthread_mutexattr_settype", attr_type_trap, 2},
-                                 {"pthread_mutex_init", mutex_init_trap, 2}};
+                                 {"pthread_mutex_init", mutex_init_trap, 2},
+                                 {"memcpy", memcpy_trap, 2}, {"pthread_once", once_trap, 2}, {"pthread_key_create", key_create_trap, 2},
+                                 {"pthread_setspecific", setspecific_trap, 2}, {"pthread_getspecific", getspecific_trap, 2},
+                                 {"isalpha", isalpha_trap, 2}, {"ispunct", ispunct_trap, 2}, {"wcslen", wcslen_trap, 2},
+                                 {"wmemmove", wmemmove_trap, 2}};
         dispatcher.attach(image);
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
         atlan::install_heap_services(dispatcher, heap);
         mutexes.install(dispatcher);
+        keys.install(dispatcher);
     }
     atlan::CallOutcome call(std::uint32_t target, std::initializer_list<std::uint32_t> args,
                             std::uint64_t budget = 10000) {
@@ -203,6 +212,30 @@ void heap_and_strings() {
     (void)g.call(lock_trap, {0x4700});
     check(g.call(lock_trap, {0x4700}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == 35, "error-checking relock returns EDEADLK");
     check(g.call(attr_type_trap, {0x4500, 9}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == 22, "invalid type returns EINVAL");
+    put32(g.runtime.memory, 0x4800, 0x04030201);
+    check(g.call(memcpy_trap, {0x4801, 0x4800, 3}).stop == atlan::Stop::returned && get32(g.runtime.memory, 0x4800) == 0x03020101,
+          "memcpy handles overlapping ranges like memmove");
+    check(g.call(memcpy_trap, {0x4800, 0x9000000, 4}).stop == atlan::Stop::service_error, "memcpy from unmapped memory fails");
+    put32(g.runtime.memory, 0x4900, 0);
+    check(g.call(once_trap, {0x4900, 0x2018}).stop == atlan::Stop::service_error && get32(g.runtime.memory, 0x4900) == 1,
+          "pthread_once whose routine faults is reported and not marked done");
+    put32(g.runtime.memory, 0x4904, 2);
+    check(g.call(once_trap, {0x4904, 0}).stop == atlan::Stop::returned, "completed pthread_once skips the routine");
+    check(g.call(key_create_trap, {0x4a00, 0}).stop == atlan::Stop::returned && get32(g.runtime.memory, 0x4a00) == 0, "first key is 0");
+    (void)g.call(setspecific_trap, {0, 0x1234});
+    (void)g.call(getspecific_trap, {0});
+    check(g.runtime.cpu.registers[0] == 0x1234, "thread key stores a value");
+    (void)g.call(getspecific_trap, {7});
+    check(g.runtime.cpu.registers[0] == 0, "invalid key reads NULL");
+    check(g.call(setspecific_trap, {7, 1}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == 22, "invalid key set returns EINVAL");
+    (void)g.call(isalpha_trap, {'q'}); check(g.runtime.cpu.registers[0] == 1, "isalpha letter");
+    (void)g.call(isalpha_trap, {'1'}); check(g.runtime.cpu.registers[0] == 0, "isalpha digit");
+    (void)g.call(isalpha_trap, {0xffffffff}); check(g.runtime.cpu.registers[0] == 0, "EOF is not a character");
+    (void)g.call(ispunct_trap, {'!'}); check(g.runtime.cpu.registers[0] == 1, "ispunct");
+    put32(g.runtime.memory, 0x4b00, 0x41); put32(g.runtime.memory, 0x4b04, 0x42); put32(g.runtime.memory, 0x4b08, 0);
+    (void)g.call(wcslen_trap, {0x4b00}); check(g.runtime.cpu.registers[0] == 2, "wcslen counts 32-bit characters");
+    (void)g.call(wmemmove_trap, {0x4b04, 0x4b00, 2});
+    check(get32(g.runtime.memory, 0x4b04) == 0x41 && get32(g.runtime.memory, 0x4b08) == 0x42, "wmemmove counts wide characters");
     // strcpy
     put32(g.runtime.memory, 0x4300, 0x00636261);
     check(g.call(strcpy_trap, {p, 0x4300}).stop == atlan::Stop::returned && g.runtime.cpu.registers[0] == p &&

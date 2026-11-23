@@ -19,6 +19,24 @@ bool read_word(Memory& memory, std::uint32_t at, std::uint32_t& value) {
 }
 }
 void MutexTable::install(ImportDispatcher& dispatcher) {
+    // int pthread_once(pthread_once_t*, void (*init)(void)): 0 = not run, 1 = running, 2 = done.
+    dispatcher.bind("pthread_once", [](ImportCall& call) -> std::optional<std::string> {
+        const auto control = call.arg(0), routine = call.arg(1);
+        auto& memory = call.runtime().memory;
+        std::uint32_t state = 0;
+        if (!read_word(memory, control, state)) return "pthread_once could not read the control word";
+        if (state == 2) { call.set_result(0); return std::nullopt; }
+        if (state == 1) return "pthread_once re-entered by its own init routine (deadlock)";
+        if (routine == 0) return "pthread_once with a null init routine";
+        if (!write_word(memory, control, 1)) return "pthread_once guest memory fault";
+        const auto outcome = call.dispatcher().call_back(call.runtime(), routine, {});
+        if (outcome.stop != Stop::returned)
+            return "pthread_once init routine did not return" +
+                   (outcome.import.empty() ? std::string() : " (import " + outcome.import + ")");
+        if (!write_word(memory, control, 2)) return "pthread_once guest memory fault";
+        call.set_result(0);
+        return std::nullopt;
+    });
     // int pthread_mutexattr_init(pthread_mutexattr_t*)
     dispatcher.bind("pthread_mutexattr_init", [](ImportCall& call) -> std::optional<std::string> {
         if (!write_word(call.runtime().memory, call.arg(0), 0)) return "pthread_mutexattr_init guest memory fault";
@@ -80,6 +98,39 @@ void MutexTable::install(ImportDispatcher& dispatcher) {
             return "pthread_mutex_unlock of a mutex that is not held";
         }
         --found->second.count;
+        call.set_result(0);
+        return std::nullopt;
+    });
+}
+
+void ThreadKeys::install(ImportDispatcher& dispatcher) {
+    // int pthread_key_create(pthread_key_t* key, void (*destructor)(void*))
+    dispatcher.bind("pthread_key_create", [this](ImportCall& call) -> std::optional<std::string> {
+        std::uint32_t index = 0;
+        while (index < keys_.size() && keys_[index].live) ++index;
+        if (index == max_keys) { call.set_result(11); return std::nullopt; }  // EAGAIN
+        if (index == keys_.size()) keys_.emplace_back();
+        if (!write_word(call.runtime().memory, call.arg(0), index)) return "pthread_key_create guest memory fault";
+        keys_[index] = {true, 0, call.arg(1)};
+        call.set_result(0);
+        return std::nullopt;
+    });
+    // int pthread_key_delete(pthread_key_t)
+    dispatcher.bind("pthread_key_delete", [this](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) >= keys_.size() || !keys_[call.arg(0)].live) { call.set_result(einval); return std::nullopt; }
+        keys_[call.arg(0)] = {};
+        call.set_result(0);
+        return std::nullopt;
+    });
+    // void* pthread_getspecific(pthread_key_t): NULL for an invalid key, as in POSIX.
+    dispatcher.bind("pthread_getspecific", [this](ImportCall& call) -> std::optional<std::string> {
+        call.set_result(call.arg(0) < keys_.size() && keys_[call.arg(0)].live ? keys_[call.arg(0)].value : 0);
+        return std::nullopt;
+    });
+    // int pthread_setspecific(pthread_key_t, const void*)
+    dispatcher.bind("pthread_setspecific", [this](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) >= keys_.size() || !keys_[call.arg(0)].live) { call.set_result(einval); return std::nullopt; }
+        keys_[call.arg(0)].value = call.arg(1);
         call.set_result(0);
         return std::nullopt;
     });

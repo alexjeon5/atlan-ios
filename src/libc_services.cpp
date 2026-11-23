@@ -50,6 +50,65 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         }
         return "strcpy exceeds service bound";
     });
+    // void* memcpy(void* dest, const void* src, size_t count): staged through a host
+    // buffer, so overlapping ranges behave like memmove instead of corrupting data.
+    for (const char* name : {"memcpy", "memmove"})
+        dispatcher.bind(name, [name](ImportCall& call) -> std::optional<std::string> {
+            const auto dest = call.arg(0), src = call.arg(1), count = call.arg(2);
+            if (count > max_block) return std::string(name) + " size exceeds service bound";
+            auto& memory = call.runtime().memory;
+            std::vector<std::byte> data(count);
+            if ((count != 0 && (std::uint64_t{src} + count > 0x100000000ULL || std::uint64_t{dest} + count > 0x100000000ULL)) ||
+                !memory.read(src, data) || !memory.write(dest, data))
+                return std::string(name) + " guest memory fault";
+            call.set_result(dest);
+            return std::nullopt;
+        });
+    // C-locale <ctype.h>: ASCII only, EOF and values above 255 are not characters.
+    const auto ctype = [&dispatcher](const char* name, bool (*test)(std::uint32_t)) {
+        dispatcher.bind(name, [test](ImportCall& call) -> std::optional<std::string> {
+            const auto c = call.arg(0);
+            call.set_result(c <= 255 && test(c) ? 1 : 0);
+            return std::nullopt;
+        });
+    };
+    ctype("isalpha", [](std::uint32_t c) { return (c | 32) >= 'a' && (c | 32) <= 'z'; });
+    ctype("isdigit", [](std::uint32_t c) { return c >= '0' && c <= '9'; });
+    ctype("isalnum", [](std::uint32_t c) { return ((c | 32) >= 'a' && (c | 32) <= 'z') || (c >= '0' && c <= '9'); });
+    ctype("islower", [](std::uint32_t c) { return c >= 'a' && c <= 'z'; });
+    ctype("isupper", [](std::uint32_t c) { return c >= 'A' && c <= 'Z'; });
+    ctype("isspace", [](std::uint32_t c) { return c == ' ' || (c >= 9 && c <= 13); });
+    ctype("iscntrl", [](std::uint32_t c) { return c < 32 || c == 127; });
+    ctype("isprint", [](std::uint32_t c) { return c >= 32 && c < 127; });
+    ctype("isgraph", [](std::uint32_t c) { return c > 32 && c < 127; });
+    ctype("ispunct", [](std::uint32_t c) { return c > 32 && c < 127 && !((c | 32) >= 'a' && (c | 32) <= 'z') && !(c >= '0' && c <= '9'); });
+    ctype("isxdigit", [](std::uint32_t c) { return (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'f'); });
+    // size_t wcslen(const wchar_t*): wchar_t is 32 bits on Android ARM.
+    dispatcher.bind("wcslen", [](ImportCall& call) -> std::optional<std::string> {
+        const auto start = call.arg(0);
+        if (start % 4) return "wcslen on a misaligned pointer";
+        for (std::uint32_t length = 0; length < max_block / 4; ++length) {
+            std::array<std::byte, 4> word{};
+            if (std::uint64_t{start} + 4ULL * length + 4 > 0x100000000ULL ||
+                !call.runtime().memory.read(start + 4 * length, word))
+                return "wcslen read left mapped guest memory";
+            if (word == std::array<std::byte, 4>{}) { call.set_result(length); return std::nullopt; }
+        }
+        return "wcslen exceeds service bound";
+    });
+    // wchar_t* wmemmove(wchar_t* dest, const wchar_t* src, size_t count): count is in wide characters.
+    dispatcher.bind("wmemmove", [](ImportCall& call) -> std::optional<std::string> {
+        const auto dest = call.arg(0), src = call.arg(1);
+        const std::uint64_t bytes = std::uint64_t{call.arg(2)} * 4;
+        if (bytes > max_block) return "wmemmove size exceeds service bound";
+        auto& memory = call.runtime().memory;
+        std::vector<std::byte> data(bytes);
+        if ((bytes != 0 && (std::uint64_t{src} + bytes > 0x100000000ULL || std::uint64_t{dest} + bytes > 0x100000000ULL)) ||
+            !memory.read(src, data) || !memory.write(dest, data))
+            return "wmemmove guest memory fault";
+        call.set_result(dest);
+        return std::nullopt;
+    });
     // char* strcat(char* dest, const char* src): appends through the terminator.
     dispatcher.bind("strcat", [](ImportCall& call) -> std::optional<std::string> {
         const auto dest = call.arg(0), src = call.arg(1);

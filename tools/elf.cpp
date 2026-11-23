@@ -54,6 +54,8 @@ int main(int argc, char* argv[]) {
         const std::uint32_t canary = entropy() & 0xffffff00U;
         options.resolve = [&](std::string_view name, std::uint8_t) -> std::optional<std::uint32_t> {
             if (name == "__stack_chk_guard") return guard_page;
+            // Bionic's stdin/stdout/stderr FILE array (3 x 84 bytes); stdio services identify streams by address.
+            if (name == "__sF") return guard_page + 0x100;
             return std::nullopt;
         };
         std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
@@ -78,6 +80,8 @@ int main(int argc, char* argv[]) {
         atlan::install_heap_services(dispatcher, heap);
         atlan::MutexTable mutexes;
         mutexes.install(dispatcher);
+        atlan::ThreadKeys thread_keys;
+        thread_keys.install(dispatcher);
         dispatcher.attach(image);
         runtime.memory = std::move(image.memory);
         runtime.memory.map(guard_page, atlan::Memory::page_size, atlan::Permissions::read_write);
