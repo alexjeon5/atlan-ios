@@ -11,6 +11,7 @@
 
 namespace atlan {
 class ImportDispatcher;
+class GuestThreads;
 
 // Arguments and result of one guest call into a host compatibility service.
 // arg() reads r0-r3 only. Word arguments past the fourth live on the guest
@@ -34,6 +35,20 @@ public:
         return true;
     }
     void set_result(std::uint32_t value) noexcept { runtime_.cpu.registers[0] = value; }
+    // Blocks the calling guest thread instead of returning. The service must not touch
+    // any register first: the thread resumes by executing the same import again, so a
+    // blocking service is a retry loop (check, block, check again). `key` names what
+    // wakes the thread (GuestThreads::wake); `deadline_ns` (0: none) is an absolute
+    // GuestThreads::now_ns() time after which the thread retries on its own.
+    void block(std::uint32_t key, std::uint64_t deadline_ns = 0) noexcept {
+        blocked_ = true; block_key_ = key; block_deadline_ = deadline_ns;
+    }
+    // The service already set the guest PC (for example thread exit); do not return to LR.
+    void transfer() noexcept { transferred_ = true; }
+    [[nodiscard]] bool blocked() const noexcept { return blocked_; }
+    [[nodiscard]] bool transferred() const noexcept { return transferred_; }
+    [[nodiscard]] std::uint32_t block_key() const noexcept { return block_key_; }
+    [[nodiscard]] std::uint64_t block_deadline() const noexcept { return block_deadline_; }
     [[nodiscard]] Runtime& runtime() noexcept { return runtime_; }
     [[nodiscard]] ImportDispatcher& dispatcher() noexcept { return dispatcher_; }
     [[nodiscard]] std::string_view name() const noexcept { return name_; }
@@ -41,6 +56,9 @@ private:
     ImportDispatcher& dispatcher_;
     Runtime& runtime_;
     std::string_view name_;
+    bool blocked_{}, transferred_{};
+    std::uint32_t block_key_{};
+    std::uint64_t block_deadline_{};
 };
 
 // A service returns std::nullopt on success, otherwise a diagnostic message.
@@ -48,12 +66,14 @@ private:
 using ImportService = std::function<std::optional<std::string>(ImportCall&)>;
 
 enum class Stop : std::uint8_t {
-    returned, budget_exhausted, cpu_event, unresolved_import, service_error
+    returned, budget_exhausted, cpu_event, unresolved_import, service_error,
+    deadlock  // every guest thread is blocked and none can be woken (message lists the waits)
 };
 struct CallOutcome {
     Stop stop{Stop::returned};
     Result cpu{};
     std::uint64_t retired{};
+    std::uint32_t thread{};  // guest thread whose context is loaded in the Runtime when a stop is not `returned` (0: none)
     std::string import;   // unresolved import or failing service
     std::string message;  // service diagnostic
 };
@@ -83,8 +103,18 @@ public:
                                         std::span<const std::uint32_t> arguments);
     [[nodiscard]] std::uint64_t remaining_budget() const noexcept { return remaining_; }
 
+    // Attaches the guest thread scheduler (optional). Without one the dispatcher runs a
+    // single guest thread and blocking services report a deadlock diagnostic instead.
+    void set_threads(GuestThreads* threads) noexcept { threads_ = threads; }
+    [[nodiscard]] unsigned depth() const noexcept { return depth_; }
+    // Runs ready guest threads other than the caller's thread until `budget` instructions
+    // are retired or none can run (all blocked or finished). Returns `returned` when idle.
+    // Only valid outside any guest call; the Runtime's CPU state is left unchanged.
+    [[nodiscard]] CallOutcome pump(Runtime& runtime, std::uint64_t budget);
+
 private:
-    [[nodiscard]] CallOutcome run_to_return(Runtime& runtime, std::uint32_t return_target);
+    [[nodiscard]] CallOutcome run_to_return(Runtime& runtime, std::uint32_t return_target, bool pump = false);
+    GuestThreads* threads_{};
     std::unordered_map<std::string, ImportService> services_;
     std::unordered_map<std::uint32_t, std::string> traps_;  // trap base address -> name
     std::uint32_t return_target_{};

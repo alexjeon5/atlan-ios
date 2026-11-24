@@ -21,7 +21,7 @@
 
 ## 관찰과 가정
 
-- 관찰(원본 실행, Linux): nativeInit은 `slCreateEngine`(THREADSAFE 옵션) → Realize → GetInterface(ENGINE) → CreateOutputMix(`ENVIRONMENTALREVERB` optional) → Realize → GetInterface(`ENVIRONMENTALREVERB`)까지 간다. 그 뒤 `MAP/WAVE/*.idx` 네 개를 `fopen`하고(없어도 처리됨) `sem_init`을 거쳐 `pthread_attr_init`에서 멈춘다. 오디오 플레이어와 버퍼 큐는 아직 호출되지 않았다.
+- 관찰(원본 실행, Linux): nativeInit은 `slCreateEngine`(THREADSAFE 옵션) → Realize → GetInterface(ENGINE) → CreateOutputMix(`ENVIRONMENTALREVERB` optional) → Realize → GetInterface(`ENVIRONMENTALREVERB`)까지 간다. 그 뒤 `MAP/WAVE/*.idx` 네 개를 `fopen`하고(없어도 처리됨) `sem_init`을 거쳐 `pthread_attr_init`에서 멈췄다(스레드 서비스는 [threads.md](threads.md)로 추가, 그 이후 진행은 원본 재실행으로 확인 필요). 오디오 플레이어와 버퍼 큐는 아직 호출되지 않았다.
 - 가정(관찰 전, 스펙 기준 구현): 플레이어·버퍼 큐·재생·볼륨 서비스. 원본이 실제로 어떤 형식과 호출을 쓰는지는 스레드 생성이 가능해진 뒤 확인해야 한다.
 - 가정: `SetPlayState(STOPPED)`는 일시정지와 같이 다룬다(큐 유지). 볼륨 최대치는 0 dB, 최소 -96 dB.
 - Apple 백엔드: 이 환경에서는 컴파일하지 못했다. CI 컴파일과 실기기 청취 확인이 필요하다.

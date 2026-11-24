@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/imports.hpp"
+#include "atlan/threads.hpp"
 #include <stdexcept>
 
 namespace atlan {
@@ -58,21 +59,60 @@ CallOutcome ImportDispatcher::call_back(Runtime& runtime, std::uint32_t target,
     runtime.cpu.registers[0] = result;
     return outcome;
 }
-CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t return_target) {
+CallOutcome ImportDispatcher::pump(Runtime& runtime, std::uint64_t budget) {
+    if (depth_ != 0) throw std::logic_error("pump is only valid outside a guest call");
+    if (threads_ == nullptr) return {};
+    return_target_ = threads_->callback_return();
+    remaining_ = budget;
+    return run_to_return(runtime, return_target_, true);
+}
+CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t return_target, bool pump) {
     struct Depth { unsigned& value; explicit Depth(unsigned& v) : value(v) { ++value; } ~Depth() { --value; } } depth(depth_);
+    // Guest threads are multiplexed only by the outermost loop; a guest callback made by a
+    // host service stays on its thread and can neither be preempted nor block.
+    const bool threaded = threads_ != nullptr && depth_ == 1;
     CallOutcome outcome;
     const auto finish = [&](Stop stop, Result cpu) {
         outcome.stop = stop;
         outcome.cpu = cpu;
+        if (threaded) {
+            outcome.thread = threads_->current_id();
+            threads_->end_run(runtime, stop == Stop::returned || stop == Stop::budget_exhausted);
+        }
         return outcome;
     };
+    if (threaded) threads_->begin_run(runtime, pump);
+    std::uint64_t slice = 0;
     while (true) {
-        if (!runtime.thumb() && runtime.pc() == return_target)
+        if (threaded) {
+            if (!threads_->has_current()) {
+                const auto picked = threads_->schedule(runtime, !pump);
+                if (picked == GuestThreads::Pick::idle) return finish(Stop::returned, {Event::function_return, outcome.retired});
+                if (picked == GuestThreads::Pick::deadlock) {
+                    outcome.message = threads_->deadlock_message();
+                    return finish(Stop::deadlock, {Event::budget_exhausted, outcome.retired});
+                }
+                slice = 0;
+            }
+            if (!runtime.thumb() && !threads_->current_is_main() && runtime.pc() == threads_->exit_sentinel()) {
+                threads_->thread_returned(runtime);
+                slice = 0;
+                continue;
+            }
+            if (!pump && threads_->current_is_main() && !runtime.thumb() && runtime.pc() == return_target)
+                return finish(Stop::returned, {Event::function_return, outcome.retired});
+            if (slice >= threads_->quantum()) {
+                threads_->yield_current(runtime);
+                slice = 0;
+            }
+        } else if (!runtime.thumb() && runtime.pc() == return_target) {
             return finish(Stop::returned, {Event::function_return, outcome.retired});
+        }
         if (remaining_ == 0) return finish(Stop::budget_exhausted, {Event::budget_exhausted, outcome.retired});
         auto result = runtime.step();
         outcome.retired += result.retired;
         remaining_ -= result.retired < remaining_ ? result.retired : remaining_;
+        slice += result.retired;
         if (result.event == Event::retired) continue;
         result.retired = outcome.retired;
         const auto trap = result.event == Event::memory_fault && result.access == MemoryAccess::execute
@@ -90,6 +130,23 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
             outcome.message = std::move(*error);
             return finish(Stop::service_error, result);
         }
+        if (call.blocked()) {
+            if (!threaded) {
+                outcome.import = trap->second;
+                outcome.message = trap->second + " would block, which needs an attached guest thread scheduler and no host callback in between";
+                return finish(Stop::service_error, result);
+            }
+            const auto picked = threads_->block_current(runtime, call.block_key(), call.block_deadline(), trap->second, !pump);
+            slice = 0;
+            if (picked == GuestThreads::Pick::idle) return finish(Stop::returned, {Event::function_return, outcome.retired});
+            if (picked == GuestThreads::Pick::deadlock) {
+                outcome.import = trap->second;
+                outcome.message = threads_->deadlock_message();
+                return finish(Stop::deadlock, result);
+            }
+            continue;
+        }
+        if (call.transferred()) continue;
         // Return to the caller; LR bit 0 selects Thumb, as for BX LR.
         runtime.start(link);
     }
