@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#include "apple_audio_sink.hpp"
 #include "atlan/demo.hpp"
 #include "shell/data_file.hpp"
 #include "shell/session.hpp"
@@ -16,6 +17,7 @@
     UIButton* _run;
     UILabel* _map;
     std::unique_ptr<atlan::shell::GuestSession> _session;
+    atlan::AppleAudioSink _audio;
 }
 
 - (NSURL*)libraryURL {
@@ -147,7 +149,7 @@
     }
     __weak ShellViewController* weakSelf = self;
     _session = std::make_unique<atlan::shell::GuestSession>(
-        atlan::shell::SessionConfig{self.libraryURL.path.UTF8String, 3000000},
+        atlan::shell::SessionConfig{self.libraryURL.path.UTF8String, 3000000, &_audio},
         [weakSelf](const std::string& line) {
             NSString* text = [NSString stringWithUTF8String:line.c_str()] ?: @"?";
             dispatch_async(dispatch_get_main_queue(), ^{

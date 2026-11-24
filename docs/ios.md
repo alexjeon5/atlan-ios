@@ -21,7 +21,7 @@ Linux ARM64에서 CPU 코어를 실행한 결과는 iOS 기기 검증을 대체�
 
 - 네이티브 라이브러리: 파일 앱 선택기로 가져와 `Application Support/guest.so`로 교체 저장한다(수십 MB 규모라 복사). 앱과 IPA에 번들하지 않는다.
 - 지도: 복사하지 않는다. 사용자가 파일 앱·Finder로 앱 Documents 폴더에 직접 넣거나 옮기고(`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`), Documents에서 가장 큰 일반 파일을 그 자리에서 사용한다. 교체는 같은 폴더의 파일을 바꿔 넣는 것이다. 앱은 크기와 앞·뒤 4KB 읽기 가능 여부만 검증하고(`shell/data_file`), 형식별 헤더 검증은 형식이 정해지면 `magic`으로 추가한다. 잘못된 파일은 사유와 함께 거부하며 보관·롤백하지 않는다.
-- 실행: 해석기가 `diagnostic_traps`로 로드하고 libc·힙·mutex·가상 파일·스레드 키·android_log 서비스를 등록한 뒤 생성자를 차례로 실행하고, `JNI_OnLoad`가 있으면 최소 JavaVM/JNIEnv로 호출한다. 서비스 구성은 `tools/elf.cpp`와 같아야 한다. 중지는 생성자 경계에서 협력적으로 처리된다(호출당 예산 3,000,000 명령).
+- 실행: 해석기가 `diagnostic_traps`로 로드하고 libc·문자열·printf·힙·mmap·스레드·mutex·조건변수·세마포어·가상 파일·스레드 키·android_log·OpenSL ES(Apple AudioQueue 싱크) 서비스를 등록한 뒤 생성자를 차례로 실행하고, `JNI_OnLoad`가 있으면 최소 JavaVM/JNIEnv로 호출하고, 이어서 게스트 스레드와 오디오 콜백을 한 번 `pump`한다. 테스트 절차는 `docs/testing.md`. 서비스 구성은 `tools/elf.cpp`와 같아야 한다. 중지는 생성자 경계에서 협력적으로 처리된다(호출당 예산 3,000,000 명령).
 - 지도를 게스트 파일 접근에 연결하는 가상 파일 디스크립터는 M4b 범위이며 아직 없다.
 - 위치 같은 호스트 서비스(CoreLocation)는 `shell` 계층에 서비스 자리만 두고 구현하지 않았다.
 

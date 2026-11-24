@@ -5,12 +5,17 @@
 #include "atlan/files.hpp"
 #include "atlan/heap.hpp"
 #include "atlan/jni.hpp"
+#include "atlan/abi.hpp"
 #include "atlan/libc_services.hpp"
+#include "atlan/mmap.hpp"
+#include "atlan/opensles.hpp"
+#include "atlan/string_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
 #include "atlan/threads.hpp"
 #include <array>
 #include <exception>
+#include <map>
 #include <optional>
 #include <random>
 #include <fstream>
@@ -96,6 +101,7 @@ void GuestSession::run() {
         options.resolve = [](std::string_view name, std::uint8_t) -> std::optional<std::uint32_t> {
             if (name == "__stack_chk_guard") return guard_page;
             if (name == "__sF") return guard_page + 0x100;
+            if (const auto iid = OpenSles::data_symbol(name)) return *iid;
             return std::nullopt;
         };
         auto image = elf::load(read_library(config_.library_path), options);
@@ -110,11 +116,27 @@ void GuestSession::run() {
         install_libc_services(dispatcher);
         GuestHeap heap;
         install_heap_services(dispatcher, heap);
-        MutexTable mutexes;
+        install_string_services(dispatcher);
+        install_printf_services(dispatcher);
+        const std::map<std::string, std::string> properties;
+        install_system_properties(dispatcher, properties, [this](const std::string& name, bool known) {
+            log_("property " + name + (known ? "" : " (unset)"));
+        });
+        GuestMmap mmap_arena;
+        mmap_arena.install(dispatcher);
+        GuestThreads::Config thread_config;
+        thread_config.errno_address = guard_page + 0x200;
+        GuestThreads threads(thread_config);
+        threads.install(dispatcher);
+        MutexTable mutexes(&threads);
         mutexes.install(dispatcher);
+        CondTable conds(threads, mutexes);
+        conds.install(dispatcher);
         VirtualFiles files(guard_page + 0x200);
         files.install(dispatcher);
-        ThreadKeys thread_keys;
+        SemaphoreTable semaphores(&threads);
+        semaphores.install(dispatcher);
+        ThreadKeys thread_keys(&threads);
         thread_keys.install(dispatcher);
         AndroidLog android_log([this](const LogEntry& entry) {
             log_("android_log " + std::to_string(entry.priority) + " " + entry.tag + ": " + entry.message);
@@ -134,6 +156,14 @@ void GuestSession::run() {
             if (!runtime.memory.write(guard_page, word)) throw std::runtime_error("cannot initialize stack guard");
         }
         runtime.memory.map(stack_base, stack_bytes, Permissions::read_write);
+        RecordingAudioSink fallback_sink(true);  // used when the embedder supplies no device sink
+        std::optional<OpenSles> audio;
+        {
+            OpenSles::Config audio_config;
+            audio_config.sink = config_.audio_sink ? config_.audio_sink : &fallback_sink;
+            audio_config.trace = [this](const std::string& line) { log_("opensles " + line); };
+            audio.emplace(runtime, dispatcher, audio_config);
+        }
         for (std::size_t i = 0; i < initializers.size(); ++i) {
             if (stop_.load()) { log_("stopped before initializer " + std::to_string(i)); state_.store(SessionState::finished); return; }
             const auto outcome = dispatcher.call(runtime, initializers[i], {}, stack_base + stack_bytes,
@@ -150,6 +180,16 @@ void GuestSession::run() {
             for (const auto& m : java.native_methods()) log_("jni native " + m.class_name + "." + m.name + m.signature);
             if (outcome.stop != Stop::returned) { fail(describe_stop("JNI_OnLoad", outcome)); return; }
             log_("JNI_OnLoad returned 0x" + hex(runtime.cpu.registers[0]));
+            // Run guest threads the library started, then deliver finished audio buffers.
+            const auto pumped = dispatcher.pump(runtime, config_.initializer_budget);
+            log_("pump stop=" + std::to_string(static_cast<int>(pumped.stop)) + " retired=" + std::to_string(pumped.retired) +
+                 " live_threads=" + std::to_string(threads.live_threads()) +
+                 (pumped.message.empty() ? "" : " message=" + pumped.message));
+            if (pumped.stop == Stop::unresolved_import) { fail("pump stopped at missing service " + pumped.import); return; }
+            if (pumped.stop != Stop::returned) { fail(describe_stop("pump", pumped)); return; }
+            const auto delivered = audio->pump(runtime, stack_base + stack_bytes, return_sentinel, config_.initializer_budget);
+            if (delivered.error) { fail("audio callback: " + *delivered.error); return; }
+            log_("audio callbacks=" + std::to_string(delivered.callbacks) + " players=" + std::to_string(audio->live_players()));
         }
         state_.store(SessionState::finished);
     } catch (const std::exception& error) {

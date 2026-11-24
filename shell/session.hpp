@@ -6,12 +6,14 @@
 #include <memory>
 #include <string>
 
+namespace atlan { class AudioSink; }
 namespace atlan::shell {
 enum class SessionState : std::uint8_t { idle, running, finished, failed };
 
 struct SessionConfig {
     std::string library_path;                   // user-supplied ARM32 ELF32 shared object
     std::uint64_t initializer_budget{3000000};  // retired instructions per initializer
+    AudioSink* audio_sink{};                    // device sink; nullptr uses a silent recording sink
 };
 
 // Loads the guest image and runs its constructors on one dedicated thread.
