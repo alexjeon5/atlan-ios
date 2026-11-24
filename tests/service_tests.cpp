@@ -49,7 +49,7 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"mkdir", 0xf000005c}, {"remove", 0xf0000060}, {"rename", 0xf0000064}, {"open", 0xf0000068},
                       {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
                       {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
-                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}};
+                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -237,6 +237,27 @@ void properties_and_strings() {
     put_text(f.runtime.memory, data + 0x100, "junk");
     check(f.call("__system_property_get", {data + 0x20, data + 0x100}).stop == atlan::Stop::returned && f.r0() == 0 && text_at(f.runtime.memory, data + 0x100).empty(), "unset property is empty");
 }
+void tokenizing() {
+    Fixture f;
+    put_text(f.runtime.memory, data, ",a,,bc;d,");
+    put_text(f.runtime.memory, data + 0x40, ",;");
+    const auto save = data + 0x80;
+    auto next = [&](std::uint32_t s) { return f.call("strtok_r", {s, data + 0x40, save}).stop == atlan::Stop::returned ? f.r0() : 0xdead; };
+    const auto a = next(data);
+    check(a == data + 1 && text_at(f.runtime.memory, a) == "a", "first token skips the leading delimiter");
+    const auto b = next(0);
+    check(b == data + 4 && text_at(f.runtime.memory, b) == "bc", "empty fields are skipped");
+    const auto c = next(0);
+    check(c == data + 7 && text_at(f.runtime.memory, c) == "d", "second delimiter set member");
+    check(next(0) == 0, "exhausted string returns NULL");
+    check(next(0) == 0, "stays exhausted");
+    put_text(f.runtime.memory, data + 0x200, "  -42x");
+    check(f.call("atoi", {data + 0x200}).stop == atlan::Stop::returned && static_cast<std::int32_t>(f.r0()) == -42, "atoi");
+    put_text(f.runtime.memory, data + 0x200, "abc");
+    check(f.call("atoi", {data + 0x200}).stop == atlan::Stop::returned && f.r0() == 0, "atoi without digits");
+    put_text(f.runtime.memory, data + 0x100, ",,");
+    check(next(data + 0x100) == 0, "only delimiters returns NULL");
+}
 void jni_strings() {
     Fixture f;
     atlan::JavaBootstrap java(f.runtime, f.dispatcher, {});
@@ -325,6 +346,13 @@ void jni_korean_strings() {
     // Unconvertible text is replaced, not fatal.
     put_text(f.runtime.memory, data + 0x80, "\xB0");
     check(call(167, {java.env(), data + 0x80}).stop == atlan::Stop::returned && java.string_text(f.r0()) == "\xEF\xBF\xBD", "malformed CP949 becomes U+FFFD");
+    put_text(f.runtime.memory, data + 0xc0, "plain");
+    check(call(167, {java.env(), data + 0xc0}).stop == atlan::Stop::returned, "ASCII string");
+    put_text(f.runtime.memory, data + 0x100, "\xED\x95\x9C");  // "한" in UTF-8
+    check(call(167, {java.env(), data + 0x100}).stop == atlan::Stop::returned, "UTF-8 Hangul");
+    const auto& stats = java.string_input_stats();
+    check(stats.calls == 4 && stats.ascii == 1 && stats.utf8 == 1 && stats.cp949_only == 1 && stats.neither == 1,
+          "input statistics classify CP949, UTF-8, ASCII and malformed input");
 }
 }
 int main() {
@@ -335,6 +363,7 @@ int main() {
         files();
         directories_and_descriptors();
         properties_and_strings();
+        tokenizing();
         jni_strings();
         jni_arrays_and_misc();
         jni_korean_strings();
