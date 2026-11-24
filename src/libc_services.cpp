@@ -2,6 +2,7 @@
 #include "atlan/libc_services.hpp"
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <ctime>
 #include <map>
 #include <memory>
@@ -172,6 +173,47 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         call.set_result(static_cast<std::uint32_t>(found == nice->end() ? 0 : found->second));
         return std::nullopt;
     });
+    // setjmp/longjmp family. The jmp_buf holds, in this host's own layout: r4-r11, sp, lr (bit 0 = Thumb state),
+    // then d8-d15 (26 words, within Bionic's 64-word jmp_buf). A jump returns to the saved lr with the saved
+    // callee-saved state, so it works across any number of frames and Thumb/ARM callers. Signal masks are not kept.
+    for (const char* name : {"setjmp", "_setjmp", "sigsetjmp"}) {
+        dispatcher.bind(name, [name](ImportCall& call) -> std::optional<std::string> {
+            auto& cpu = call.runtime().cpu;
+            std::array<std::byte, 26 * 4> raw{};
+            const auto put = [&](unsigned word, std::uint32_t value) {
+                for (unsigned b = 0; b < 4; ++b) raw[4 * word + b] = std::byte((value >> (8 * b)) & 255);
+            };
+            for (unsigned i = 0; i < 8; ++i) put(i, static_cast<std::uint32_t>(cpu.registers[4 + i]));
+            put(8, static_cast<std::uint32_t>(cpu.registers[13]));
+            put(9, static_cast<std::uint32_t>(cpu.registers[14]));
+            std::memcpy(raw.data() + 40, reinterpret_cast<const std::byte*>(cpu.vectors.data()) + 64, 64);
+            if (!call.runtime().memory.write(call.arg(0), raw)) return std::string(name) + " jmp_buf is not writable";
+            call.set_result(0);
+            return std::nullopt;
+        });
+    }
+    for (const char* name : {"longjmp", "_longjmp", "siglongjmp"}) {
+        dispatcher.bind(name, [name](ImportCall& call) -> std::optional<std::string> {
+            auto& cpu = call.runtime().cpu;
+            std::array<std::byte, 26 * 4> raw{};
+            if (!call.runtime().memory.read(call.arg(0), raw)) return std::string(name) + " jmp_buf is unreadable";
+            const auto get = [&](unsigned word) {
+                std::uint32_t value = 0;
+                for (unsigned b = 0; b < 4; ++b) value |= std::uint32_t(std::to_integer<std::uint8_t>(raw[4 * word + b])) << (8 * b);
+                return value;
+            };
+            if (get(8) == 0 || get(9) == 0) return std::string(name) + " jmp_buf was never filled by setjmp";
+            const std::uint32_t value = call.arg(1) == 0 ? 1 : call.arg(1);
+            for (unsigned i = 0; i < 8; ++i) cpu.registers[4 + i] = get(i);
+            cpu.registers[13] = get(8);
+            cpu.registers[14] = get(9);
+            std::memcpy(reinterpret_cast<std::byte*>(cpu.vectors.data()) + 64, raw.data() + 40, 64);
+            call.set_result(value);
+            call.runtime().start(get(9));  // resume at the setjmp return address instead of longjmp's caller
+            call.transfer();
+            return std::nullopt;
+        });
+    }
     // int clock_gettime(clockid_t clock, struct timespec* out), 32-bit Linux ABI.
     // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) are supported.
     dispatcher.bind("clock_gettime", [](ImportCall& call) -> std::optional<std::string> {

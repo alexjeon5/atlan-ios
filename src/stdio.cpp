@@ -36,6 +36,18 @@ std::optional<std::uint64_t> GuestStdio::descriptor_size(std::uint32_t fd) const
     if (::fstat(fds_[fd - 3].host, &st) != 0) return std::nullopt;
     return static_cast<std::uint64_t>(st.st_size);
 }
+std::optional<std::size_t> GuestStdio::read_descriptor(std::uint32_t fd, std::uint64_t offset, std::span<std::byte> out) const {
+    if (fd < 3 || fd - 3 >= fds_.size() || fds_[fd - 3].host < 0 || !fds_[fd - 3].readable) return std::nullopt;
+    std::size_t done = 0;
+    while (done < out.size()) {
+        const auto got = ::pread(fds_[fd - 3].host, out.data() + done, out.size() - done, static_cast<off_t>(offset + done));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) return std::nullopt;
+        if (got == 0) break;
+        done += static_cast<std::size_t>(got);
+    }
+    return done;
+}
 void GuestStdio::add_alias(std::string guest_prefix, std::string host_prefix) {
     while (guest_prefix.size() > 1 && guest_prefix.back() == '/') guest_prefix.pop_back();
     aliases_.emplace_back(std::move(guest_prefix), std::move(host_prefix));

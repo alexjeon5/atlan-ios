@@ -9,6 +9,7 @@
 #include "atlan/data_symbols.hpp"
 #include "atlan/stdio.hpp"
 #include "atlan/libc_services.hpp"
+#include "atlan/libc_extra.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/opensles.hpp"
 #include "atlan/string_services.hpp"
@@ -118,6 +119,7 @@ void GuestSession::run() {
         lifetime.install(dispatcher);
         install_libc_services(dispatcher);
         install_time_services(dispatcher, guard_page + 0x400);
+        install_libc_extra(dispatcher);
         GuestHeap heap;
         install_heap_services(dispatcher, heap);
         install_string_services(dispatcher);
@@ -136,6 +138,7 @@ void GuestSession::run() {
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
+        if (stdio) mmap_arena.set_file_reader([&](std::uint32_t fd, std::uint64_t offset, std::span<std::byte> out) { return stdio->read_descriptor(fd, offset, out); });
         mmap_arena.install(dispatcher);
         GuestThreads::Config thread_config;
         thread_config.errno_address = guard_page + 0x200;

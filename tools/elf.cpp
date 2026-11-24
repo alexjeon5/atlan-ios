@@ -7,6 +7,7 @@
 #include "atlan/heap.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/libc_services.hpp"
+#include "atlan/libc_extra.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/opensles.hpp"
 #include "atlan/stdio.hpp"
@@ -104,6 +105,7 @@ int main(int argc, char* argv[]) {
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
         atlan::install_time_services(dispatcher, guard_page + 0x400);
+        atlan::install_libc_extra(dispatcher);
         atlan::GuestHeap heap;
         atlan::install_heap_services(dispatcher, heap);
         atlan::install_string_services(dispatcher);
@@ -122,6 +124,7 @@ int main(int argc, char* argv[]) {
             if (log) std::cout << "[property] " << name << (known ? "" : " (unset)") << '\n';
         });
         atlan::GuestMmap mmap_arena;
+        if (stdio) mmap_arena.set_file_reader([&](std::uint32_t fd, std::uint64_t offset, std::span<std::byte> out) { return stdio->read_descriptor(fd, offset, out); });
         mmap_arena.install(dispatcher);
         atlan::GuestThreads::Config thread_config;
         thread_config.errno_address = guard_page + 0x200;

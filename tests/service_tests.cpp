@@ -2,6 +2,7 @@
 #include "atlan/abi.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/data_symbols.hpp"
+#include "atlan/libc_extra.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/stdio.hpp"
@@ -49,7 +50,7 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"mkdir", 0xf000005c}, {"remove", 0xf0000060}, {"rename", 0xf0000064}, {"open", 0xf0000068},
                       {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
                       {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
-                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}};
+                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -75,6 +76,7 @@ struct Fixture {
         atlan::install_printf_services(dispatcher);
         atlan::install_system_properties(dispatcher, properties);
         atlan::install_libc_services(dispatcher);
+        atlan::install_libc_extra(dispatcher);
         arena.install(dispatcher);
         stdio.install(dispatcher);
     }
@@ -262,6 +264,31 @@ void tokenizing() {
     put_text(f.runtime.memory, data + 0x100, ",,");
     check(next(data + 0x100) == 0, "only delimiters returns NULL");
 }
+void libc_extras() {
+    Fixture f;
+    put_text(f.runtime.memory, data, "find the needle here");
+    put_text(f.runtime.memory, data + 0x40, "needle");
+    check(f.call("strstr", {data, data + 0x40}).stop == atlan::Stop::returned && f.r0() == data + 9, "strstr");
+    put_text(f.runtime.memory, data + 0x80, "  -123abc");
+    check(f.call("strtol", {data + 0x80, data + 0x100, 10}).stop == atlan::Stop::returned && static_cast<std::int32_t>(f.r0()) == -123 &&
+          get32(f.runtime.memory, data + 0x100) == data + 0x80 + 6, "strtol value and end pointer");
+    check(f.call("sqrt", {0, 0x40100000}).stop == atlan::Stop::returned && f.r0() == 0 && f.runtime.cpu.registers[1] == 0x40000000, "sqrt(4.0) == 2.0 in r0:r1");
+    put_text(f.runtime.memory, data + 0x200, "a,b;;c");
+    put_text(f.runtime.memory, data + 0x240, ",;");
+    std::string tokens;
+    for (std::uint32_t s = data + 0x200;; s = 0) {
+        check(f.call("strtok", {s, data + 0x240}).stop == atlan::Stop::returned, "strtok call");
+        if (f.r0() == 0) break;
+        tokens += text_at(f.runtime.memory, f.r0()) + "|";
+    }
+    check(tokens == "a|b|c|", "strtok tokens");
+    // setjmp saves callee-saved state; longjmp resumes at the setjmp return address with the given value.
+    f.runtime.cpu.registers[4] = 0x1234; f.runtime.cpu.registers[14] = 0xffff0000; f.runtime.cpu.registers[13] = stack;
+    check(f.call("setjmp", {data + 0x300}).stop == atlan::Stop::returned && f.r0() == 0, "setjmp returns 0");
+    check(f.call("longjmp", {data + 0x300, 7}).stop == atlan::Stop::returned && f.r0() == 7, "longjmp returns the value at the saved address");
+    check(f.call("longjmp", {data + 0x300, 0}).stop == atlan::Stop::returned && f.r0() == 1, "longjmp(0) returns 1");
+    check(f.call("longjmp", {data + 0x340, 1}).stop == atlan::Stop::service_error, "longjmp with an unfilled buffer stops");
+}
 void jni_strings() {
     Fixture f;
     atlan::JavaBootstrap java(f.runtime, f.dispatcher, {});
@@ -371,6 +398,7 @@ int main() {
         directories_and_descriptors();
         properties_and_strings();
         tokenizing();
+        libc_extras();
         jni_strings();
         jni_arrays_and_misc();
         jni_korean_strings();
