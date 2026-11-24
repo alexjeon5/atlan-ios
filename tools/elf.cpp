@@ -38,16 +38,18 @@ int main(int argc, char* argv[]) {
     try {
         if (argc < 2 || std::string_view(argv[1]) == "--help") {
             std::cout << "atlan-elf <ELF32.so> [--trap-imports] [--initialize] [--bias N] [--budget N]\n"
-                         "          [--log] [--jni] [--root DIR] [--call symbol [--arg N]...]...\n"
+                         "          [--log] [--jni] [--root DIR] [--pump N] [--call symbol [--arg N]...]...\n"
                          "Calls take up to 32 word arguments (extras go on the guest stack).\n"
                          "--log prints __android_log_* output; --jni maps a minimal JavaVM/JNIEnv and\n"
                          "passes the JavaVM pointer as the first argument of a JNI_OnLoad call.\n"
+                         "Guest threads are cooperative: they run while a call blocks or exceeds its time slice.\n"
+                         "--pump N runs the remaining ready guest threads for up to N instructions after the calls.\n"
                          "Constructors run only with --initialize; unresolved imports stop execution.\n";
             return argc < 2 ? 1 : 0;
         }
         atlan::elf::Options options;
         std::vector<Call> calls;
-        std::uint32_t budget = 100000;
+        std::uint32_t budget = 100000, pump_budget = 0;
         bool initialize = false, log = false, jni = false;
         std::string root;
         for (int i = 2; i < argc; ++i) {
@@ -57,6 +59,7 @@ int main(int argc, char* argv[]) {
             else if (arg == "--log") log = true;
             else if (arg == "--root" && i + 1 < argc) root = argv[++i];
             else if (arg == "--jni") jni = true;
+            else if (arg == "--pump" && i + 1 < argc) pump_budget = number(argv[++i]);
             else if (arg == "--bias" && i + 1 < argc) options.load_bias = number(argv[++i]);
             else if (arg == "--budget" && i + 1 < argc) budget = number(argv[++i]);
             else if (arg == "--call" && i + 1 < argc) calls.push_back({argv[++i], {}, {}});
@@ -113,13 +116,19 @@ int main(int argc, char* argv[]) {
         });
         atlan::GuestMmap mmap_arena;
         mmap_arena.install(dispatcher);
-        atlan::MutexTable mutexes;
+        atlan::GuestThreads::Config thread_config;
+        thread_config.errno_address = guard_page + 0x200;
+        atlan::GuestThreads threads(thread_config);
+        threads.install(dispatcher);
+        atlan::MutexTable mutexes(&threads);
         mutexes.install(dispatcher);
+        atlan::CondTable conds(threads, mutexes);
+        conds.install(dispatcher);
         atlan::VirtualFiles files(guard_page + 0x200);
         files.install(dispatcher);
-        atlan::SemaphoreTable semaphores;
+        atlan::SemaphoreTable semaphores(&threads);
         semaphores.install(dispatcher);
-        atlan::ThreadKeys thread_keys;
+        atlan::ThreadKeys thread_keys(&threads);
         thread_keys.install(dispatcher);
         atlan::AndroidLog android_log([&](const atlan::LogEntry& entry) {
             if (log) std::cout << "[android_log " << entry.priority << "] " << entry.tag << ": " << entry.message << '\n';
@@ -154,6 +163,8 @@ int main(int argc, char* argv[]) {
             if (!outcome.message.empty()) std::cout << " service_error=\"" << outcome.message << '"';
             if (outcome.stop == atlan::Stop::unresolved_import) std::cout << " missing_service=" << outcome.import << " args=" << runtime.cpu.registers[0] << "," << runtime.cpu.registers[1] << "," << runtime.cpu.registers[2];
             if (outcome.stop == atlan::Stop::service_error) std::cout << " failing_service=" << outcome.import;
+            if (outcome.stop == atlan::Stop::deadlock) std::cout << " deadlock";
+            if (outcome.thread > 1) std::cout << " guest_thread=" << outcome.thread;
             if (result.event != atlan::Event::function_return) {
                 std::cout << " fault=0x" << std::hex << result.address << std::dec;
                 if (const auto* import = image.import_at(result.event == atlan::Event::memory_fault ? result.address : runtime.pc()))
@@ -189,6 +200,17 @@ int main(int argc, char* argv[]) {
                     std::cout << "jni native " << m.class_name << '.' << m.name << m.signature << " -> 0x" << std::hex << m.address << std::dec << '\n';
             }
             if (!ok) return 2;
+        }
+        if (pump_budget != 0) {
+            const auto outcome = dispatcher.pump(runtime, pump_budget);
+            std::cout << "pump stop=" << static_cast<int>(outcome.stop) << " retired=" << outcome.retired
+                      << " live_threads=" << threads.live_threads();
+            if (!outcome.message.empty()) std::cout << " message=\"" << outcome.message << '"';
+            if (outcome.stop == atlan::Stop::unresolved_import) std::cout << " missing_service=" << outcome.import;
+            if (outcome.stop == atlan::Stop::service_error) std::cout << " failing_service=" << outcome.import;
+            if (outcome.thread != 0) std::cout << " guest_thread=" << outcome.thread << " pc=0x" << std::hex << runtime.pc() << std::dec;
+            std::cout << '\n';
+            if (outcome.stop != atlan::Stop::returned) return 2;
         }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
