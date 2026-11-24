@@ -408,7 +408,14 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
         const std::string label = native_names()[slot];
         dispatcher.bind(label, [state, env_check, label, is_static, nonvirtual, shift, type, form](ImportCall& call) -> std::optional<std::string> {
             if (call.arg(0) != env_check) return label + " called with a foreign JNIEnv pointer";
-            const auto receiver = call.arg(1), id = call.arg(2 + shift);
+            // A global reference stands for its referent (class or object); the guest caches these across calls.
+            const auto resolve = [&state](std::uint32_t h) {
+                if (h >= global_handle_base + 4 && (h - global_handle_base) % 4 == 0 && (h - global_handle_base) / 4 <= state->globals.size() &&
+                    state->globals[(h - global_handle_base) / 4 - 1] != 0)
+                    return state->globals[(h - global_handle_base) / 4 - 1];
+                return h;
+            };
+            const auto receiver = resolve(call.arg(1)), id = call.arg(2 + shift);
             const auto valid = [](std::uint32_t h, std::uint32_t base, std::size_t count) {
                 return h >= base + 4 && (h - base) % 4 == 0 && (h - base) / 4 <= count;
             };
@@ -428,7 +435,7 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
             if (handler == state->methods.end())
                 return label + ": no host implementation for " + member.class_name + "." + member.name + member.signature;
             if (nonvirtual) {
-                const auto clazz = call.arg(2);
+                const auto clazz = resolve(call.arg(2));
                 if (!valid(clazz, class_handle_base, state->classes.size()) ||
                     state->classes[(clazz - class_handle_base) / 4 - 1] != member.class_name)
                     return label + " class argument does not match the method's class";

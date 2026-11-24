@@ -49,6 +49,7 @@ opensles ... (오디오 엔진 생성 관련 여러 줄)
 fopen ATLAN/... mode=... ok|failed (여러 줄)
 java MainActivity.setSurfaces(0,0)
 nativeInit returned 0x0
+(참고: 빈 경로 `fopen  mode=mkdir failed` 한 줄은 게스트가 빈 경로로 mkdir 을 불러서 생기는 정상 로그야)
 pump stop=0 retired=... live_threads=4
 audio callbacks=0 players=0
 ```
@@ -68,7 +69,6 @@ audio callbacks=0 players=0
 | `initializer[N] …` 로 시작하는 줄 | N 번째 생성자에서 멈춤 (뒤에 이유가 붙어) |
 | `JNI_OnLoad …` 로 시작하는 실패 줄 | JNI 초기화 중 멈춤 |
 | `nativeInit …` 로 시작하는 실패 줄 | `nativeInit` 중 멈춤 (없는 서비스 이름이나 예산 초과가 붙어) |
-| `nativeInit … missing service strtok_r` | 이전 실행이 만든 `ATLAN/User` 설정을 읽는 중. 그 폴더를 지우고 다시 실행 |
 | `pump stopped at missing service …` | 게스트 스레드가 아직 없는 서비스를 호출 |
 | `audio callback: …` | 오디오 콜백 실행 중 오류 |
 

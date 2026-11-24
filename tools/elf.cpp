@@ -103,6 +103,7 @@ int main(int argc, char* argv[]) {
         atlan::ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
+        atlan::install_time_services(dispatcher, guard_page + 0x400);
         atlan::GuestHeap heap;
         atlan::install_heap_services(dispatcher, heap);
         atlan::install_string_services(dispatcher);

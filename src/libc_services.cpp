@@ -2,6 +2,7 @@
 #include "atlan/libc_services.hpp"
 #include <array>
 #include <chrono>
+#include <ctime>
 #include <memory>
 #include <vector>
 
@@ -199,6 +200,65 @@ void install_libc_services(ImportDispatcher& dispatcher) {
             if (!call.runtime().memory.write(call.arg(0), bytes)) return "time guest memory fault";
         }
         call.set_result(seconds);
+        return std::nullopt;
+    });
+}
+}
+
+namespace atlan {
+namespace {
+// Bionic 32-bit struct tm: nine ints, then tm_gmtoff (long) and tm_zone (const char*).
+bool read_tm(Memory& memory, std::uint32_t address, std::tm& out) {
+    std::array<std::byte, 36> raw{};
+    if (!memory.read(address, raw)) return false;
+    std::int32_t v[9];
+    for (unsigned i = 0; i < 9; ++i) {
+        std::uint32_t word = 0;
+        for (unsigned b = 0; b < 4; ++b) word |= std::uint32_t(std::to_integer<std::uint8_t>(raw[4 * i + b])) << (8 * b);
+        v[i] = static_cast<std::int32_t>(word);
+    }
+    out = {};
+    out.tm_sec = v[0]; out.tm_min = v[1]; out.tm_hour = v[2]; out.tm_mday = v[3]; out.tm_mon = v[4];
+    out.tm_year = v[5]; out.tm_wday = v[6]; out.tm_yday = v[7]; out.tm_isdst = v[8];
+    return true;
+}
+bool write_tm(Memory& memory, std::uint32_t address, const std::tm& t) {
+    const std::int32_t v[11]{t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday,
+                             t.tm_isdst, static_cast<std::int32_t>(t.tm_gmtoff), 0};
+    std::array<std::byte, 44> raw{};
+    for (unsigned i = 0; i < 11; ++i)
+        for (unsigned b = 0; b < 4; ++b) raw[4 * i + b] = std::byte((static_cast<std::uint32_t>(v[i]) >> (8 * b)) & 255);
+    return memory.write(address, raw);
+}
+}
+void install_time_services(ImportDispatcher& dispatcher, std::uint32_t static_tm) {
+    for (const bool local : {true, false}) {
+        for (const bool reentrant : {false, true}) {
+            const std::string name = std::string(local ? "localtime" : "gmtime") + (reentrant ? "_r" : "");
+            dispatcher.bind(name, [name, local, reentrant, static_tm](ImportCall& call) -> std::optional<std::string> {
+                std::array<std::byte, 4> word{};
+                if (!call.runtime().memory.read(call.arg(0), word)) return name + " time_t is unreadable";
+                std::int64_t seconds = 0;
+                for (unsigned b = 0; b < 4; ++b) seconds |= std::int64_t(std::to_integer<std::uint8_t>(word[b])) << (8 * b);
+                seconds = static_cast<std::int32_t>(seconds);
+                const std::time_t t = static_cast<std::time_t>(seconds);
+                std::tm out{};
+                if (!(local ? localtime_r(&t, &out) : gmtime_r(&t, &out))) { call.set_result(0); return std::nullopt; }
+                const auto target = reentrant ? call.arg(1) : static_tm;
+                if (!write_tm(call.runtime().memory, target, out)) return name + " result buffer is not writable";
+                call.set_result(target);
+                return std::nullopt;
+            });
+        }
+    }
+    // time_t mktime(struct tm*): normalizes the fields in place.
+    dispatcher.bind("mktime", [](ImportCall& call) -> std::optional<std::string> {
+        std::tm t{};
+        if (!read_tm(call.runtime().memory, call.arg(0), t)) return "mktime struct tm is unreadable";
+        t.tm_isdst = -1;
+        const std::time_t result = std::mktime(&t);
+        if (!write_tm(call.runtime().memory, call.arg(0), t)) return "mktime struct tm is not writable";
+        call.set_result(static_cast<std::uint32_t>(result == static_cast<std::time_t>(-1) ? 0xffffffffu : static_cast<std::uint32_t>(result)));
         return std::nullopt;
     });
 }

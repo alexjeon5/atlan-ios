@@ -117,6 +117,7 @@ void GuestSession::run() {
         ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         install_libc_services(dispatcher);
+        install_time_services(dispatcher, guard_page + 0x400);
         GuestHeap heap;
         install_heap_services(dispatcher, heap);
         install_string_services(dispatcher);
@@ -197,6 +198,18 @@ void GuestSession::run() {
                 m.result = 0;
                 return std::nullopt;
             });
+            // Other void UI callbacks the guest raises on MainActivity: recorded in the log, no host effect yet.
+            for (const auto& [name, signature] : {std::pair<const char*, const char*>{"SendMsgFromAtlan", "(III[B)V"},
+                                                  {"JniArSettingData", "(IIII)V"}}) {
+                java.register_method("com/atlan/MainActivity", name, signature,
+                                     [this, name = std::string(name)](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+                    std::string args;
+                    for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
+                    log_("java MainActivity." + name + "(" + args + ")");
+                    m.result = 0;
+                    return std::nullopt;
+                });
+            }
             const std::array<std::uint32_t, 2> args{java.vm(), 0};
             const auto outcome = dispatcher.call(runtime, on_load_address, args, stack_base + stack_bytes,
                                                  return_sentinel, config_.initializer_budget);

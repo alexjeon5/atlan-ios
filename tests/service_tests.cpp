@@ -49,7 +49,7 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"mkdir", 0xf000005c}, {"remove", 0xf0000060}, {"rename", 0xf0000064}, {"open", 0xf0000068},
                       {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
                       {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
-                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}};
+                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -255,6 +255,10 @@ void tokenizing() {
     check(f.call("atoi", {data + 0x200}).stop == atlan::Stop::returned && static_cast<std::int32_t>(f.r0()) == -42, "atoi");
     put_text(f.runtime.memory, data + 0x200, "abc");
     check(f.call("atoi", {data + 0x200}).stop == atlan::Stop::returned && f.r0() == 0, "atoi without digits");
+    put_text(f.runtime.memory, data + 0x300, "HeLLo");
+    put_text(f.runtime.memory, data + 0x340, "hello!");
+    check(f.call("strcasecmp", {data + 0x300, data + 0x340}).stop == atlan::Stop::returned && static_cast<std::int32_t>(f.r0()) < 0, "strcasecmp orders by length");
+    check(f.call("strncasecmp", {data + 0x300, data + 0x340, 5}).stop == atlan::Stop::returned && f.r0() == 0, "strncasecmp folds case");
     put_text(f.runtime.memory, data + 0x100, ",,");
     check(next(data + 0x100) == 0, "only delimiters returns NULL");
 }
@@ -314,6 +318,9 @@ void jni_arrays_and_misc() {
     const auto mid = f.r0();
     java.register_method("pkg/Base", "ping", "(I)I", [](atlan::JavaBootstrap::MethodCall& c) -> std::optional<std::string> { c.result = c.args.at(0) * 2; return std::nullopt; });
     check(invoke(49, {obj, mid, 21}).stop == atlan::Stop::returned && f.r0() == 42, "CallIntMethod");
+    check(invoke(21, {obj}).stop == atlan::Stop::returned, "NewGlobalRef of an object");
+    const auto global_obj = f.r0();
+    check(invoke(49, {global_obj, mid, 21}).stop == atlan::Stop::returned && f.r0() == 42, "CallIntMethod accepts a global reference receiver");
     check(invoke(79, {obj, cls, mid, 8}).stop == atlan::Stop::returned && f.r0() == 16, "CallNonvirtualIntMethod passes clazz before the id");
     check(invoke(79, {obj, java.class_handle("pkg/Other"), mid, 8}).stop == atlan::Stop::service_error, "CallNonvirtual class mismatch stops");
 }
