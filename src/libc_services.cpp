@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <ctime>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -154,6 +155,22 @@ void install_libc_services(ImportDispatcher& dispatcher) {
     // void __stack_chk_fail(void): the guest's stack canary was overwritten.
     dispatcher.bind("__stack_chk_fail", [](ImportCall&) -> std::optional<std::string> {
         return "guest stack protector failure (__stack_chk_fail)";
+    });
+    // setpriority/getpriority(PRIO_PROCESS, id): guest threads are cooperative and the host schedules them, so the
+    // value is kept as state only (what getpriority reports back); it does not change scheduling.
+    const auto nice = std::make_shared<std::map<std::uint32_t, std::int32_t>>();
+    dispatcher.bind("setpriority", [nice](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != 0) return "setpriority supports only PRIO_PROCESS";
+        const auto value = static_cast<std::int32_t>(call.arg(2));
+        (*nice)[call.arg(1)] = value < -20 ? -20 : value > 19 ? 19 : value;
+        call.set_result(0);
+        return std::nullopt;
+    });
+    dispatcher.bind("getpriority", [nice](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != 0) return "getpriority supports only PRIO_PROCESS";
+        const auto found = nice->find(call.arg(1));
+        call.set_result(static_cast<std::uint32_t>(found == nice->end() ? 0 : found->second));
+        return std::nullopt;
     });
     // int clock_gettime(clockid_t clock, struct timespec* out), 32-bit Linux ABI.
     // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) are supported.

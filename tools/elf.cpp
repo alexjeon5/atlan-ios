@@ -113,6 +113,8 @@ int main(int argc, char* argv[]) {
             stdio.emplace(root, guard_page + 0x200, [&](const std::string& path, const std::string& mode, bool ok) {
                 if (log) std::cout << "[fopen] " << path << " mode=" << mode << (ok ? " ok" : " failed") << '\n';
             });
+            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
+            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->install(dispatcher);
         }
         const std::map<std::string, std::string> properties;

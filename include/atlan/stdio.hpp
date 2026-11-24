@@ -25,11 +25,16 @@ public:
     GuestStdio(const GuestStdio&) = delete;
     GuestStdio& operator=(const GuestStdio&) = delete;
     void install(ImportDispatcher& dispatcher);
+    // Guest paths starting with `guest_prefix` (whole components) are redirected to `host_prefix` beneath the root,
+    // e.g. the app's absolute Android paths onto folders the user can reach. First matching alias wins.
+    void add_alias(std::string guest_prefix, std::string host_prefix);
     [[nodiscard]] std::size_t open_files() const noexcept;
     [[nodiscard]] std::size_t open_descriptors() const noexcept;
     // Size of the regular file behind a POSIX descriptor opened through open(), for fstat.
     [[nodiscard]] std::optional<std::uint64_t> descriptor_size(std::uint32_t fd) const;
 private:
+    [[nodiscard]] std::string alias(const std::string& path) const;
+    std::vector<std::pair<std::string, std::string>> aliases_;
     std::filesystem::path root_;
     std::uint32_t errno_address_;
     std::function<void(const std::string&, const std::string&, bool)> trace_;

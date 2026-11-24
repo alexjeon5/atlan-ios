@@ -36,6 +36,17 @@ std::optional<std::uint64_t> GuestStdio::descriptor_size(std::uint32_t fd) const
     if (::fstat(fds_[fd - 3].host, &st) != 0) return std::nullopt;
     return static_cast<std::uint64_t>(st.st_size);
 }
+void GuestStdio::add_alias(std::string guest_prefix, std::string host_prefix) {
+    while (guest_prefix.size() > 1 && guest_prefix.back() == '/') guest_prefix.pop_back();
+    aliases_.emplace_back(std::move(guest_prefix), std::move(host_prefix));
+}
+std::string GuestStdio::alias(const std::string& path) const {
+    for (const auto& [guest, host] : aliases_)
+        if (path.size() >= guest.size() && path.compare(0, guest.size(), guest) == 0 &&
+            (path.size() == guest.size() || path[guest.size()] == '/'))
+            return host + path.substr(guest.size());
+    return path;
+}
 void GuestStdio::install(ImportDispatcher& dispatcher) {
     const auto set_errno = [this](ImportCall& call, std::uint32_t code) {
         std::array<std::byte, 4> bytes{};
@@ -55,7 +66,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
                 return std::string(name) + " path is unreadable, empty or too long";
             std::filesystem::path relative;
             bool escapes = false;
-            for (const auto& part : std::filesystem::path(path).relative_path()) {
+            for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
                 if (part == "..") escapes = true;
                 else if (part != ".") relative /= part;
             }
@@ -86,7 +97,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
     // Resolves a guest path beneath the root; false if it escapes through "..".
     const auto resolve = [this](const std::string& path, std::filesystem::path& host) {
         std::filesystem::path relative;
-        for (const auto& part : std::filesystem::path(path).relative_path()) {
+        for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") return false;
             if (part != ".") relative /= part;
         }
@@ -253,7 +264,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         }
         std::filesystem::path relative;
         bool escapes = false;
-        for (const auto& part : std::filesystem::path(path).relative_path()) {
+        for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") escapes = true;
             else if (part != ".") relative /= part;
         }
@@ -278,7 +289,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
             return "opendir path is unreadable, empty or too long";
         std::filesystem::path relative;
         bool escapes = false;
-        for (const auto& part : std::filesystem::path(path).relative_path()) {
+        for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") escapes = true;
             else if (part != ".") relative /= part;
         }
@@ -360,7 +371,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         if (!ok_mode) return "fopen mode '" + mode + "' is not supported";
         // Resolve beneath the root: lexical normalisation, no parent escapes.
         std::filesystem::path relative;
-        for (const auto& part : std::filesystem::path(path).relative_path()) {
+        for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") { if (trace_) trace_(path, mode, false); call.set_result(0); return set_errno(call, guest_eacces) ? std::nullopt : std::optional<std::string>("fopen could not write errno"); }
             if (part != ".") relative /= part;
         }

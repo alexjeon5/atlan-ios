@@ -131,6 +131,8 @@ void GuestSession::run() {
             stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
+            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
+            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;

@@ -23,9 +23,10 @@ CI 가 만든 서명 없는 IPA 를 iPhone/iPad 에 설치해서 앱 셸이 어�
 
 ## 3. 지도·데이터 넣기
 
-- 파일 앱 → **내 iPhone > (앱 이름)** 폴더 = 앱의 Documents 폴더야. 게스트는 이 폴더를 루트로 보고 `ATLAN/MAP/WAVE/…`, `ATLAN/APP/…`, `ATLAN/UI/…` 같은 상대 경로를 열어. 그래서 `ATLAN` 폴더 구조를 그대로 이 폴더 안에 복사해 넣어야 해.
-- 앱이 `ATLAN/User/…` 아래에 설정 파일을 직접 만들어 쓰기도 해.
-- Documents 안에서 가장 큰 일반 파일을 상단 지도 표시와 `map ok` 검사에 쓰는데, 지금 단계에서는 참고용이야. 데이터가 없어도 실행은 끝까지 가고, 없는 파일은 `fopen … failed` 로그로 남아.
+- 파일 앱 → **내 iPhone > (앱 이름)** 폴더 = 앱의 Documents 폴더야. 여기에 `ATLAN` 폴더를 통째로 복사해 넣어. 안에 `APP`, `MAP`, `UI`, `Sys` 같은 폴더가 있어야 해.
+- 앱은 `system.ini` 에 적힌 안드로이드 경로(`/storage/sdcard1/Atlan/…`)를 Documents 의 `ATLAN/…` 로, 앱이 쓰는 저장 공간(`/data/app_storage/Atlan/…`)은 `ATLAN/NAND/…` 로 연결해 줘. 그래서 `ATLAN/NAND` 는 앱이 직접 만드는 폴더야.
+- 지도 파일 용량이 크니까(수 GB) 복사 시간과 기기 저장 공간을 확인해줘.
+- 데이터가 없어도 실행은 끝까지 가고, 없는 파일은 `fopen … failed` 로그로 남아.
 - 데이터를 바꾸려면 같은 폴더의 파일을 바꿔 넣으면 돼.
 
 ## 4. 실행
