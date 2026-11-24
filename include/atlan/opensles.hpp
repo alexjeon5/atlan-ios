@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include "atlan/audio.hpp"
 #include "atlan/imports.hpp"
 #include <cstdint>
 #include <functional>
@@ -22,6 +23,7 @@ public:
         std::uint32_t trap_base{0xf6000000};    // unmapped method trap range
         std::uint32_t object_base{0xf5100000};  // read-write: object/interface words
         std::uint32_t object_pages{16};
+        AudioSink* sink{};  // required to create players; must outlive this object
         std::function<void(const std::string&)> trace;  // optional: one line per observed call
     };
     static constexpr std::uint32_t default_data_base = 0xf5000000;
@@ -35,6 +37,15 @@ public:
     OpenSles(const OpenSles&) = delete;
     OpenSles& operator=(const OpenSles&) = delete;
     ~OpenSles();
+    struct PumpResult {
+        std::size_t callbacks{};            // buffer-completion callbacks delivered
+        std::optional<std::string> error;   // a callback did not return normally
+    };
+    // Delivers buffer-completion callbacks for buffers the sink has finished playing.
+    // Guest callbacks run on the calling thread (the guest thread), never on the audio
+    // device thread. Call it from outside any import service (a top-level call).
+    PumpResult pump(Runtime& runtime, std::uint32_t stack_top, std::uint32_t return_target, std::uint64_t budget);
+    [[nodiscard]] std::size_t live_players() const;
 private:
     struct State;
     std::shared_ptr<State> state_;

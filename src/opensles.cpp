@@ -2,6 +2,8 @@
 #include "atlan/opensles.hpp"
 #include <array>
 #include <cstdio>
+#include <cmath>
+#include <deque>
 #include <map>
 #include <stdexcept>
 
@@ -76,19 +78,36 @@ std::optional<std::string> read_requests(Memory& memory, std::uint32_t count, st
     return std::nullopt;
 }
 enum Iface : std::uint8_t { i_object, i_engine, i_play, i_bufferqueue, i_androidbq, i_volume, iface_count };
-constexpr std::uint32_t sl_ok = 0, sl_param_invalid = 2, sl_feature_unsupported = 12, sl_resource_error = 5, sl_memory_failure = 9;
+std::string hex_value(std::uint32_t v) { char b[16]; std::snprintf(b, sizeof b, "%x", v); return b; }
+constexpr std::uint32_t sl_ok = 0, sl_param_invalid = 2, sl_feature_unsupported = 12, sl_buffer_insufficient = 7, sl_resource_error = 5, sl_memory_failure = 9;
 
 struct OpenSles::State {
     enum class Type : std::uint8_t { engine, output_mix, audio_player };
+    struct Pending { std::uint64_t end{}; };  // stream offset at which an enqueued buffer is finished
+    struct Player {
+        PcmFormat format{};
+        Iface queue_kind{};
+        std::uint32_t num_buffers{};
+        bool has_volume{};
+        std::unique_ptr<AudioStream> stream;
+        std::deque<Pending> pending;
+        std::uint64_t appended{}, completed{};
+        std::uint32_t play_state{1};  // SL_PLAYSTATE_STOPPED
+        std::uint32_t callback{}, context{};
+        std::int16_t millibel{0};
+        bool mute{};
+    };
     struct Object {
         Type type{};
         bool realized{}, destroyed{};
         std::array<std::uint32_t, iface_count> faces{};  // guest address per exposed interface, 0 = none
+        std::unique_ptr<Player> player;
     };
     struct Face { std::uint32_t object{}; Iface kind{}; };
     Config config;
+    ImportDispatcher* dispatcher{};
     std::uint32_t slot_first[iface_count]{};
-    std::vector<Object> objects;
+    std::deque<Object> objects;  // stable addresses
     std::map<std::uint32_t, Face> faces;  // interface word address -> owner
     std::uint32_t next_word{};
     void trace(const std::string& line) const { if (config.trace) config.trace(line); }
@@ -136,7 +155,13 @@ std::optional<std::uint32_t> OpenSles::data_symbol(std::string_view name, std::u
     return std::nullopt;
 }
 
-OpenSles::~OpenSles() = default;
+// The bound services share State and may outlive this object inside the dispatcher.
+// Streams belong to the sink, so they are closed here and every interface is
+// forgotten: later guest calls on them fail explicitly instead of touching a dead sink.
+OpenSles::~OpenSles() {
+    state_->faces.clear();
+    state_->objects.clear();
+}
 
 OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config) : state_(std::make_shared<State>()) {
     std::size_t slots = 0;
@@ -156,6 +181,7 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
     }
     const auto state = state_;
     state->config = config;
+    state->dispatcher = &dispatcher;
     state->next_word = config.object_base;
     std::uint32_t slot = 0;
     for (std::size_t k = 0; k < interface_specs().size(); ++k) {
@@ -195,7 +221,7 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
             if (feature != 1) return "slCreateEngine option " + hex(feature) + " is not implemented";
         }
         if (num_interfaces != 0) return "slCreateEngine with explicit interfaces is not implemented";
-        state->objects.push_back({State::Type::engine, false, false, {}});
+        state->objects.emplace_back().type = State::Type::engine;
         const auto object = static_cast<std::uint32_t>(state->objects.size() - 1);
         const auto at = state->new_face(call.runtime().memory, object, i_object);
         if (at == 0 || !write32(call.runtime().memory, call.arg(0), at)) return "slCreateEngine cannot publish the engine object";
@@ -208,7 +234,20 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
         if (auto e = state->face(call.arg(0), i_object, "SLObjectItf::Realize", f)) return e;
         state->trace("Object::Realize async=" + std::to_string(call.arg(1)));
         if (call.arg(1) != 0) return "SLObjectItf::Realize with async=true is not implemented";
-        state->objects[f->object].realized = true;
+        auto& object = state->objects[f->object];
+        if (object.realized) { call.set_result(sl_ok); return std::nullopt; }  // spec: Realize on a realized object is a precondition violation; keep idempotent
+        if (object.player) {
+            if (state->config.sink == nullptr) return "SLObjectItf::Realize of an audio player but no audio sink is configured";
+            std::string error;
+            object.player->stream = state->config.sink->open(object.player->format, error);
+            if (!object.player->stream) {
+                state->trace("  sink refused the stream: " + error);
+                call.set_result(sl_resource_error);
+                return std::nullopt;
+            }
+            object.player->stream->set_gain(1.0F);
+        }
+        object.realized = true;
         call.set_result(sl_ok);
         return std::nullopt;
     });
@@ -219,19 +258,19 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
         const auto kind = state->iid_kind(call.arg(1));
         state->trace("Object::GetInterface " + state->iid_name(call.arg(1)) + " object=" + std::to_string(f->object));
         auto& object = state->objects[f->object];
-        if (!object.realized) return "SLObjectItf::GetInterface before Realize";
+        if (!object.realized) { call.set_result(3); return std::nullopt; }  // SL_RESULT_PRECONDITIONS_VIOLATED
         if (state->iid_name(call.arg(1)) == "unknown IID") return "SLObjectItf::GetInterface with an unknown interface ID";
-        if (kind == iface_count || (kind != i_engine && object.faces[kind] == 0 && object.type == State::Type::output_mix)) {
-            // Known interface that this object does not expose: the spec result, not a stop.
+        std::uint32_t at = 0;
+        if (kind != iface_count) {
+            at = object.faces[kind];
+            if (at == 0 && kind == i_engine && object.type == State::Type::engine) at = state->new_face(call.runtime().memory, f->object, kind);
+        }
+        if (kind == iface_count || (at == 0 && kind != i_engine)) {
+            // A known interface this object does not expose: the spec's result, not a stop.
             if (!write32(call.runtime().memory, call.arg(2), 0)) return "SLObjectItf::GetInterface cannot write the interface pointer";
             call.set_result(sl_feature_unsupported);
             return std::nullopt;
         }
-        if (kind == i_engine && object.type != State::Type::engine)
-            return "SLObjectItf::GetInterface SL_IID_ENGINE on a non-engine object";
-        if (kind != i_engine) return "SLObjectItf::GetInterface of " + state->iid_name(call.arg(1)) + " is not implemented for this object";
-        auto at = object.faces[kind];
-        if (at == 0) at = state->new_face(call.runtime().memory, f->object, kind);
         if (at == 0 || !write32(call.runtime().memory, call.arg(2), at)) return "SLObjectItf::GetInterface cannot publish the interface";
         call.set_result(sl_ok);
         return std::nullopt;
@@ -253,13 +292,247 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
         for (const auto& r : requests)
             if (r.required) { call.set_result(sl_feature_unsupported); return std::nullopt; }
         if (call.arg(1) == 0) { call.set_result(sl_param_invalid); return std::nullopt; }
-        state->objects.push_back({State::Type::output_mix, false, false, {}});
+        state->objects.emplace_back().type = State::Type::output_mix;
         const auto object = static_cast<std::uint32_t>(state->objects.size() - 1);
         const auto at = state->new_face(call.runtime().memory, object, i_object);
         if (at == 0 || !write32(call.runtime().memory, call.arg(1), at)) return "SLEngineItf::CreateOutputMix cannot publish the object";
         call.set_result(sl_ok);
         return std::nullopt;
     });
+
+    // SLresult GetState(SLObjectItf self, SLuint32* pState): 1 unrealized, 2 realized
+    dispatcher.bind("SLObjectItf::GetState", [state](ImportCall& call) -> std::optional<std::string> {
+        State::Face* f{};
+        if (auto e = state->face(call.arg(0), i_object, "SLObjectItf::GetState", f)) return e;
+        if (!write32(call.runtime().memory, call.arg(1), state->objects[f->object].realized ? 2 : 1)) return "SLObjectItf::GetState cannot write the state";
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
+    // void Destroy(SLObjectItf self)
+    dispatcher.bind("SLObjectItf::Destroy", [state](ImportCall& call) -> std::optional<std::string> {
+        State::Face* f{};
+        if (auto e = state->face(call.arg(0), i_object, "SLObjectItf::Destroy", f)) return e;
+        state->trace("Object::Destroy object=" + std::to_string(f->object));
+        auto& object = state->objects[f->object];
+        object.destroyed = true;
+        object.player.reset();  // closes the sink stream
+        return std::nullopt;
+    });
+    // SLresult CreateAudioPlayer(SLEngineItf self, SLObjectItf* pPlayer, SLDataSource* pAudioSrc, SLDataSink* pAudioSnk,
+    //     SLuint32 numInterfaces, const SLInterfaceID* pInterfaceIds, const SLboolean* pInterfaceRequired)
+    dispatcher.bind("SLEngineItf::CreateAudioPlayer", [state, hex](ImportCall& call) -> std::optional<std::string> {
+        State::Face* f{};
+        if (auto e = state->face(call.arg(0), i_engine, "SLEngineItf::CreateAudioPlayer", f)) return e;
+        std::uint32_t count{}, ids{}, flags{};
+        if (!call.read_arg(4, count) || !call.read_arg(5, ids) || !call.read_arg(6, flags)) return "SLEngineItf::CreateAudioPlayer arguments are unreadable";
+        auto& memory = call.runtime().memory;
+        const auto word = [&](std::uint32_t at, std::uint32_t& out) {
+            std::array<std::byte, 4> b{};
+            if (!memory.read(at, b)) return false;
+            out = 0;
+            for (unsigned k = 0; k < 4; ++k) out |= std::to_integer<std::uint32_t>(b[k]) << (8 * k);
+            return true;
+        };
+        // SLDataSource / SLDataSink are {void* locator; void* format}.
+        std::uint32_t src_loc{}, src_fmt{}, snk_loc{}, snk_fmt{};
+        if (call.arg(2) == 0 || call.arg(3) == 0 || !word(call.arg(2), src_loc) || !word(call.arg(2) + 4, src_fmt) ||
+            !word(call.arg(3), snk_loc) || !word(call.arg(3) + 4, snk_fmt) || src_loc == 0 || snk_loc == 0)
+            return "SLEngineItf::CreateAudioPlayer data source or sink is unreadable";
+        std::uint32_t loc_type{}, num_buffers{}, snk_type{}, mix_object{};
+        if (!word(src_loc, loc_type) || !word(src_loc + 4, num_buffers) || !word(snk_loc, snk_type) || !word(snk_loc + 4, mix_object))
+            return "SLEngineItf::CreateAudioPlayer locators are unreadable";
+        Iface queue_kind{};
+        if (loc_type == 0x800007bd) queue_kind = i_androidbq;       // SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE
+        else if (loc_type == 6) queue_kind = i_bufferqueue;         // SL_DATALOCATOR_BUFFERQUEUE
+        else return "SLEngineItf::CreateAudioPlayer source locator " + hex(loc_type) + " is not implemented";
+        if (snk_type != 3) return "SLEngineItf::CreateAudioPlayer sink locator " + hex(snk_type) + " is not implemented";  // SL_DATALOCATOR_OUTPUTMIX
+        if (num_buffers == 0 || num_buffers > 64) return "SLEngineItf::CreateAudioPlayer buffer count " + std::to_string(num_buffers) + " is not accepted";
+        // SLDataFormat_PCM {formatType, numChannels, samplesPerSec (milliHz), bitsPerSample, containerSize, channelMask, endianness}
+        std::uint32_t fmt[7]{};
+        for (unsigned k = 0; k < 7; ++k)
+            if (src_fmt == 0 || !word(src_fmt + 4 * k, fmt[k])) return "SLEngineItf::CreateAudioPlayer PCM format is unreadable";
+        state->trace("  CreateAudioPlayer queue=" + std::string(queue_kind == i_androidbq ? "android-simple" : "buffer") + " buffers=" + std::to_string(num_buffers) +
+                     " format=" + std::to_string(fmt[0]) + " channels=" + std::to_string(fmt[1]) + " mHz=" + std::to_string(fmt[2]) +
+                     " bits=" + std::to_string(fmt[3]) + " container=" + std::to_string(fmt[4]) + " mask=" + hex(fmt[5]) + " endian=" + std::to_string(fmt[6]));
+        if (fmt[0] != 2) return "SLEngineItf::CreateAudioPlayer data format " + std::to_string(fmt[0]) + " is not PCM";
+        if (fmt[1] < 1 || fmt[1] > 2 || fmt[3] != 16 || fmt[4] != 16 || fmt[6] != 2)
+            return "SLEngineItf::CreateAudioPlayer PCM layout is not implemented (only 16-bit little-endian mono/stereo)";
+        if (fmt[2] < 1000 || fmt[2] % 1000 != 0 || fmt[2] > 192000000) return "SLEngineItf::CreateAudioPlayer sample rate is not a whole Hz value";
+        if (mix_object == 0 || state->faces.find(mix_object) == state->faces.end() ||
+            state->objects[state->faces[mix_object].object].type != State::Type::output_mix)
+            return "SLEngineItf::CreateAudioPlayer sink output mix is not a valid object";
+        std::vector<Request> requests;
+        if (auto e = read_requests(memory, count, ids, flags, requests)) return "SLEngineItf::CreateAudioPlayer: " + *e;
+        bool want_volume = false, unsupported_required = false;
+        for (const auto& r : requests) {
+            const auto kind = state->iid_kind(r.iid);
+            state->trace("  CreateAudioPlayer requests " + state->iid_name(r.iid) + (r.required ? " (required)" : " (optional)"));
+            if (kind == queue_kind) continue;
+            if (kind == i_volume) { want_volume = true; continue; }
+            if (r.required) unsupported_required = true;
+        }
+        if (unsupported_required) { call.set_result(sl_feature_unsupported); return std::nullopt; }
+        if (call.arg(1) == 0) { call.set_result(sl_param_invalid); return std::nullopt; }
+        state->objects.emplace_back().type = State::Type::audio_player;
+        const auto object = static_cast<std::uint32_t>(state->objects.size() - 1);
+        auto player = std::make_unique<State::Player>();
+        player->format = {fmt[2] / 1000, static_cast<std::uint16_t>(fmt[1])};
+        player->queue_kind = queue_kind;
+        player->num_buffers = num_buffers;
+        player->has_volume = want_volume;
+        state->objects[object].player = std::move(player);
+        const auto at = state->new_face(memory, object, i_object);
+        bool ok = at != 0 && state->new_face(memory, object, i_play) != 0 && state->new_face(memory, object, queue_kind) != 0;
+        if (want_volume) ok = ok && state->new_face(memory, object, i_volume) != 0;
+        if (!ok || !write32(memory, call.arg(1), at)) return "SLEngineItf::CreateAudioPlayer cannot publish the player";
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
+    // Realize of a player opens the sink stream (device errors are an API failure, not a stop).
+    // (Replaces the generic Realize below for players.)
+
+    // Looks up the realized player behind an interface word.
+    const auto player_of = [state](ImportCall& call, Iface kind, const char* what, State::Player*& out) -> std::optional<std::string> {
+        State::Face* f{};
+        if (auto e = state->face(call.arg(0), kind, what, f)) return e;
+        auto& object = state->objects[f->object];
+        if (!object.player || !object.realized || !object.player->stream) return std::string(what) + " on a player that is not realized";
+        out = object.player.get();
+        return std::nullopt;
+    };
+    // SLresult SetPlayState(SLPlayItf self, SLuint32 state): 1 stopped, 2 paused, 3 playing
+    dispatcher.bind("SLPlayItf::SetPlayState", [state, player_of](ImportCall& call) -> std::optional<std::string> {
+        State::Player* p{};
+        if (auto e = player_of(call, i_play, "SLPlayItf::SetPlayState", p)) return e;
+        state->trace("Play::SetPlayState " + std::to_string(call.arg(1)));
+        if (call.arg(1) < 1 || call.arg(1) > 3) { call.set_result(sl_param_invalid); return std::nullopt; }
+        p->play_state = call.arg(1);
+        p->stream->set_playing(p->play_state == 3);
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
+    // SLresult GetPlayState(SLPlayItf self, SLuint32* pState)
+    dispatcher.bind("SLPlayItf::GetPlayState", [player_of](ImportCall& call) -> std::optional<std::string> {
+        State::Player* p{};
+        if (auto e = player_of(call, i_play, "SLPlayItf::GetPlayState", p)) return e;
+        if (!write32(call.runtime().memory, call.arg(1), p->play_state)) return "SLPlayItf::GetPlayState cannot write the state";
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
+    // Buffer queue: both interfaces have the same layout and semantics here.
+    for (const auto kind : {i_bufferqueue, i_androidbq}) {
+        const std::string prefix = kind == i_bufferqueue ? "SLBufferQueueItf::" : "SLAndroidSimpleBufferQueueItf::";
+        // SLresult Enqueue(self, const void* pBuffer, SLuint32 size)
+        dispatcher.bind(prefix + "Enqueue", [state, player_of, kind, prefix](ImportCall& call) -> std::optional<std::string> {
+            State::Player* p{};
+            if (auto e = player_of(call, kind, (prefix + "Enqueue").c_str(), p)) return e;
+            const auto size = call.arg(2);
+            if (call.arg(1) == 0 || size == 0 || size % p->format.frame_bytes() != 0 || size > (1U << 24)) {
+                call.set_result(sl_param_invalid);
+                return std::nullopt;
+            }
+            if (p->pending.size() >= p->num_buffers) { call.set_result(sl_buffer_insufficient); return std::nullopt; }
+            std::vector<std::byte> pcm(size);
+            if (!call.runtime().memory.read(call.arg(1), pcm)) return prefix + "Enqueue buffer is unreadable guest memory";
+            if (!p->stream->append(pcm)) { call.set_result(sl_resource_error); return std::nullopt; }
+            p->appended += size;
+            p->pending.push_back({p->appended});
+            state->trace("Queue::Enqueue " + std::to_string(size) + " bytes, pending=" + std::to_string(p->pending.size()));
+            call.set_result(sl_ok);
+            return std::nullopt;
+        });
+        // SLresult Clear(self): drops everything not yet played, without callbacks
+        dispatcher.bind(prefix + "Clear", [state, player_of, kind, prefix](ImportCall& call) -> std::optional<std::string> {
+            State::Player* p{};
+            if (auto e = player_of(call, kind, (prefix + "Clear").c_str(), p)) return e;
+            state->trace("Queue::Clear dropping " + std::to_string(p->pending.size()) + " buffers");
+            p->stream->flush();
+            p->pending.clear();
+            p->appended = p->stream->played_bytes();
+            call.set_result(sl_ok);
+            return std::nullopt;
+        });
+        // SLresult GetState(self, SLBufferQueueState* / SLAndroidSimpleBufferQueueState*): {count, playIndex}
+        dispatcher.bind(prefix + "GetState", [player_of, kind, prefix](ImportCall& call) -> std::optional<std::string> {
+            State::Player* p{};
+            if (auto e = player_of(call, kind, (prefix + "GetState").c_str(), p)) return e;
+            if (!write32(call.runtime().memory, call.arg(1), static_cast<std::uint32_t>(p->pending.size())) ||
+                !write32(call.runtime().memory, call.arg(1) + 4, static_cast<std::uint32_t>(p->completed)))
+                return prefix + "GetState cannot write the state";
+            call.set_result(sl_ok);
+            return std::nullopt;
+        });
+        // SLresult RegisterCallback(self, callback, void* pContext)
+        dispatcher.bind(prefix + "RegisterCallback", [state, player_of, kind, prefix](ImportCall& call) -> std::optional<std::string> {
+            State::Player* p{};
+            if (auto e = player_of(call, kind, (prefix + "RegisterCallback").c_str(), p)) return e;
+            p->callback = call.arg(1);
+            p->context = call.arg(2);
+            state->trace("Queue::RegisterCallback fn=0x" + hex_value(call.arg(1)));
+            call.set_result(sl_ok);
+            return std::nullopt;
+        });
+    }
+    // SLresult SetVolumeLevel(SLVolumeItf self, SLmillibel level): level is a signed 16-bit value
+    dispatcher.bind("SLVolumeItf::SetVolumeLevel", [state, player_of](ImportCall& call) -> std::optional<std::string> {
+        State::Player* p{};
+        if (auto e = player_of(call, i_volume, "SLVolumeItf::SetVolumeLevel", p)) return e;
+        const auto level = static_cast<std::int16_t>(call.arg(1) & 0xffff);
+        if (level < -9600 || level > 0) { call.set_result(sl_param_invalid); return std::nullopt; }  // [min, max]; max is 0 dB here
+        p->millibel = level;
+        p->stream->set_gain(p->mute ? 0.0F : std::pow(10.0F, static_cast<float>(level) / 2000.0F));
+        state->trace("Volume::SetVolumeLevel " + std::to_string(level) + " mB");
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
+    // SLresult GetMaxVolumeLevel(self, SLmillibel* pMax): 0 dB (no amplification)
+    dispatcher.bind("SLVolumeItf::GetMaxVolumeLevel", [player_of](ImportCall& call) -> std::optional<std::string> {
+        State::Player* p{};
+        if (auto e = player_of(call, i_volume, "SLVolumeItf::GetMaxVolumeLevel", p)) return e;
+        const std::array<std::byte, 2> zero{};
+        if (!call.runtime().memory.write(call.arg(1), zero)) return "SLVolumeItf::GetMaxVolumeLevel cannot write the level";
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
+    // SLresult SetMute(self, SLboolean)
+    dispatcher.bind("SLVolumeItf::SetMute", [player_of](ImportCall& call) -> std::optional<std::string> {
+        State::Player* p{};
+        if (auto e = player_of(call, i_volume, "SLVolumeItf::SetMute", p)) return e;
+        p->mute = call.arg(1) != 0;
+        p->stream->set_gain(p->mute ? 0.0F : std::pow(10.0F, static_cast<float>(p->millibel) / 2000.0F));
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
     (void)sl_resource_error; (void)sl_memory_failure;
+}
+
+OpenSles::PumpResult OpenSles::pump(Runtime& runtime, std::uint32_t stack_top, std::uint32_t return_target, std::uint64_t budget) {
+    PumpResult result;
+    auto& st = *state_;
+    for (std::size_t i = 0; i < st.objects.size(); ++i) {
+        for (;;) {
+            auto& object = st.objects[i];
+            if (object.destroyed || !object.player || !object.player->stream) break;
+            auto& p = *object.player;
+            if (p.pending.empty() || p.pending.front().end > p.stream->played_bytes()) break;
+            p.pending.pop_front();
+            ++p.completed;
+            if (p.callback == 0) continue;
+            const std::uint32_t caller = object.faces[p.queue_kind];
+            const auto outcome = st.dispatcher->call(runtime, p.callback, std::array<std::uint32_t, 2>{caller, p.context}, stack_top, return_target, budget);
+            ++result.callbacks;
+            if (outcome.stop != Stop::returned) {
+                result.error = "buffer-queue callback did not return" + (outcome.message.empty() ? std::string() : ": " + outcome.message) +
+                               (outcome.import.empty() ? std::string() : " (" + outcome.import + ")");
+                return result;
+            }
+        }
+    }
+    return result;
+}
+std::size_t OpenSles::live_players() const {
+    std::size_t n = 0;
+    for (const auto& o : state_->objects) n += (!o.destroyed && o.player) ? 1 : 0;
+    return n;
 }
 }

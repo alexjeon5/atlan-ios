@@ -136,9 +136,11 @@ int main(int argc, char* argv[]) {
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
         std::optional<atlan::JavaBootstrap> java;
         if (jni) java.emplace(runtime, dispatcher, atlan::JavaBootstrap::Config{});
+        atlan::RecordingAudioSink audio_sink(true);  // headless: consumes PCM as soon as it plays
         std::optional<atlan::OpenSles> audio;
         {
             atlan::OpenSles::Config audio_config;
+            audio_config.sink = &audio_sink;
             audio_config.trace = [&](const std::string& line) { if (log) std::cout << "[opensles] " << line << '\n'; };
             audio.emplace(runtime, dispatcher, audio_config);
         }
