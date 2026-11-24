@@ -15,7 +15,6 @@ void check(bool result, const char* message) {
 }
 using atlan::OpenSles;
 constexpr std::uint32_t code = 0x1000, stack = 0x80000, sentinel = 0xffff0000, data = 0x4000, create_engine = 0xf0000000;
-constexpr std::uint32_t unspecified = 0xffffffff;
 
 struct Fixture {
     atlan::Runtime runtime;
