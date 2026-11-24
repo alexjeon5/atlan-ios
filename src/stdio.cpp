@@ -2,12 +2,15 @@
 #include "atlan/stdio.hpp"
 #include "atlan/abi.hpp"
 #include <array>
+#include <algorithm>
 #include <cerrno>
+#include <memory>
 
 namespace atlan {
 namespace {
 constexpr std::uint32_t file_base = 0xe4000000;
 constexpr std::uint32_t guest_enoent = 2, guest_eacces = 13, guest_einval = 22, guest_emfile = 24;
+constexpr std::uint32_t dir_base = 0xe5000000, dirent_base = 0xe5100000, dirent_stride = 512;
 constexpr std::uint32_t max_io = 16U * 1024 * 1024;
 }
 GuestStdio::~GuestStdio() {
@@ -65,6 +68,116 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
             return std::nullopt;
         });
     }
+    // mode_t umask(mode_t): returns the previous mask (default 022). Not applied to host mkdir.
+    const auto mask = std::make_shared<std::uint32_t>(022);
+    dispatcher.bind("umask", [mask](ImportCall& call) -> std::optional<std::string> {
+        call.set_result(*mask);
+        *mask = call.arg(0) & 0777;
+        return std::nullopt;
+    });
+    // int mkdir(const char* path, mode_t): one level beneath the root; mode is ignored on the host.
+    dispatcher.bind("mkdir", [this, set_errno](ImportCall& call) -> std::optional<std::string> {
+        std::string path;
+        if (!read_guest_string(call.runtime().memory, call.arg(0), 1024, path) || path.empty())
+            return "mkdir path is unreadable, empty or too long";
+        std::filesystem::path relative;
+        bool escapes = false;
+        for (const auto& part : std::filesystem::path(path).relative_path()) {
+            if (part == "..") escapes = true;
+            else if (part != ".") relative /= part;
+        }
+        std::uint32_t code = 0;
+        std::error_code ec;
+        const auto host = root_ / relative;
+        if (escapes) code = guest_eacces;
+        else if (relative.empty() || std::filesystem::exists(host, ec)) code = 17;  // EEXIST
+        else if (!std::filesystem::is_directory(host.parent_path(), ec)) code = guest_enoent;
+        else if (!std::filesystem::create_directory(host, ec)) code = guest_eacces;
+        if (trace_) trace_(path, "mkdir", code == 0);
+        if (code != 0 && !set_errno(call, code)) return "mkdir could not write errno";
+        call.set_result(code == 0 ? 0 : 0xffffffffU);
+        return std::nullopt;
+    });
+    // DIR* opendir(const char* path): listing is read once, sorted, with "." and ".." first.
+    // readdir returns a guest `struct dirent` (Bionic ARM32: d_ino u64, d_off i64, d_reclen u16,
+    // d_type u8, d_name[256]) held in a host-managed guest region, one slot per open DIR.
+    dispatcher.bind("opendir", [this, set_errno](ImportCall& call) -> std::optional<std::string> {
+        std::string path;
+        if (!read_guest_string(call.runtime().memory, call.arg(0), 1024, path) || path.empty())
+            return "opendir path is unreadable, empty or too long";
+        std::filesystem::path relative;
+        bool escapes = false;
+        for (const auto& part : std::filesystem::path(path).relative_path()) {
+            if (part == "..") escapes = true;
+            else if (part != ".") relative /= part;
+        }
+        std::error_code ec;
+        const auto host = root_ / relative;
+        const bool ok = !escapes && std::filesystem::is_directory(host, ec);
+        if (trace_) trace_(path, "opendir", ok);
+        if (!ok) {
+            if (!set_errno(call, escapes ? guest_eacces : guest_enoent)) return "opendir could not write errno";
+            call.set_result(0);
+            return std::nullopt;
+        }
+        std::size_t slot = 0;
+        while (slot < dirs_.size() && dirs_[slot].open) ++slot;
+        if (slot >= max_dirs) {
+            if (!set_errno(call, guest_emfile)) return "opendir could not write errno";
+            call.set_result(0);
+            return std::nullopt;
+        }
+        Dir dir;
+        dir.open = true;
+        dir.entries = {{".", true}, {"..", true}};
+        std::vector<std::pair<std::string, bool>> found;
+        for (const auto& entry : std::filesystem::directory_iterator(host, ec))
+            found.emplace_back(entry.path().filename().string(), entry.is_directory(ec));
+        std::sort(found.begin(), found.end());
+        dir.entries.insert(dir.entries.end(), found.begin(), found.end());
+        if (dirs_.size() <= slot) dirs_.resize(slot + 1);
+        dirs_[slot] = std::move(dir);
+        auto& memory = call.runtime().memory;
+        if (memory.translate(dirent_base, MemoryAccess::write) == nullptr)
+            memory.map(dirent_base, std::uint64_t{max_dirs} * dirent_stride, Permissions::read_write);
+        call.set_result(dir_base + 4 * static_cast<std::uint32_t>(slot + 1));
+        return std::nullopt;
+    });
+    const auto dir_slot = [this](std::uint32_t handle) -> Dir* {
+        if (handle < dir_base + 4 || (handle - dir_base) % 4 != 0 || (handle - dir_base) / 4 > dirs_.size()) return nullptr;
+        auto& dir = dirs_[(handle - dir_base) / 4 - 1];
+        return dir.open ? &dir : nullptr;
+    };
+    // struct dirent* readdir(DIR*): NULL at the end (errno untouched).
+    dispatcher.bind("readdir", [this, dir_slot](ImportCall& call) -> std::optional<std::string> {
+        auto* dir = dir_slot(call.arg(0));
+        if (!dir) return "readdir on an invalid or closed DIR";
+        if (dir->next >= dir->entries.size()) { call.set_result(0); return std::nullopt; }
+        const auto& [name, is_dir] = dir->entries[dir->next];
+        const std::uint32_t at = dirent_base + dirent_stride * static_cast<std::uint32_t>((call.arg(0) - dir_base) / 4 - 1);
+        std::array<std::byte, 280> entry{};
+        const auto put = [&](unsigned off, std::uint64_t value, unsigned bytes) {
+            for (unsigned i = 0; i < bytes; ++i) entry[off + i] = std::byte((value >> (8 * i)) & 255);
+        };
+        put(0, dir->next + 1, 8);
+        put(8, dir->next + 1, 8);
+        put(16, 280, 2);
+        put(18, is_dir ? 4 : 8, 1);  // DT_DIR / DT_REG
+        const auto n = std::min<std::size_t>(name.size(), 255);
+        for (std::size_t i = 0; i < n; ++i) entry[19 + i] = std::byte(name[i]);
+        if (!call.runtime().memory.write(at, entry)) return "readdir guest memory fault";
+        ++dir->next;
+        call.set_result(at);
+        return std::nullopt;
+    });
+    // int closedir(DIR*)
+    dispatcher.bind("closedir", [dir_slot](ImportCall& call) -> std::optional<std::string> {
+        auto* dir = dir_slot(call.arg(0));
+        if (!dir) return "closedir on an invalid or closed DIR";
+        *dir = Dir{};
+        call.set_result(0);
+        return std::nullopt;
+    });
     // FILE* fopen(const char* path, const char* mode)
     dispatcher.bind("fopen", [this, set_errno](ImportCall& call) -> std::optional<std::string> {
         std::string path, mode;
