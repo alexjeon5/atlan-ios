@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "atlan/imports.hpp"
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -40,4 +41,11 @@ private:
 // The n-limited forms truncate and always NUL-terminate (n > 0) but return the full
 // length, as C does. The unbounded forms are limited by the formatter's output bound.
 void install_printf_services(ImportDispatcher& dispatcher);
+
+// Console output: printf, vprintf, fprintf, vfprintf, puts, fputs, fputc, putc and perror. `std_streams` is the guest
+// address of Bionic's `__sF` array (stdin, stdout, stderr; 84 bytes each); writes to other streams stop explicitly.
+// `errno_address` is the guest errno word read by perror. Text is delivered to `sink` without the trailing newline
+// (a host log, not a device console). strerror is not provided: it needs a guest string buffer.
+void install_console_services(ImportDispatcher& dispatcher, std::uint32_t std_streams, std::uint32_t errno_address,
+                              std::function<void(const std::string&)> sink);
 }

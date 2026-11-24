@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/threads.hpp"
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <sstream>
@@ -582,6 +583,16 @@ std::uint32_t MutexTable::release(std::uint32_t address) {
     if (threads_) threads_->wake(address);
     return count;
 }
+MutexTable::State& MutexTable::state_at(Memory& memory, std::uint32_t address) {
+    const auto found = mutexes_.find(address);
+    if (found != mutexes_.end()) return found->second;
+    std::array<std::byte, 4> word{};
+    std::uint32_t value = 0;
+    if (memory.read(address, word)) for (unsigned i = 0; i < 4; ++i) value |= std::to_integer<std::uint32_t>(word[i]) << (8 * i);
+    State state;
+    state.type = (value & 0xc000U) == 0x4000U ? 1 : (value & 0xc000U) == 0x8000U ? 2 : 0;
+    return mutexes_.emplace(address, state).first->second;
+}
 bool MutexTable::try_acquire(std::uint32_t address, std::uint32_t count) {
     auto& state = mutexes_[address];
     if (state.count != 0) return false;
@@ -651,7 +662,7 @@ void MutexTable::install(ImportDispatcher& dispatcher) {
     dispatcher.bind("pthread_mutex_lock", [this](ImportCall& call) -> std::optional<std::string> {
         const auto address = call.arg(0);
         if (address == 0) return "pthread_mutex_lock on a null mutex";
-        auto& state = mutexes_[address];
+        auto& state = state_at(call.runtime().memory, address);
         if (state.count == 0) {
             state.count = 1;
             state.owner = self();
@@ -665,8 +676,21 @@ void MutexTable::install(ImportDispatcher& dispatcher) {
         } else if (state.type == 2) {
             call.set_result(edeadlk);
         } else {
-            return threads_ ? "pthread_mutex_lock would deadlock: mutex is already held by the calling guest thread"
-                            : "pthread_mutex_lock would deadlock: mutex is already held by the only guest thread";
+            if (idle_wait_ && threads_) {
+                const auto idle = idle_wait_(call);
+                if (state.count == 0) { state.count = 1; state.owner = self(); call.set_result(0); return std::nullopt; }  // a callback unlocked it
+                if (idle != Idle::none) {
+                    // Sleep briefly, then retry: the sink's buffer completes in real time.
+                    if (idle == Idle::waiting) call.block(address, threads_->now_ns() + 5'000'000ULL);
+                    else call.block(address, threads_->now_ns() + 1);
+                    return std::nullopt;
+                }
+            }
+            char where[96];
+            std::snprintf(where, sizeof where, " (mutex 0x%x type %u count %u, caller lr 0x%x)", address, state.type, state.count,
+                          static_cast<unsigned>(call.runtime().cpu.registers[14]));
+            return std::string(threads_ ? "pthread_mutex_lock would deadlock: mutex is already held by the calling guest thread"
+                                        : "pthread_mutex_lock would deadlock: mutex is already held by the only guest thread") + where;
         }
         return std::nullopt;
     });
@@ -674,7 +698,7 @@ void MutexTable::install(ImportDispatcher& dispatcher) {
     dispatcher.bind("pthread_mutex_trylock", [this](ImportCall& call) -> std::optional<std::string> {
         const auto address = call.arg(0);
         if (address == 0) return "pthread_mutex_trylock on a null mutex";
-        auto& state = mutexes_[address];
+        auto& state = state_at(call.runtime().memory, address);
         if (state.count == 0) { state.count = 1; state.owner = self(); call.set_result(0); }
         else if (state.owner == self() && state.type == 1) {
             if (state.count == 0xffffffffU) return "recursive mutex lock count overflow";
@@ -688,7 +712,7 @@ void MutexTable::install(ImportDispatcher& dispatcher) {
         const auto address = call.arg(0);
         if (address == 0) return "pthread_mutex_timedlock on a null mutex";
         if (!threads_) return "pthread_mutex_timedlock needs a guest thread scheduler";
-        auto& state = mutexes_[address];
+        auto& state = state_at(call.runtime().memory, address);
         auto& w = threads_->wait();
         if (state.count == 0 || (state.owner == self() && state.type == 1)) {
             w.timed_active = false;

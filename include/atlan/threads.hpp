@@ -174,11 +174,21 @@ public:
     // release returns the recursion count, or 0 if the current thread does not hold it.
     [[nodiscard]] std::uint32_t release(std::uint32_t address);
     [[nodiscard]] bool try_acquire(std::uint32_t address, std::uint32_t count);
+    // A normal mutex relocked by the thread that holds it blocks that thread until something else unlocks it. When no
+    // other guest thread can, host event sources (audio buffer callbacks) may. The hook delivers what is due and
+    // returns what remains: `none` nothing can ever unlock the mutex (a real deadlock), `progressed` a callback ran,
+    // `waiting` events are still pending (the thread sleeps briefly and retries).
+    enum class Idle : std::uint8_t { none, progressed, waiting };
+    void set_idle_wait(std::function<Idle(ImportCall&)> hook) { idle_wait_ = std::move(hook); }
 private:
     struct State { std::uint32_t type{}; std::uint32_t count{}; std::uint32_t owner{}; };
     [[nodiscard]] std::uint32_t self() const noexcept { return threads_ ? threads_->current_id() : 0; }
     GuestThreads* threads_;
-    std::unordered_map<std::uint32_t, State> mutexes_;  // absent: statically initialized, normal
+    std::function<Idle(ImportCall&)> idle_wait_;
+    // State of a mutex, created on first use. A mutex that was never pthread_mutex_init'ed is statically
+    // initialized: Bionic encodes its type in the guest word (0x4000 recursive, 0x8000 error-checking).
+    [[nodiscard]] State& state_at(Memory& memory, std::uint32_t address);
+    std::unordered_map<std::uint32_t, State> mutexes_;
 };
 
 // pthread condition variables, built on MutexTable and GuestThreads. The condattr word

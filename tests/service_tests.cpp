@@ -337,6 +337,17 @@ void file_mapping() {
     check(f.runtime.memory.read(rw + 11, back) && static_cast<char>(back[0]) == content[4096 + 11], "offset mapping reads the right bytes");
     check(f.call("munmap", {at, 12288}).stop == atlan::Stop::returned, "munmap of a file mapping");
     check(f.call("mmap", {0, 4096, 1, 0x2, 99, 0}).stop == atlan::Stop::returned && f.r0() == 0xffffffff, "bad fd gives MAP_FAILED");
+    check(f.call("mmap", {0, 4096, 1, 0x1, fd, 0}).stop == atlan::Stop::returned && f.r0() != 0xffffffff, "MAP_SHARED read-only mapping");
+    check(f.call("mmap", {0, 4096, 3, 0x1, fd, 0}).stop == atlan::Stop::service_error, "MAP_SHARED write mapping of a read-only fd stops");
+    check(f.call("open", {data, 2}).stop == atlan::Stop::returned && f.r0() >= 3, "open the file read-write");
+    const auto wfd = f.r0();
+    check(f.call("mmap", {0, 4096, 3, 0x1, wfd, 0}).stop == atlan::Stop::returned && f.r0() != 0xffffffff, "MAP_SHARED write mapping of a writable fd");
+    const auto shared = f.r0();
+    const std::array<std::byte, 1> mark{std::byte{'#'}};
+    check(f.runtime.memory.write(shared + 5, mark), "shared mapping accepts writes");
+    std::string after(10000, '\0');
+    { std::ifstream in(f.root / "big.bin", std::ios::binary); in.read(after.data(), 10000); }
+    check(after[5] == '#' && after[6] == content[6], "shared writes reach the file");
 }
 void jni_strings() {
     Fixture f;

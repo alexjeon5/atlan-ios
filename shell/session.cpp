@@ -67,7 +67,8 @@ std::string describe_stop(const std::string& label, const CallOutcome& outcome) 
     if (outcome.stop == Stop::unresolved_import) line += " missing_service=" + outcome.import;
     else if (outcome.stop == Stop::service_error) line += " failing_service=" + outcome.import + " " + outcome.message;
     else if (outcome.stop == Stop::budget_exhausted) line += " budget_exhausted";
-    else line += std::string(" event=") + event_name(outcome.cpu.event);
+    else line += std::string(" event=") + event_name(outcome.cpu.event) + " address=0x" + hex(outcome.cpu.address) +
+                 " access=" + std::to_string(static_cast<int>(outcome.cpu.access));
     return line;
 }
 std::string describe_state(const Runtime& runtime, const ImportDispatcher& dispatcher) {
@@ -136,6 +137,7 @@ void GuestSession::run() {
         install_heap_services(dispatcher, heap);
         install_string_services(dispatcher);
         install_printf_services(dispatcher);
+        install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [this](const std::string& text) { log_("guest stdout " + text); });
         const std::map<std::string, std::string> properties;
         install_system_properties(dispatcher, properties, [this](const std::string& name, bool known) {
             log_("property " + name + (known ? "" : " (unset)"));
@@ -147,6 +149,7 @@ void GuestSession::run() {
             });
             stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
             stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
+            stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
@@ -199,6 +202,14 @@ void GuestSession::run() {
             audio_config.trace = [this](const std::string& line) { log_("opensles " + line); };
             audio.emplace(runtime, dispatcher, audio_config);
         }
+        // A thread that waits on its own mutex for a buffer-queue callback to unlock it (synchronous sound playback):
+        // deliver due callbacks while it waits, and keep waiting while the sink still has buffers to play.
+        mutexes.set_idle_wait([&audio, this](ImportCall& call) {
+            const auto delivered = audio->pump_nested(call.runtime());
+            if (delivered.error) { log_("audio callback: " + *delivered.error); return MutexTable::Idle::none; }
+            if (delivered.callbacks != 0) return MutexTable::Idle::progressed;
+            return delivered.pending != 0 ? MutexTable::Idle::waiting : MutexTable::Idle::none;
+        });
         for (std::size_t i = 0; i < initializers.size(); ++i) {
             if (stop_.load()) { log_("stopped before initializer " + std::to_string(i)); state_.store(SessionState::finished); return; }
             const auto outcome = dispatcher.call(runtime, initializers[i], {}, stack_base + stack_bytes,
@@ -265,7 +276,7 @@ void GuestSession::run() {
                 const auto r = dispatcher.call(runtime, sym->address, call_args, stack_base + stack_bytes,
                                                return_sentinel, config_.surface_call_budget);
                 if (r.stop != Stop::returned) {
-                    if (r.stop == Stop::budget_exhausted) log_(describe_state(runtime, dispatcher));
+                    log_(describe_state(runtime, dispatcher));  // where it stopped: pc, lr, sp, r0-r3, busiest imports
                     fail(describe_stop(name, r));
                     return false;
                 }

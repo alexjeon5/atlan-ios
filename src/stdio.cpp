@@ -36,9 +36,9 @@ std::optional<std::uint64_t> GuestStdio::descriptor_size(std::uint32_t fd) const
     if (::fstat(fds_[fd - 3].host, &st) != 0) return std::nullopt;
     return static_cast<std::uint64_t>(st.st_size);
 }
-std::optional<int> GuestStdio::host_descriptor(std::uint32_t fd) const {
+std::optional<std::pair<int, bool>> GuestStdio::host_descriptor(std::uint32_t fd) const {
     if (fd < 3 || fd - 3 >= fds_.size() || fds_[fd - 3].host < 0 || !fds_[fd - 3].readable) return std::nullopt;
-    return fds_[fd - 3].host;
+    return std::pair<int, bool>{fds_[fd - 3].host, fds_[fd - 3].writable};
 }
 std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) const {
     // The data folder may live on a case-sensitive host while the app was written for Android's case-insensitive

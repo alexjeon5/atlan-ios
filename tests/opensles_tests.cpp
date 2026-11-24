@@ -115,7 +115,7 @@ std::uint32_t make_player(Fixture& f, std::uint32_t engine, std::uint32_t mix, s
     f.put32(data + 0x128, 2);           // little endian
     f.put32(data + 0x130, data + 0x100);  // SLDataSource
     f.put32(data + 0x134, data + 0x110);
-    f.put32(data + 0x140, 3);           // SLDataLocator_OutputMix
+    f.put32(data + 0x140, 4);           // SLDataLocator_OutputMix (SL_DATALOCATOR_OUTPUTMIX = 4)
     f.put32(data + 0x144, mix);
     f.put32(data + 0x150, data + 0x140);  // SLDataSink
     f.put32(data + 0x154, 0);
@@ -131,6 +131,42 @@ std::uint32_t interface_of(Fixture& f, std::uint32_t object, const char* iid_sym
     const auto r = f.method(object, slot::get_interface, {f.iid(iid_symbol), out});
     check(r.stop == atlan::Stop::returned, "GetInterface returns");
     return f.result() == 0 ? f.get32(out) : 0;
+}
+
+void android_configuration() {
+    Fixture f;
+    const auto engine = make_engine(f);
+    const auto mix = make_mix(f, engine);
+    // Same player as make_player, plus a required SL_IID_ANDROIDCONFIGURATION.
+    f.put32(data + 0x100, 0x800007bd); f.put32(data + 0x104, 2);
+    f.put32(data + 0x110, 2); f.put32(data + 0x114, 1); f.put32(data + 0x118, 22050000); f.put32(data + 0x11c, 16);
+    f.put32(data + 0x120, 16); f.put32(data + 0x124, 4); f.put32(data + 0x128, 2);
+    f.put32(data + 0x130, data + 0x100); f.put32(data + 0x134, data + 0x110);
+    f.put32(data + 0x140, 4); f.put32(data + 0x144, mix);
+    f.put32(data + 0x150, data + 0x140); f.put32(data + 0x154, 0);
+    f.put32(data + 0x160, f.iid("SL_IID_ANDROIDSIMPLEBUFFERQUEUE"));
+    f.put32(data + 0x164, f.iid("SL_IID_ANDROIDCONFIGURATION"));
+    f.put32(data + 0x170, 1); f.put32(data + 0x174, 1);
+    auto r = f.method(engine, slot::create_audio_player, {data + 0x180, data + 0x130, data + 0x150, 2, data + 0x160, data + 0x170});
+    check(r.stop == atlan::Stop::returned && f.result() == 0, "a player with a required AndroidConfiguration is created");
+    const auto player = f.get32(data + 0x180);
+    const auto cfg = interface_of(f, player, "SL_IID_ANDROIDCONFIGURATION", data + 0x190);
+    check(cfg != 0, "AndroidConfiguration interface is exposed");
+    std::vector<std::byte> key(26, std::byte{0});
+    std::memcpy(key.data(), "androidPlaybackStreamType", 25);
+    check(f.runtime.memory.write(data + 0x200, key), "write key");
+    f.put32(data + 0x240, 3);  // SL_ANDROID_STREAM_MEDIA
+    r = f.method(cfg, 0, {data + 0x200, data + 0x240, 4});
+    check(r.stop == atlan::Stop::returned && f.result() == 0, "SetConfiguration(stream type) succeeds before Realize");
+    f.put32(data + 0x250, 4);
+    r = f.method(cfg, 1, {data + 0x200, data + 0x250, data + 0x260});
+    check(r.stop == atlan::Stop::returned && f.result() == 0 && f.get32(data + 0x250) == 4 && f.get32(data + 0x260) == 3, "GetConfiguration returns the stored value");
+    r = f.method(cfg, 0, {data + 0x270, data + 0x240, 4});
+    check(r.stop == atlan::Stop::returned && f.result() == 2, "an unknown key is SL_RESULT_PARAMETER_INVALID");
+    r = f.method(player, slot::realize, {0});
+    check(r.stop == atlan::Stop::returned && f.result() == 0, "player Realize");
+    r = f.method(cfg, 0, {data + 0x200, data + 0x240, 4});
+    check(r.stop == atlan::Stop::returned && f.result() == 3, "SetConfiguration after Realize is PRECONDITIONS_VIOLATED");
 }
 
 void engine_and_mix() {
@@ -274,7 +310,8 @@ void player_rejections() {
         OpenSles ok(runtime, dispatcher, {});
         bool threw = false;
         atlan::ImportDispatcher other;
-        try { OpenSles again(runtime, other, {}); } catch (const std::invalid_argument&) { threw = true; }
+        try {
+        OpenSles again(runtime, other, {}); } catch (const std::invalid_argument&) { threw = true; }
         check(threw, "overlapping OpenSL ES regions are rejected");
     }
 }
@@ -308,6 +345,7 @@ void semaphores() {
 int main() {
     try {
         engine_and_mix();
+        android_configuration();
         player_playback();
         player_rejections();
         semaphores();

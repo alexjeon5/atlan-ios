@@ -110,6 +110,7 @@ int main(int argc, char* argv[]) {
         atlan::install_heap_services(dispatcher, heap);
         atlan::install_string_services(dispatcher);
         atlan::install_printf_services(dispatcher);
+        atlan::install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [&](const std::string& text) { if (log) std::cout << "[guest stdout] " << text << '\n'; });
         std::optional<atlan::GuestStdio> stdio;
         if (!root.empty()) {
             stdio.emplace(root, guard_page + 0x200, [&](const std::string& path, const std::string& mode, bool ok) {
@@ -117,6 +118,7 @@ int main(int argc, char* argv[]) {
             });
             stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
             stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
+            stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
             stdio->install(dispatcher);
         }
         const std::map<std::string, std::string> properties;

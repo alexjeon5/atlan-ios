@@ -46,20 +46,29 @@ android_log 4 ATLAN30_LOG: JNI_OnLoad: registerNatives function is success
 jni class ... / jni native ... (여러 줄)
 JNI_OnLoad returned 0x10004
 android_log 3 atlan MainActivity: nativeInit()
-opensles ... (오디오 엔진 생성 관련 여러 줄)
-fopen ATLAN/... mode=... ok|failed (여러 줄)
-java MainActivity.setSurfaces(0,0)
+opensles ... / fopen ... / property ... (여러 줄)
+java MainActivity.setSurfaces(800,480)
 nativeInit returned 0x0
-(참고: 빈 경로 `fopen  mode=mkdir failed` 한 줄은 게스트가 빈 경로로 mkdir 을 불러서 생기는 정상 로그야)
-pump stop=0 retired=... live_threads=4
-audio callbacks=0 players=0
+android_log 4 atlan AtlanUISurfaceView: AtlanUISurfaceView createUISF()
+Java_com_atlan_AtlanUISurfaceView_createUISF returned 0x0
+android_log 4 ATLAN30_LOG: AtlanGLSurfaceView createGLSF()
+(지도 파일을 여는 fopen 줄이 많이 나오고, 오래 걸려)
+Java_com_atlan_AtlanGLSurfaceView_createGLSF returned 0x0
+android_log 4 atlan AtlanUISurfaceView: AtlanUISurfaceView changedUISF()
+Java_com_atlan_AtlanUISurfaceView_changedUISF returned 0x0
+java AtlanGLThread.callBackGLThread()
+Java_com_atlan_AtlanGLSurfaceView_renderGLSF returned 0x0   (3번 반복)
+pump stop=0 retired=... live_threads=20
+audio callbacks=0 players=1
 ```
 
-- 정상 종료 지점은 `audio callbacks=0 players=0` 줄이야. 이 줄까지 나오면 이번 단계는 성공이고, 그 뒤에 아무것도 안 뜨는 게 **현재 예상 결과**야.
-- 핵심 확인 줄은 `JNI_OnLoad returned 0x10004` 와 `nativeInit returned 0x0` 이야.
+- 정상 종료 지점은 `audio callbacks=… players=1` 줄이야. 이 줄까지 나오면 이번 단계는 성공이고, 그 뒤에 아무것도 안 뜨는 게 **현재 예상 결과**야. (지도 데이터가 없으면 `createGLSF` 가 빨리 끝나고 `players=0` 이야.)
+- 핵심 확인 줄은 `JNI_OnLoad returned 0x10004`, `nativeInit returned 0x0`, 그리고 `createGLSF returned 0x0`(지도 데이터가 있을 때) 이야.
+- `createGLSF` 는 지도 파일을 읽느라 폰에서 몇 분 걸릴 수 있어. 서버(arm64 리눅스)에서는 약 3분이야. 그동안 앱이 멈춘 것처럼 보여도 로그가 늘어나면 정상이야.
+- `guest stdout read error: Bad file descriptor` 줄이 많이 반복되는 것은 알려진 현상이야 (원인 조사 중).
 - 지도·데이터를 안 넣었으면 `fopen ATLAN/MAP/WAVE/….idx … failed` 가 찍혀. 그래도 `nativeInit returned 0x0` 까지는 가. 데이터를 넣으면 `ok` 로 바뀌는지, 그 뒤에 새로 멈추는 곳이 있는지 보는 게 이번 테스트의 목적이야.
 - `setSurfaces` 는 화면 연결이 아직 없어서 호출만 기록하고 아무 일도 안 해. 화면에는 아직 아무것도 그려지지 않아.
-- 소리도 안 나고 오디오 플레이어도 만들어지지 않아 (`players=0`).
+- 화면에는 아직 아무것도 그려지지 않아 (그래픽 백엔드 연결 전). 시작음 같은 소리가 날 수 있어.
 
 ## 실패했을 때 로그의 의미
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/opensles.hpp"
+#include "atlan/abi.hpp"
 #include <array>
 #include <cstdio>
 #include <cmath>
@@ -45,6 +46,7 @@ const std::vector<InterfaceSpec>& interface_specs() {
         {"SLAndroidSimpleBufferQueueItf", {"Enqueue", "Clear", "GetState", "RegisterCallback"}},
         {"SLVolumeItf", {"SetVolumeLevel", "GetVolumeLevel", "GetMaxVolumeLevel", "SetMute", "GetMute",
                          "EnableStereoPosition", "IsEnabledStereoPosition", "SetStereoPosition"}},
+        {"SLAndroidConfigurationItf", {"SetConfiguration", "GetConfiguration", "AcquireJavaProxy", "ReleaseJavaProxy"}},
     };
     return specs;
 }
@@ -77,7 +79,7 @@ std::optional<std::string> read_requests(Memory& memory, std::uint32_t count, st
     }
     return std::nullopt;
 }
-enum Iface : std::uint8_t { i_object, i_engine, i_play, i_bufferqueue, i_androidbq, i_volume, iface_count };
+enum Iface : std::uint8_t { i_object, i_engine, i_play, i_bufferqueue, i_androidbq, i_volume, i_androidcfg, iface_count };
 std::string hex_value(std::uint32_t v) { char b[16]; std::snprintf(b, sizeof b, "%x", v); return b; }
 constexpr std::uint32_t sl_ok = 0, sl_param_invalid = 2, sl_feature_unsupported = 12, sl_buffer_insufficient = 7, sl_resource_error = 5, sl_memory_failure = 9;
 
@@ -88,7 +90,8 @@ struct OpenSles::State {
         PcmFormat format{};
         Iface queue_kind{};
         std::uint32_t num_buffers{};
-        bool has_volume{};
+        bool has_volume{}, has_config{};
+        std::map<std::string, std::vector<std::byte>> config;  // SLAndroidConfigurationItf keys set before Realize
         std::unique_ptr<AudioStream> stream;
         std::deque<Pending> pending;
         std::uint64_t appended{}, completed{};
@@ -140,6 +143,7 @@ struct OpenSles::State {
         if (name == "SL_IID_BUFFERQUEUE") return i_bufferqueue;
         if (name == "SL_IID_ANDROIDSIMPLEBUFFERQUEUE") return i_androidbq;
         if (name == "SL_IID_VOLUME") return i_volume;
+        if (name == "SL_IID_ANDROIDCONFIGURATION") return i_androidcfg;
         return iface_count;
     }
     std::string iid_name(std::uint32_t iid_pointer) const {
@@ -258,7 +262,8 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
         const auto kind = state->iid_kind(call.arg(1));
         state->trace("Object::GetInterface " + state->iid_name(call.arg(1)) + " object=" + std::to_string(f->object));
         auto& object = state->objects[f->object];
-        if (!object.realized) { call.set_result(3); return std::nullopt; }  // SL_RESULT_PRECONDITIONS_VIOLATED
+        // Android allows SLAndroidConfigurationItf before Realize (it must be configured then); the rest need a realized object.
+        if (!object.realized && kind != i_androidcfg) { call.set_result(3); return std::nullopt; }  // SL_RESULT_PRECONDITIONS_VIOLATED
         if (state->iid_name(call.arg(1)) == "unknown IID") return "SLObjectItf::GetInterface with an unknown interface ID";
         std::uint32_t at = 0;
         if (kind != iface_count) {
@@ -345,7 +350,7 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
         if (loc_type == 0x800007bd) queue_kind = i_androidbq;       // SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE
         else if (loc_type == 6) queue_kind = i_bufferqueue;         // SL_DATALOCATOR_BUFFERQUEUE
         else return "SLEngineItf::CreateAudioPlayer source locator " + hex(loc_type) + " is not implemented";
-        if (snk_type != 3) return "SLEngineItf::CreateAudioPlayer sink locator " + hex(snk_type) + " is not implemented";  // SL_DATALOCATOR_OUTPUTMIX
+        if (snk_type != 4) return "SLEngineItf::CreateAudioPlayer sink locator " + hex(snk_type) + " is not implemented";  // SL_DATALOCATOR_OUTPUTMIX
         if (num_buffers == 0 || num_buffers > 64) return "SLEngineItf::CreateAudioPlayer buffer count " + std::to_string(num_buffers) + " is not accepted";
         // SLDataFormat_PCM {formatType, numChannels, samplesPerSec (milliHz), bitsPerSample, containerSize, channelMask, endianness}
         std::uint32_t fmt[7]{};
@@ -363,12 +368,16 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
             return "SLEngineItf::CreateAudioPlayer sink output mix is not a valid object";
         std::vector<Request> requests;
         if (auto e = read_requests(memory, count, ids, flags, requests)) return "SLEngineItf::CreateAudioPlayer: " + *e;
-        bool want_volume = false, unsupported_required = false;
+        bool want_volume = false, want_config = false, unsupported_required = false;
         for (const auto& r : requests) {
             const auto kind = state->iid_kind(r.iid);
             state->trace("  CreateAudioPlayer requests " + state->iid_name(r.iid) + (r.required ? " (required)" : " (optional)"));
-            if (kind == queue_kind) continue;
+            // The app asks for SL_IID_BUFFERQUEUE on an Android simple buffer queue data source (and works on
+            // devices), so either queue interface satisfies either locator: they have identical layouts and
+            // semantics. The face is created for the kind the guest asked for.
+            if (kind == i_bufferqueue || kind == i_androidbq) { queue_kind = kind; continue; }
             if (kind == i_volume) { want_volume = true; continue; }
+            if (kind == i_androidcfg) { want_config = true; continue; }
             if (r.required) unsupported_required = true;
         }
         if (unsupported_required) { call.set_result(sl_feature_unsupported); return std::nullopt; }
@@ -380,10 +389,12 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
         player->queue_kind = queue_kind;
         player->num_buffers = num_buffers;
         player->has_volume = want_volume;
+        player->has_config = want_config;
         state->objects[object].player = std::move(player);
         const auto at = state->new_face(memory, object, i_object);
         bool ok = at != 0 && state->new_face(memory, object, i_play) != 0 && state->new_face(memory, object, queue_kind) != 0;
         if (want_volume) ok = ok && state->new_face(memory, object, i_volume) != 0;
+        if (want_config) ok = ok && state->new_face(memory, object, i_androidcfg) != 0;
         if (!ok || !write32(memory, call.arg(1), at)) return "SLEngineItf::CreateAudioPlayer cannot publish the player";
         call.set_result(sl_ok);
         return std::nullopt;
@@ -473,6 +484,53 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
             return std::nullopt;
         });
     }
+    // SLAndroidConfigurationItf: key/value settings that must be given before Realize. They are kept as state
+    // (what GetConfiguration returns); the host sink has no stream-type routing to apply them to.
+    const auto config_player = [state](ImportCall& call, const char* what, State::Player*& out) -> std::optional<std::string> {
+        State::Face* f{};
+        if (auto e = state->face(call.arg(0), i_androidcfg, what, f)) return e;
+        auto& object = state->objects[f->object];
+        if (!object.player) return std::string(what) + " on an object that is not a player";
+        out = object.player.get();
+        return std::nullopt;
+    };
+    constexpr std::uint32_t sl_preconditions_violated = 3;
+    // SLresult SetConfiguration(self, const SLchar* configKey, const void* pConfigValue, SLuint32 valueSize)
+    dispatcher.bind("SLAndroidConfigurationItf::SetConfiguration", [state, config_player](ImportCall& call) -> std::optional<std::string> {
+        State::Player* p{};
+        if (auto e = config_player(call, "SLAndroidConfigurationItf::SetConfiguration", p)) return e;
+        std::string key;
+        if (!read_guest_string(call.runtime().memory, call.arg(1), 64, key)) return "SLAndroidConfigurationItf::SetConfiguration key is unreadable";
+        const auto size = call.arg(3);
+        if (key != "androidPlaybackStreamType" || size != 4 || call.arg(2) == 0) { call.set_result(sl_param_invalid); return std::nullopt; }
+        if (p->stream) { call.set_result(sl_preconditions_violated); return std::nullopt; }  // already realized
+        std::vector<std::byte> value(size);
+        if (!call.runtime().memory.read(call.arg(2), value)) return "SLAndroidConfigurationItf::SetConfiguration value is unreadable";
+        state->trace("AndroidConfiguration::SetConfiguration " + key + " size=" + std::to_string(size));
+        p->config[key] = std::move(value);
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
+    // SLresult GetConfiguration(self, const SLchar* configKey, SLuint32* pValueSize, void* pConfigValue)
+    dispatcher.bind("SLAndroidConfigurationItf::GetConfiguration", [config_player](ImportCall& call) -> std::optional<std::string> {
+        State::Player* p{};
+        if (auto e = config_player(call, "SLAndroidConfigurationItf::GetConfiguration", p)) return e;
+        std::string key;
+        if (!read_guest_string(call.runtime().memory, call.arg(1), 64, key)) return "SLAndroidConfigurationItf::GetConfiguration key is unreadable";
+        const auto found = p->config.find(key);
+        if (found == p->config.end() || call.arg(2) == 0) { call.set_result(sl_param_invalid); return std::nullopt; }
+        std::array<std::byte, 4> have{};
+        if (!call.runtime().memory.read(call.arg(2), have)) return "SLAndroidConfigurationItf::GetConfiguration size is unreadable";
+        std::uint32_t capacity = 0;
+        for (unsigned i = 0; i < 4; ++i) capacity |= std::to_integer<std::uint32_t>(have[i]) << (8 * i);
+        if (!write32(call.runtime().memory, call.arg(2), static_cast<std::uint32_t>(found->second.size()))) return "SLAndroidConfigurationItf::GetConfiguration cannot write the size";
+        if (call.arg(3) != 0) {
+            if (capacity < found->second.size()) { call.set_result(sl_buffer_insufficient); return std::nullopt; }
+            if (!call.runtime().memory.write(call.arg(3), found->second)) return "SLAndroidConfigurationItf::GetConfiguration cannot write the value";
+        }
+        call.set_result(sl_ok);
+        return std::nullopt;
+    });
     // SLresult SetVolumeLevel(SLVolumeItf self, SLmillibel level): level is a signed 16-bit value
     dispatcher.bind("SLVolumeItf::SetVolumeLevel", [state, player_of](ImportCall& call) -> std::optional<std::string> {
         State::Player* p{};
@@ -507,6 +565,10 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
 }
 
 OpenSles::PumpResult OpenSles::pump(Runtime& runtime, std::uint32_t stack_top, std::uint32_t return_target, std::uint64_t budget) {
+    return deliver(runtime, true, stack_top, return_target, budget);
+}
+OpenSles::PumpResult OpenSles::pump_nested(Runtime& runtime) { return deliver(runtime, false, 0, 0, 0); }
+OpenSles::PumpResult OpenSles::deliver(Runtime& runtime, bool top_level, std::uint32_t stack_top, std::uint32_t return_target, std::uint64_t budget) {
     PumpResult result;
     auto& st = *state_;
     for (std::size_t i = 0; i < st.objects.size(); ++i) {
@@ -519,7 +581,9 @@ OpenSles::PumpResult OpenSles::pump(Runtime& runtime, std::uint32_t stack_top, s
             ++p.completed;
             if (p.callback == 0) continue;
             const std::uint32_t caller = object.faces[p.queue_kind];
-            const auto outcome = st.dispatcher->call(runtime, p.callback, std::array<std::uint32_t, 2>{caller, p.context}, stack_top, return_target, budget);
+            const std::array<std::uint32_t, 2> callback_args{caller, p.context};
+            const auto outcome = top_level ? st.dispatcher->call(runtime, p.callback, callback_args, stack_top, return_target, budget)
+                                           : st.dispatcher->call_back(runtime, p.callback, callback_args);
             ++result.callbacks;
             if (outcome.stop != Stop::returned) {
                 result.error = "buffer-queue callback did not return" + (outcome.message.empty() ? std::string() : ": " + outcome.message) +
@@ -528,6 +592,8 @@ OpenSles::PumpResult OpenSles::pump(Runtime& runtime, std::uint32_t stack_top, s
             }
         }
     }
+    for (const auto& o : st.objects)
+        if (!o.destroyed && o.player && o.player->stream) result.pending += o.player->pending.size();
     return result;
 }
 std::size_t OpenSles::live_players() const {

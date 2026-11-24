@@ -224,6 +224,24 @@ std::optional<std::string> format_guest_printf(Memory& memory, std::uint32_t for
     }
     return std::nullopt;
 }
+std::string guest_strerror(std::uint32_t code) {  // Linux/Bionic errno numbering
+    switch (code) {
+    case 0: return "Success";
+    case 1: return "Operation not permitted";
+    case 2: return "No such file or directory";
+    case 5: return "I/O error";
+    case 9: return "Bad file descriptor";
+    case 12: return "Out of memory";
+    case 13: return "Permission denied";
+    case 17: return "File exists";
+    case 20: return "Not a directory";
+    case 21: return "Is a directory";
+    case 22: return "Invalid argument";
+    case 24: return "Too many open files";
+    case 28: return "No space left on device";
+    default: return "Unknown error " + std::to_string(code);
+    }
+}
 void install_printf_services(ImportDispatcher& dispatcher) {
     struct Form { const char* name; bool bounded, list; };
     for (const Form form : {Form{"snprintf", true, false}, Form{"vsnprintf", true, true},
@@ -247,5 +265,77 @@ void install_printf_services(ImportDispatcher& dispatcher) {
             return std::nullopt;
         });
     }
+}
+
+void install_console_services(ImportDispatcher& dispatcher, std::uint32_t std_streams, std::uint32_t errno_address,
+                              std::function<void(const std::string&)> sink) {
+    // Bionic's FILE is 84 bytes; stdin, stdout and stderr are consecutive. Output to any other stream is not a console write.
+    constexpr std::uint32_t file_size = 84;
+    const auto console = std::make_shared<std::function<void(const std::string&)>>(std::move(sink));
+    const auto write_to = [std_streams, console](ImportCall& call, std::uint32_t stream, const std::string& text, const char* name) -> std::optional<std::string> {
+        if (stream != std_streams + file_size && stream != std_streams + 2 * file_size)
+            return std::string(name) + " writes to a stream other than stdout/stderr, which is not implemented";
+        if (*console) (*console)(text);
+        (void)call;
+        return std::nullopt;
+    };
+    const auto trim = [](std::string text) { while (!text.empty() && text.back() == '\n') text.pop_back(); return text; };
+    // int printf(fmt, ...) / int vprintf(fmt, va)
+    for (const bool list : {false, true}) {
+        dispatcher.bind(list ? "vprintf" : "printf", [=](ImportCall& call) -> std::optional<std::string> {
+            auto args = list ? VarArgs::from_va_list(call.runtime().memory, call.arg(1)) : VarArgs::from_call(call, 1);
+            std::string text;
+            if (auto error = format_guest_printf(call.runtime().memory, call.arg(0), args, text)) return "printf: " + *error;
+            if (*console) (*console)(trim(text));
+            call.set_result(static_cast<std::uint32_t>(text.size()));
+            return std::nullopt;
+        });
+        // int fprintf(FILE*, fmt, ...) / int vfprintf(FILE*, fmt, va)
+        dispatcher.bind(list ? "vfprintf" : "fprintf", [=](ImportCall& call) -> std::optional<std::string> {
+            auto args = list ? VarArgs::from_va_list(call.runtime().memory, call.arg(2)) : VarArgs::from_call(call, 2);
+            std::string text;
+            if (auto error = format_guest_printf(call.runtime().memory, call.arg(1), args, text)) return "fprintf: " + *error;
+            if (auto error = write_to(call, call.arg(0), trim(text), list ? "vfprintf" : "fprintf")) return error;
+            call.set_result(static_cast<std::uint32_t>(text.size()));
+            return std::nullopt;
+        });
+    }
+    dispatcher.bind("puts", [=](ImportCall& call) -> std::optional<std::string> {
+        std::string text;
+        if (!read_guest_string(call.runtime().memory, call.arg(0), 1U << 20, text)) return "puts string is unreadable or too long";
+        if (*console) (*console)(text);
+        call.set_result(static_cast<std::uint32_t>(text.size() + 1));
+        return std::nullopt;
+    });
+    dispatcher.bind("fputs", [=](ImportCall& call) -> std::optional<std::string> {
+        std::string text;
+        if (!read_guest_string(call.runtime().memory, call.arg(0), 1U << 20, text)) return "fputs string is unreadable or too long";
+        if (auto error = write_to(call, call.arg(1), trim(text), "fputs")) return error;
+        call.set_result(static_cast<std::uint32_t>(text.size()));
+        return std::nullopt;
+    });
+    for (const char* name : {"fputc", "putc"}) {
+        dispatcher.bind(name, [=](ImportCall& call) -> std::optional<std::string> {
+            const auto c = call.arg(0) & 0xff;
+            if (auto error = write_to(call, call.arg(1), c == '\n' ? std::string() : std::string(1, static_cast<char>(c)), name)) return error;
+            call.set_result(c);
+            return std::nullopt;
+        });
+    }
+    // void perror(const char*): "<message>: <strerror(errno)>" on stderr.
+    dispatcher.bind("perror", [=](ImportCall& call) -> std::optional<std::string> {
+        std::string message;
+        if (call.arg(0) != 0 && !read_guest_string(call.runtime().memory, call.arg(0), 1024, message)) return "perror message is unreadable";
+        std::array<std::byte, 4> word{};
+        std::uint32_t code = 0;
+        if (errno_address != 0 && call.runtime().memory.read(errno_address, word))
+            for (unsigned i = 0; i < 4; ++i) code |= std::to_integer<std::uint32_t>(word[i]) << (8 * i);
+        if (*console) (*console)((message.empty() ? std::string() : message + ": ") + guest_strerror(code));
+        return std::nullopt;
+    });
+    // char* strerror(int): static text for the common Linux/Bionic codes; the buffer lives in the host table.
+    dispatcher.bind("strerror", [](ImportCall& call) -> std::optional<std::string> {
+        return "strerror needs a guest string buffer, which is not provided yet (errno " + std::to_string(call.arg(0)) + ")";
+    });
 }
 }

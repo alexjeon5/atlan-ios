@@ -15,8 +15,9 @@ public:
         : base_(base), limit_(limit) {}
     // Resolves a guest fd to a host descriptor that may be memory-mapped (nullopt: bad fd). Without one,
     // file-backed requests stop explicitly. MAP_PRIVATE file mappings alias the host file pages lazily
-    // (copy-on-write; nothing is written back), so they cost memory only for the pages the guest touches.
-    using HostDescriptor = std::function<std::optional<int>(std::uint32_t)>;
+    // (copy-on-write; nothing is written back), so they cost memory only for the pages the guest touches. MAP_SHARED
+    // maps the same pages write-through, writable only when the guest opened the file for writing.
+    using HostDescriptor = std::function<std::optional<std::pair<int, bool>>(std::uint32_t)>;  // (host fd, writable)
     void set_host_descriptors(HostDescriptor lookup) { host_fd_ = std::move(lookup); }
     void install(ImportDispatcher& dispatcher);
     // Returns 0 if no space; length is rounded up to whole pages.
@@ -27,7 +28,7 @@ public:
 private:
     HostDescriptor host_fd_;
     // 0: no space; 0xffffffff: the host refused the mapping.
-    [[nodiscard]] std::uint32_t map_file(Memory& memory, int host_fd, std::uint32_t length, std::uint32_t offset, Permissions permissions);
+    [[nodiscard]] std::uint32_t map_file(Memory& memory, int host_fd, bool shared, std::uint32_t length, std::uint32_t offset, Permissions permissions);
     [[nodiscard]] std::uint32_t reserve(std::uint32_t length);  // finds and records arena space; 0 if none
     std::uint32_t base_, limit_;
     std::map<std::uint32_t, std::uint32_t> used_;  // start -> page-rounded size

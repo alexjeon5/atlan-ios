@@ -40,13 +40,18 @@ public:
     struct PumpResult {
         std::size_t callbacks{};            // buffer-completion callbacks delivered
         std::optional<std::string> error;   // a callback did not return normally
+        std::size_t pending{};              // buffers still queued in the sink after delivery (not yet played)
     };
     // Delivers buffer-completion callbacks for buffers the sink has finished playing.
     // Guest callbacks run on the calling thread (the guest thread), never on the audio
     // device thread. Call it from outside any import service (a top-level call).
     PumpResult pump(Runtime& runtime, std::uint32_t stack_top, std::uint32_t return_target, std::uint64_t budget);
+    // The same delivery from inside an import service (a guest thread blocked waiting for a buffer callback):
+    // callbacks run nested on the caller's stack through ImportDispatcher::call_back.
+    PumpResult pump_nested(Runtime& runtime);
     [[nodiscard]] std::size_t live_players() const;
 private:
+    PumpResult deliver(Runtime& runtime, bool top_level, std::uint32_t stack_top, std::uint32_t return_target, std::uint64_t budget);
     struct State;
     std::shared_ptr<State> state_;
 };

@@ -26,7 +26,7 @@ std::uint32_t GuestMmap::map(Memory& memory, std::uint32_t length, Permissions p
     try { memory.map(at, used_[at], permissions); } catch (const std::invalid_argument&) { used_.erase(at); return 0; }
     return at;
 }
-std::uint32_t GuestMmap::map_file(Memory& memory, int host_fd, std::uint32_t length, std::uint32_t offset, Permissions permissions) {
+std::uint32_t GuestMmap::map_file(Memory& memory, int host_fd, bool shared, std::uint32_t length, std::uint32_t offset, Permissions permissions) {
     struct ::stat info{};
     if (::fstat(host_fd, &info) != 0 || !S_ISREG(info.st_mode)) return 0xffffffffU;
     const std::uint64_t size = static_cast<std::uint64_t>(info.st_size);
@@ -40,7 +40,8 @@ std::uint32_t GuestMmap::map_file(Memory& memory, int host_fd, std::uint32_t len
             const std::uint64_t host_page = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
             const std::uint64_t aligned = offset & ~(host_page - 1), delta = offset - aligned;
             const std::uint64_t span = delta + whole_pages * Memory::page_size;
-            void* host = ::mmap(nullptr, span, PROT_READ | PROT_WRITE, MAP_PRIVATE, host_fd, static_cast<off_t>(aligned));
+            const int prot = shared && permissions != Permissions::read_write ? PROT_READ : PROT_READ | PROT_WRITE;
+            void* host = ::mmap(nullptr, span, prot, shared ? MAP_SHARED : MAP_PRIVATE, host_fd, static_cast<off_t>(aligned));
             if (host == MAP_FAILED) { used_.erase(at); return 0xffffffffU; }
             std::shared_ptr<void> keepalive(host, [span](void* p) { ::munmap(p, span); });
             memory.map_external(at, whole_pages * Memory::page_size, permissions, static_cast<std::byte*>(host) + delta, std::move(keepalive));
@@ -95,10 +96,11 @@ void GuestMmap::install(ImportDispatcher& dispatcher) {
         const auto addr = call.arg(0), length = call.arg(1), prot = call.arg(2), flags = call.arg(3);
         constexpr std::uint32_t map_private = 2, map_anonymous = 0x20;
         const bool anonymous = flags == (map_private | map_anonymous) && fd == 0xffffffffU && offset == 0;
-        const bool file = flags == map_private && fd != 0xffffffffU && offset % Memory::page_size == 0;
+        constexpr std::uint32_t map_shared = 1;
+        const bool file = (flags == map_private || flags == map_shared) && fd != 0xffffffffU && offset % Memory::page_size == 0;
         if ((!anonymous && !file) || addr != 0 || (file && !host_fd_))
-            return "mmap supports only private mappings without a hint (flags=" + std::to_string(flags) +
-                   " fd=" + std::to_string(static_cast<std::int32_t>(fd)) + (file && !host_fd_ ? ", no file reader" : "") + ")";
+            return "mmap supports only MAP_PRIVATE|MAP_ANONYMOUS or file mappings without a hint (flags=" + std::to_string(flags) +
+                   " prot=" + std::to_string(prot) + " fd=" + std::to_string(static_cast<std::int32_t>(fd)) + (file && !host_fd_ ? ", no file reader" : "") + ")";
         if (prot != 1 && prot != 3) return "mmap prot " + std::to_string(prot) + " is not supported";
         const auto permissions = prot == 1 ? Permissions::read : Permissions::read_write;
         std::uint32_t at = 0;
@@ -106,9 +108,10 @@ void GuestMmap::install(ImportDispatcher& dispatcher) {
         else {
             const auto host_fd = host_fd_(fd);
             if (!host_fd) { call.set_result(0xffffffffU); return std::nullopt; }  // EBADF: MAP_FAILED
-            at = map_file(call.runtime().memory, *host_fd, length, offset, permissions);
+            if (flags == map_shared && permissions == Permissions::read_write && !host_fd->second)
+                return "mmap MAP_SHARED with PROT_WRITE needs a descriptor opened for writing";
+            at = map_file(call.runtime().memory, host_fd->first, flags == map_shared, length, offset, permissions);
             if (at == 0xffffffffU) return "mmap of a file could not be mapped on the host";
-            if (at == 0) at = 0;  // no arena space: MAP_FAILED below
         }
         call.set_result(at != 0 ? at : 0xffffffffU);  // MAP_FAILED
         return std::nullopt;

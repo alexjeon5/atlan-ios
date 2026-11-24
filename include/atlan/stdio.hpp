@@ -33,9 +33,9 @@ public:
     [[nodiscard]] std::size_t open_descriptors() const noexcept;
     // Size of the regular file behind a POSIX descriptor opened through open(), for fstat.
     [[nodiscard]] std::optional<std::uint64_t> descriptor_size(std::uint32_t fd) const;
-    // The host descriptor behind a readable guest POSIX descriptor, for file-backed mappings; nullopt for a bad one.
+    // The host descriptor (and whether it is writable) behind a readable guest POSIX descriptor, for file-backed mappings; nullopt for a bad one.
     // Still owned by this object: callers must not close it and must not use it after the guest closes the fd.
-    [[nodiscard]] std::optional<int> host_descriptor(std::uint32_t fd) const;
+    [[nodiscard]] std::optional<std::pair<int, bool>> host_descriptor(std::uint32_t fd) const;  // (descriptor, opened writable)
 private:
     [[nodiscard]] std::string alias(const std::string& path) const;
     [[nodiscard]] std::filesystem::path locate(const std::filesystem::path& relative) const;
