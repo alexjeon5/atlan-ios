@@ -718,7 +718,10 @@ void MutexTable::install(ImportDispatcher& dispatcher) {
         const auto found = mutexes_.find(call.arg(0));
         if (found == mutexes_.end() || found->second.count == 0) {
             if (found != mutexes_.end() && found->second.type != 0) { call.set_result(eperm); return std::nullopt; }
-            return "pthread_mutex_unlock of a mutex that is not held";
+            // Bionic's normal mutex has no owner or state check on unlock: unlocking an unlocked one stores "unlocked"
+            // again and succeeds. The app does this (double unlock), so it is modelled as Bionic behaves.
+            call.set_result(0);
+            return std::nullopt;
         }
         // Bionic does not check the owner of a normal mutex; recursive and error-checking ones do.
         if (found->second.type != 0 && found->second.owner != self()) { call.set_result(eperm); return std::nullopt; }

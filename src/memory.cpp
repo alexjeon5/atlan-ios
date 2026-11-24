@@ -21,10 +21,33 @@ void Memory::map(std::uint32_t base, std::uint64_t size, Permissions permissions
     for (std::uint64_t offset = 0; offset < size; offset += page_size) {
         auto page = std::make_unique<Page>();
         page->permissions = permissions;
+        page->owned = std::make_unique<std::byte[]>(page_size);  // value-initialised: zero filled
+        page->data = page->owned.get();
         if (offset < initial.size()) {
             const auto count = std::min<std::size_t>(page_size, initial.size() - offset);
-            std::copy_n(initial.data() + offset, count, page->bytes.data());
+            std::copy_n(initial.data() + offset, count, page->data);
         }
+        staged.emplace(static_cast<std::uint32_t>(base + offset), std::move(page));
+    }
+    pages_.merge(staged);
+    ++generation_;
+}
+
+void Memory::map_external(std::uint32_t base, std::uint64_t size, Permissions permissions, std::byte* host,
+                          std::shared_ptr<void> keepalive) {
+    const auto end = std::uint64_t{base} + size;
+    if (host == nullptr || size == 0 || size > (std::uint64_t{1} << 32) || (base % page_size) != 0 || (size % page_size) != 0 ||
+        end > (std::uint64_t{1} << 32) ||
+        (permissions != Permissions::read && permissions != Permissions::read_write && permissions != Permissions::read_execute))
+        throw std::invalid_argument("invalid ARM32 external mapping");
+    for (std::uint64_t at = base; at < end; at += page_size)
+        if (pages_.contains(static_cast<std::uint32_t>(at))) throw std::invalid_argument("overlapping ARM32 mapping");
+    decltype(pages_) staged;
+    for (std::uint64_t offset = 0; offset < size; offset += page_size) {
+        auto page = std::make_unique<Page>();
+        page->permissions = permissions;
+        page->data = host + offset;
+        page->keepalive = keepalive;
         staged.emplace(static_cast<std::uint32_t>(base + offset), std::move(page));
     }
     pages_.merge(staged);
@@ -38,7 +61,7 @@ std::byte* Memory::translate(std::uint64_t address, MemoryAccess access) noexcep
     if (page == pages_.end() ||
         (static_cast<unsigned>(page->second->permissions) & static_cast<unsigned>(access)) == 0)
         return nullptr;
-    return page->second->bytes.data() + (value & (page_size - 1U));
+    return page->second->data + (value & (page_size - 1U));
 }
 
 bool Memory::read(std::uint32_t address, std::span<std::byte> out) noexcept {

@@ -36,17 +36,28 @@ std::optional<std::uint64_t> GuestStdio::descriptor_size(std::uint32_t fd) const
     if (::fstat(fds_[fd - 3].host, &st) != 0) return std::nullopt;
     return static_cast<std::uint64_t>(st.st_size);
 }
-std::optional<std::size_t> GuestStdio::read_descriptor(std::uint32_t fd, std::uint64_t offset, std::span<std::byte> out) const {
+std::optional<int> GuestStdio::host_descriptor(std::uint32_t fd) const {
     if (fd < 3 || fd - 3 >= fds_.size() || fds_[fd - 3].host < 0 || !fds_[fd - 3].readable) return std::nullopt;
-    std::size_t done = 0;
-    while (done < out.size()) {
-        const auto got = ::pread(fds_[fd - 3].host, out.data() + done, out.size() - done, static_cast<off_t>(offset + done));
-        if (got < 0 && errno == EINTR) continue;
-        if (got < 0) return std::nullopt;
-        if (got == 0) break;
-        done += static_cast<std::size_t>(got);
+    return fds_[fd - 3].host;
+}
+std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) const {
+    // The data folder may live on a case-sensitive host while the app was written for Android's case-insensitive
+    // storage: take the exact name when it exists, else the unique-by-iteration case-insensitive match.
+    std::filesystem::path current = root_;
+    const auto lower = [](std::string text) { for (auto& c : text) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32); return text; };
+    for (const auto& part : relative) {
+        std::error_code ec;
+        if (std::filesystem::exists(current / part, ec)) { current /= part; continue; }
+        bool found = false;
+        if (std::filesystem::is_directory(current, ec)) {
+            const auto wanted = lower(part.string());
+            for (const auto& entry : std::filesystem::directory_iterator(current, ec)) {
+                if (lower(entry.path().filename().string()) == wanted) { current /= entry.path().filename(); found = true; break; }
+            }
+        }
+        if (!found) current /= part;
     }
-    return done;
+    return current;
 }
 void GuestStdio::add_alias(std::string guest_prefix, std::string host_prefix) {
     while (guest_prefix.size() > 1 && guest_prefix.back() == '/') guest_prefix.pop_back();
@@ -83,7 +94,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
                 else if (part != ".") relative /= part;
             }
             std::error_code ec;
-            const auto host = root_ / relative;
+            const auto host = locate(relative);
             const bool is_dir = !escapes && std::filesystem::is_directory(host, ec);
             const bool is_file = !escapes && !is_dir && std::filesystem::is_regular_file(host, ec);
             if (!is_dir && !is_file) {
@@ -113,7 +124,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
             if (part == "..") return false;
             if (part != ".") relative /= part;
         }
-        host = root_ / relative;
+        host = locate(relative);
         return !relative.empty();
     };
     // int remove(const char* path): a file or an empty directory beneath the root.
@@ -282,7 +293,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         }
         std::uint32_t code = 0;
         std::error_code ec;
-        const auto host = root_ / relative;
+        const auto host = locate(relative);
         if (escapes) code = guest_eacces;
         else if (relative.empty() || std::filesystem::exists(host, ec)) code = 17;  // EEXIST
         else if (!std::filesystem::is_directory(host.parent_path(), ec)) code = guest_enoent;
@@ -306,7 +317,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
             else if (part != ".") relative /= part;
         }
         std::error_code ec;
-        const auto host = root_ / relative;
+        const auto host = locate(relative);
         const bool ok = !escapes && std::filesystem::is_directory(host, ec);
         if (trace_) trace_(path, "opendir", ok);
         if (!ok) {
@@ -390,8 +401,8 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         std::FILE* file = nullptr;
         std::uint32_t code = guest_enoent;
         if (files_.size() >= max_open && open_files() >= max_open) code = guest_emfile;
-        else if (!relative.empty() && !std::filesystem::is_directory(root_ / relative)) {
-            file = std::fopen((root_ / relative).string().c_str(), mode.c_str());
+        else if (!relative.empty() && !std::filesystem::is_directory(locate(relative))) {
+            file = std::fopen((locate(relative)).string().c_str(), mode.c_str());
             if (!file) code = errno == ENOENT ? guest_enoent : errno == EACCES ? guest_eacces : guest_einval;
         }
         if (trace_) trace_(path, mode, file != nullptr);

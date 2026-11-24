@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/heap.hpp"
+#include "atlan/abi.hpp"
 #include <algorithm>
 #include <vector>
 
@@ -69,6 +70,19 @@ void install_heap_services(ImportDispatcher& dispatcher, GuestHeap& heap) {
     // void* malloc(size_t)
     dispatcher.bind("malloc", [&heap](ImportCall& call) -> std::optional<std::string> {
         call.set_result(heap.allocate(call.runtime().memory, call.arg(0)));
+        return std::nullopt;
+    });
+    // char* strdup(const char*): a heap copy including the terminator; NULL when the heap is exhausted.
+    dispatcher.bind("strdup", [&heap](ImportCall& call) -> std::optional<std::string> {
+        std::string text;
+        if (!read_guest_string(call.runtime().memory, call.arg(0), 1U << 24, text)) return "strdup string is unreadable or too long";
+        const auto at = heap.allocate(call.runtime().memory, static_cast<std::uint32_t>(text.size() + 1));
+        if (at != 0) {
+            std::vector<std::byte> bytes(text.size() + 1, std::byte{0});
+            for (std::size_t i = 0; i < text.size(); ++i) bytes[i] = static_cast<std::byte>(text[i]);
+            if (!call.runtime().memory.write(at, bytes)) return "strdup copy is not writable";
+        }
+        call.set_result(at);
         return std::nullopt;
     });
     // void free(void*): free(NULL) is a no-op; anything else must be a live block.

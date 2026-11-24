@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace atlan {
 namespace {
@@ -176,6 +177,47 @@ void install_libc_extra(ImportDispatcher& dispatcher) {
     dispatcher.bind("powf", [](ImportCall& call) -> std::optional<std::string> { float_result(call, std::pow(float_arg(call, 0), float_arg(call, 1))); return std::nullopt; });
     dispatcher.bind("lroundf", [](ImportCall& call) -> std::optional<std::string> {
         call.set_result(static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(float_arg(call, 0))))); return std::nullopt; });
+    // void qsort(void* base, size_t n, size_t size, int (*cmp)(const void*, const void*)): a merge sort over element
+    // addresses that never moves guest data during comparisons, so the guest comparator always sees stable,
+    // valid pointers; the permutation is applied once at the end. Safe for inconsistent comparators.
+    dispatcher.bind("qsort", [](ImportCall& call) -> std::optional<std::string> {
+        const auto base = call.arg(0), count = call.arg(1), size = call.arg(2), compare = call.arg(3);
+        if (count < 2) return std::nullopt;
+        if (size == 0 || std::uint64_t{count} * size > (1ULL << 28) || std::uint64_t{base} + std::uint64_t{count} * size > 0x100000000ULL)
+            return "qsort array size is out of range";
+        std::vector<std::byte> data(std::size_t{count} * size);
+        if (!call.runtime().memory.read(base, data)) return "qsort array is unreadable";
+        std::optional<std::string> failure;
+        const auto less_or_equal = [&](std::uint32_t a, std::uint32_t b) {  // true when element a sorts before or equal to b
+            if (failure) return true;
+            const std::array<std::uint32_t, 2> args{base + a * size, base + b * size};
+            const auto outcome = call.dispatcher().call_back(call.runtime(), compare, args);
+            if (outcome.stop != Stop::returned) {
+                failure = "qsort comparator did not return normally" + (outcome.message.empty() ? std::string() : ": " + outcome.message) +
+                          (outcome.import.empty() ? std::string() : " (" + outcome.import + ")");
+                return true;
+            }
+            return static_cast<std::int32_t>(call.runtime().cpu.registers[0]) <= 0;
+        };
+        std::vector<std::uint32_t> order(count), scratch(count);
+        for (std::uint32_t i = 0; i < count; ++i) order[i] = i;
+        const std::function<void(std::uint32_t, std::uint32_t)> sort = [&](std::uint32_t lo, std::uint32_t hi) {
+            if (hi - lo < 2 || failure) return;
+            const auto mid = lo + (hi - lo) / 2;
+            sort(lo, mid); sort(mid, hi);
+            std::uint32_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) scratch[k++] = less_or_equal(order[i], order[j]) ? order[i++] : order[j++];
+            while (i < mid) scratch[k++] = order[i++];
+            while (j < hi) scratch[k++] = order[j++];
+            for (k = lo; k < hi; ++k) order[k] = scratch[k];
+        };
+        sort(0, count);
+        if (failure) return failure;
+        std::vector<std::byte> sorted(data.size());
+        for (std::uint32_t i = 0; i < count; ++i) std::memcpy(sorted.data() + std::size_t{i} * size, data.data() + std::size_t{order[i]} * size, size);
+        if (!call.runtime().memory.write(base, sorted)) return "qsort array is not writable";
+        return std::nullopt;
+    });
     // Process identity and termination. The guest has one process; ending it is reported, never swallowed.
     dispatcher.bind("getpid", [](ImportCall& call) -> std::optional<std::string> { call.set_result(1000); return std::nullopt; });
     dispatcher.bind("abort", [](ImportCall&) -> std::optional<std::string> { return "guest called abort()"; });

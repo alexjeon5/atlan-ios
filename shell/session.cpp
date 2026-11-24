@@ -138,7 +138,7 @@ void GuestSession::run() {
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
-        if (stdio) mmap_arena.set_file_reader([&](std::uint32_t fd, std::uint64_t offset, std::span<std::byte> out) { return stdio->read_descriptor(fd, offset, out); });
+        if (stdio) mmap_arena.set_host_descriptors([&](std::uint32_t fd) { return stdio->host_descriptor(fd); });
         mmap_arena.install(dispatcher);
         GuestThreads::Config thread_config;
         thread_config.errno_address = guard_page + 0x200;
@@ -203,14 +203,17 @@ void GuestSession::run() {
                 m.result = 0;
                 return std::nullopt;
             });
-            // Other void UI callbacks the guest raises on MainActivity: recorded in the log, no host effect yet.
-            for (const auto& [name, signature] : {std::pair<const char*, const char*>{"SendMsgFromAtlan", "(III[B)V"},
-                                                  {"JniArSettingData", "(IIII)V"}}) {
-                java.register_method("com/atlan/MainActivity", name, signature,
-                                     [this, name = std::string(name)](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+            // Other void UI callbacks the guest raises: recorded in the log, no host effect yet.
+            struct Callback { const char* cls; const char* name; const char* signature; };
+            for (const Callback& cb : {Callback{"com/atlan/MainActivity", "SendMsgFromAtlan", "(III[B)V"},
+                                       Callback{"com/atlan/MainActivity", "JniArSettingData", "(IIII)V"},
+                                       Callback{"com/atlan/MainActivity", "SendMsgFromTPEGD", "(III[B)V"},
+                                       Callback{"com/atlan/AtlanGLThread", "callBackGLThread", "()V"}}) {
+                java.register_method(cb.cls, cb.name, cb.signature,
+                                     [this, label = std::string(cb.cls).substr(std::string(cb.cls).rfind('/') + 1) + "." + cb.name](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
                     std::string args;
                     for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
-                    log_("java MainActivity." + name + "(" + args + ")");
+                    log_("java " + label + "(" + args + ")");
                     m.result = 0;
                     return std::nullopt;
                 });

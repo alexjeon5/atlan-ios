@@ -200,7 +200,7 @@ void heap_and_strings() {
     check(g.call(lock_trap, {0x4400}).stop == atlan::Stop::returned && g.mutexes.held(0x4400), "mutex lock");
     check(g.call(lock_trap, {0x4400}).stop == atlan::Stop::service_error, "relocking a held mutex reports deadlock");
     check(g.call(unlock_trap, {0x4400}).stop == atlan::Stop::returned && !g.mutexes.held(0x4400), "mutex unlock");
-    check(g.call(unlock_trap, {0x4400}).stop == atlan::Stop::service_error, "unlocking a free mutex is reported");
+    check(g.call(unlock_trap, {0x4400}).stop == atlan::Stop::returned && !g.mutexes.held(0x4400), "unlocking a free normal mutex succeeds as in Bionic");
     check(g.call(lock_trap, {0}).stop == atlan::Stop::service_error, "null mutex is reported");
     check(g.call(attr_init_trap, {0x4500}).stop == atlan::Stop::returned && get32(g.runtime.memory, 0x4500) == 0, "mutexattr_init");
     check(g.call(attr_type_trap, {0x4500, 1}).stop == atlan::Stop::returned && get32(g.runtime.memory, 0x4500) == 1, "settype recursive");

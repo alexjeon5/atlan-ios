@@ -50,7 +50,7 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"mkdir", 0xf000005c}, {"remove", 0xf0000060}, {"rename", 0xf0000064}, {"open", 0xf0000068},
                       {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
                       {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
-                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}};
+                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}, {"qsort", 0xf00000bc}, {"cmp", 0xf00000c0}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -282,12 +282,61 @@ void libc_extras() {
         tokens += text_at(f.runtime.memory, f.r0()) + "|";
     }
     check(tokens == "a|b|c|", "strtok tokens");
+    put_text(f.runtime.memory, data + 0x500, "DIR/A.TXT");
+    put_text(f.runtime.memory, data + 0x540, "r");
+    check(f.call("fopen", {data + 0x500, data + 0x540}).stop == atlan::Stop::returned && f.r0() != 0, "fopen matches names case-insensitively");
+    put_text(f.runtime.memory, data + 0x500, "DIR/missing.txt");
+    check(f.call("fopen", {data + 0x500, data + 0x540}).stop == atlan::Stop::returned && f.r0() == 0, "a missing file still fails");
+    // qsort calls back into a guest comparator (here a host service standing in for it).
+    f.dispatcher.bind("cmp", [&f](atlan::ImportCall& c) -> std::optional<std::string> {
+        const auto a = static_cast<std::int32_t>(get32(f.runtime.memory, c.arg(0))), b = static_cast<std::int32_t>(get32(f.runtime.memory, c.arg(1)));
+        c.set_result(static_cast<std::uint32_t>(a < b ? -1 : a > b ? 1 : 0));
+        return std::nullopt;
+    });
+    const std::int32_t unsorted[] = {5, -2, 9, 0, 3, 3, -7};
+    for (unsigned i = 0; i < 7; ++i) put32(f.runtime.memory, data + 0x400 + 4 * i, static_cast<std::uint32_t>(unsorted[i]));
+    f.runtime.cpu.registers[13] = stack;
+    check(f.call("qsort", {data + 0x400, 7, 4, 0xf00000c0}).stop == atlan::Stop::returned, "qsort returns");
+    const std::int32_t expected[] = {-7, -2, 0, 3, 3, 5, 9};
+    bool ordered = true;
+    for (unsigned i = 0; i < 7; ++i) ordered &= static_cast<std::int32_t>(get32(f.runtime.memory, data + 0x400 + 4 * i)) == expected[i];
+    check(ordered, "qsort orders the array through the comparator");
     // setjmp saves callee-saved state; longjmp resumes at the setjmp return address with the given value.
     f.runtime.cpu.registers[4] = 0x1234; f.runtime.cpu.registers[14] = 0xffff0000; f.runtime.cpu.registers[13] = stack;
     check(f.call("setjmp", {data + 0x300}).stop == atlan::Stop::returned && f.r0() == 0, "setjmp returns 0");
     check(f.call("longjmp", {data + 0x300, 7}).stop == atlan::Stop::returned && f.r0() == 7, "longjmp returns the value at the saved address");
     check(f.call("longjmp", {data + 0x300, 0}).stop == atlan::Stop::returned && f.r0() == 1, "longjmp(0) returns 1");
     check(f.call("longjmp", {data + 0x340, 1}).stop == atlan::Stop::service_error, "longjmp with an unfilled buffer stops");
+}
+void file_mapping() {
+    Fixture f;
+    f.arena.set_host_descriptors([&f](std::uint32_t fd) { return f.stdio.host_descriptor(fd); });
+    std::string content(10000, 'x');
+    for (std::size_t i = 0; i < content.size(); ++i) content[i] = static_cast<char>('a' + i % 26);
+    { std::ofstream out(f.root / "big.bin", std::ios::binary); out << content; }
+    put_text(f.runtime.memory, data, "big.bin");
+    check(f.call("open", {data, 0}).stop == atlan::Stop::returned && f.r0() >= 3 && f.r0() < 100, "open the file to map");
+    const auto fd = f.r0();
+    check(f.call("mmap", {0, 12288, 1, 0x2, fd, 0}).stop == atlan::Stop::returned && f.r0() >= 0x90000000 && f.r0() != 0xffffffff, "file mmap");
+    const auto at = f.r0();
+    std::vector<std::byte> got(12288);
+    check(f.runtime.memory.read(at, got), "mapping is readable");
+    bool same = true;
+    for (std::size_t i = 0; i < 10000; ++i) same &= static_cast<char>(got[i]) == content[i];
+    for (std::size_t i = 10000; i < 12288; ++i) same &= got[i] == std::byte{0};
+    check(same, "file content, then zeros past the end");
+    const std::array<std::byte, 1> one{std::byte{1}};
+    check(!f.runtime.memory.write(at, one), "read-only mapping rejects writes");
+    check(f.call("mmap", {0, 8192, 3, 0x2, fd, 4096}).stop == atlan::Stop::returned && f.r0() != 0xffffffff, "writable private mapping at an offset");
+    const auto rw = f.r0();
+    check(f.runtime.memory.write(rw + 10, one), "private mapping accepts writes");
+    std::string on_disk(10000, '\0');
+    { std::ifstream in(f.root / "big.bin", std::ios::binary); in.read(on_disk.data(), 10000); }
+    check(on_disk == content, "writes never reach the file");
+    std::array<std::byte, 1> back{};
+    check(f.runtime.memory.read(rw + 11, back) && static_cast<char>(back[0]) == content[4096 + 11], "offset mapping reads the right bytes");
+    check(f.call("munmap", {at, 12288}).stop == atlan::Stop::returned, "munmap of a file mapping");
+    check(f.call("mmap", {0, 4096, 1, 0x2, 99, 0}).stop == atlan::Stop::returned && f.r0() == 0xffffffff, "bad fd gives MAP_FAILED");
 }
 void jni_strings() {
     Fixture f;
@@ -398,6 +447,7 @@ int main() {
         directories_and_descriptors();
         properties_and_strings();
         tokenizing();
+        file_mapping();
         libc_extras();
         jni_strings();
         jni_arrays_and_misc();

@@ -3,7 +3,6 @@
 #include "atlan/imports.hpp"
 #include <functional>
 #include <map>
-#include <span>
 
 namespace atlan {
 // Private mmap/munmap over a dedicated guest address arena. Only
@@ -12,13 +11,13 @@ namespace atlan {
 // Failure to find space returns MAP_FAILED. The arena must outlive the dispatcher.
 class GuestMmap {
 public:
-    explicit GuestMmap(std::uint32_t base = 0x90000000, std::uint32_t limit = 512U * 1024 * 1024)
+    explicit GuestMmap(std::uint32_t base = 0x90000000, std::uint32_t limit = 768U * 1024 * 1024)
         : base_(base), limit_(limit) {}
-    // Reads file bytes for MAP_PRIVATE file mappings: (guest fd, offset, out) -> bytes read, nullopt on a bad fd.
-    // Without one, file-backed requests stop explicitly. The file content is copied at mmap time (no later
-    // write-through, matching MAP_PRIVATE), so a mapping costs its full length in memory.
-    using FileReader = std::function<std::optional<std::size_t>(std::uint32_t, std::uint64_t, std::span<std::byte>)>;
-    void set_file_reader(FileReader reader) { reader_ = std::move(reader); }
+    // Resolves a guest fd to a host descriptor that may be memory-mapped (nullopt: bad fd). Without one,
+    // file-backed requests stop explicitly. MAP_PRIVATE file mappings alias the host file pages lazily
+    // (copy-on-write; nothing is written back), so they cost memory only for the pages the guest touches.
+    using HostDescriptor = std::function<std::optional<int>(std::uint32_t)>;
+    void set_host_descriptors(HostDescriptor lookup) { host_fd_ = std::move(lookup); }
     void install(ImportDispatcher& dispatcher);
     // Returns 0 if no space; length is rounded up to whole pages.
     [[nodiscard]] std::uint32_t map(Memory& memory, std::uint32_t length, Permissions permissions);
@@ -26,7 +25,10 @@ public:
     [[nodiscard]] bool unmap(Memory& memory, std::uint32_t address, std::uint32_t length);
     [[nodiscard]] std::uint64_t live_bytes() const noexcept;
 private:
-    FileReader reader_;
+    HostDescriptor host_fd_;
+    // 0: no space; 0xffffffff: the host refused the mapping.
+    [[nodiscard]] std::uint32_t map_file(Memory& memory, int host_fd, std::uint32_t length, std::uint32_t offset, Permissions permissions);
+    [[nodiscard]] std::uint32_t reserve(std::uint32_t length);  // finds and records arena space; 0 if none
     std::uint32_t base_, limit_;
     std::map<std::uint32_t, std::uint32_t> used_;  // start -> page-rounded size
 };

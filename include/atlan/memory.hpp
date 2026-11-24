@@ -17,6 +17,11 @@ public:
     static constexpr std::uint32_t page_size = 4096;
     void map(std::uint32_t base, std::uint64_t size, Permissions permissions,
              std::span<const std::byte> initial = {});
+    // Maps pages that alias caller-owned host memory (for example a private file mapping) instead of
+    // copying it. `host` must point at `size` bytes valid for read and write until the last of these pages is
+    // unmapped, when `keepalive` is released. Overlap and alignment rules are those of map().
+    void map_external(std::uint32_t base, std::uint64_t size, Permissions permissions, std::byte* host,
+                      std::shared_ptr<void> keepalive);
     [[nodiscard]] std::byte* translate(std::uint64_t address, MemoryAccess access) noexcept;
     [[nodiscard]] bool read(std::uint32_t address, std::span<std::byte> out) noexcept;
     [[nodiscard]] bool write(std::uint32_t address, std::span<const std::byte> data) noexcept;
@@ -27,9 +32,12 @@ public:
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
 
 private:
-    struct alignas(8) Page {
-        std::array<std::byte, page_size> bytes{};
+    // A guest page: `data` points at its 4096 bytes, owned here or aliased from external host memory.
+    struct Page {
+        std::byte* data{};
         Permissions permissions{};
+        std::unique_ptr<std::byte[]> owned;  // set for ordinary pages
+        std::shared_ptr<void> keepalive;     // set for external pages (shared by all pages of one mapping)
     };
     std::map<std::uint32_t, std::unique_ptr<Page>> pages_;
     std::uint64_t generation_{};
