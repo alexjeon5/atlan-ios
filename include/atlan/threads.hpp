@@ -21,6 +21,21 @@ private:
     std::unordered_map<std::uint32_t, State> mutexes_;  // absent: statically initialized, normal
 };
 
+// Single guest thread POSIX semaphores, tracked by guest address in the host.
+// Waiting on a zero count can never be satisfied by another thread, so it stops
+// with a deadlock diagnostic instead of blocking.
+class SemaphoreTable {
+public:
+    void install(ImportDispatcher& dispatcher);
+    [[nodiscard]] bool exists(std::uint32_t address) const { return counts_.contains(address); }
+    [[nodiscard]] std::uint32_t value(std::uint32_t address) const {
+        const auto found = counts_.find(address);
+        return found == counts_.end() ? 0 : found->second;
+    }
+private:
+    std::unordered_map<std::uint32_t, std::uint32_t> counts_;
+};
+
 // Thread-specific data for the single guest thread. Destructors are recorded but
 // never run, since the guest thread never exits.
 class ThreadKeys {

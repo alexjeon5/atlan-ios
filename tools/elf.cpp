@@ -7,6 +7,7 @@
 #include "atlan/jni.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/mmap.hpp"
+#include "atlan/opensles.hpp"
 #include "atlan/stdio.hpp"
 #include "atlan/string_services.hpp"
 #include "atlan/lifetime.hpp"
@@ -74,6 +75,7 @@ int main(int argc, char* argv[]) {
             if (name == "__stack_chk_guard") return guard_page;
             // Bionic's stdin/stdout/stderr FILE array (3 x 84 bytes); stdio services identify streams by address.
             if (name == "__sF") return guard_page + 0x100;
+            if (const auto iid = atlan::OpenSles::data_symbol(name)) return *iid;
             return std::nullopt;
         };
         std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
@@ -115,6 +117,8 @@ int main(int argc, char* argv[]) {
         mutexes.install(dispatcher);
         atlan::VirtualFiles files(guard_page + 0x200);
         files.install(dispatcher);
+        atlan::SemaphoreTable semaphores;
+        semaphores.install(dispatcher);
         atlan::ThreadKeys thread_keys;
         thread_keys.install(dispatcher);
         atlan::AndroidLog android_log([&](const atlan::LogEntry& entry) {
@@ -132,6 +136,12 @@ int main(int argc, char* argv[]) {
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
         std::optional<atlan::JavaBootstrap> java;
         if (jni) java.emplace(runtime, dispatcher, atlan::JavaBootstrap::Config{});
+        std::optional<atlan::OpenSles> audio;
+        {
+            atlan::OpenSles::Config audio_config;
+            audio_config.trace = [&](const std::string& line) { if (log) std::cout << "[opensles] " << line << '\n'; };
+            audio.emplace(runtime, dispatcher, audio_config);
+        }
         const auto invoke = [&](std::string_view label, std::uint32_t address,
                                 std::span<const std::uint32_t> args) {
             const auto outcome = dispatcher.call(runtime, address, args, 0x70100000, 0xffff0000, budget);

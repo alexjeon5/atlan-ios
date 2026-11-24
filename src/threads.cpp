@@ -103,6 +103,43 @@ void MutexTable::install(ImportDispatcher& dispatcher) {
     });
 }
 
+void SemaphoreTable::install(ImportDispatcher& dispatcher) {
+    constexpr std::uint32_t sem_value_max = 0x7fffffff;
+    // int sem_init(sem_t*, int pshared, unsigned value)
+    dispatcher.bind("sem_init", [this](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) == 0) return "sem_init on a null semaphore";
+        if (call.arg(1) != 0) return "sem_init with pshared != 0 is not implemented";
+        if (call.arg(2) > sem_value_max) { call.set_result(0xffffffffU); return "sem_init value exceeds SEM_VALUE_MAX (errno EINVAL is not modelled)"; }
+        counts_[call.arg(0)] = call.arg(2);
+        call.set_result(0);
+        return std::nullopt;
+    });
+    // int sem_destroy(sem_t*)
+    dispatcher.bind("sem_destroy", [this](ImportCall& call) -> std::optional<std::string> {
+        if (counts_.erase(call.arg(0)) == 0) return "sem_destroy of a semaphore that was not initialized";
+        call.set_result(0);
+        return std::nullopt;
+    });
+    // int sem_post(sem_t*)
+    dispatcher.bind("sem_post", [this](ImportCall& call) -> std::optional<std::string> {
+        const auto found = counts_.find(call.arg(0));
+        if (found == counts_.end()) return "sem_post on a semaphore that was not initialized";
+        if (found->second == sem_value_max) return "sem_post would overflow SEM_VALUE_MAX";
+        ++found->second;
+        call.set_result(0);
+        return std::nullopt;
+    });
+    // int sem_wait(sem_t*)
+    dispatcher.bind("sem_wait", [this](ImportCall& call) -> std::optional<std::string> {
+        const auto found = counts_.find(call.arg(0));
+        if (found == counts_.end()) return "sem_wait on a semaphore that was not initialized";
+        if (found->second == 0) return "sem_wait would deadlock: count is zero and there is only one guest thread";
+        --found->second;
+        call.set_result(0);
+        return std::nullopt;
+    });
+}
+
 void ThreadKeys::install(ImportDispatcher& dispatcher) {
     // int pthread_key_create(pthread_key_t* key, void (*destructor)(void*))
     dispatcher.bind("pthread_key_create", [this](ImportCall& call) -> std::optional<std::string> {
