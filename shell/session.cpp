@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
+#include "atlan/gles.hpp"
 #include "atlan/elf.hpp"
 #include "atlan/android_log.hpp"
 #include "atlan/files.hpp"
@@ -153,6 +154,9 @@ void GuestSession::run() {
             log_("android_log " + std::to_string(entry.priority) + " " + entry.tag + ": " + entry.message);
         });
         android_log.install(dispatcher);
+        NullGlBackend null_gl;
+        Gles2 gles(config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl), Gles2::Config{guard_page + 0x800});
+        gles.install(dispatcher);
         dispatcher.attach(image);
         auto initializers = std::move(image.initializers);
         const auto* on_load = image.find("JNI_OnLoad");

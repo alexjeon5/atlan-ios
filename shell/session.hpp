@@ -7,7 +7,7 @@
 #include <string>
 #include "shell/surface.hpp"
 
-namespace atlan { class AudioSink; }
+namespace atlan { class AudioSink; class GlBackend; }
 namespace atlan::shell {
 enum class SessionState : std::uint8_t { idle, running, finished, failed };
 
@@ -17,6 +17,7 @@ struct SessionConfig {
     AudioSink* audio_sink{};                    // device sink; nullptr uses a silent recording sink
     std::string data_root;                      // guest-visible file root (the app Documents folder); empty disables stdio
     std::uint64_t native_init_budget{200000000};  // retired instructions for MainActivity.nativeInit
+    GlBackend* gl_backend{};                      // GLES2/EGL sink (Metal on devices); nullptr uses a no-op backend
     const SurfaceState* surface{};                // host surface size in native pixels; nullptr means unknown
     // Called on the guest thread when the guest reports MainActivity.setSurfaces(a, b). Arguments are passed through
     // unchanged; the embedder decides what they mean.
