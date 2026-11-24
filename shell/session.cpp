@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
+#include <algorithm>
 #include "atlan/gles.hpp"
 #include "atlan/elf.hpp"
 #include "atlan/android_log.hpp"
@@ -68,6 +69,16 @@ std::string describe_stop(const std::string& label, const CallOutcome& outcome) 
     else if (outcome.stop == Stop::budget_exhausted) line += " budget_exhausted";
     else line += std::string(" event=") + event_name(outcome.cpu.event);
     return line;
+}
+std::string describe_state(const Runtime& runtime, const ImportDispatcher& dispatcher) {
+    std::string out = "state pc=0x" + hex(runtime.pc()) + " lr=0x" + hex(runtime.cpu.registers[14]) +
+                      " sp=0x" + hex(runtime.cpu.registers[13]);
+    for (unsigned i = 0; i < 4; ++i) out += " r" + std::to_string(i) + "=0x" + hex(runtime.cpu.registers[i]);
+    std::vector<std::pair<std::string, std::uint64_t>> top(dispatcher.import_counts().begin(), dispatcher.import_counts().end());
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    out += " imports:";
+    for (std::size_t i = 0; i < top.size() && i < 8; ++i) out += " " + top[i].first + "=" + std::to_string(top[i].second);
+    return out;
 }
 }
 
@@ -247,9 +258,14 @@ void GuestSession::run() {
                 if (!sym || sym->type != 2) { log_(std::string(name) + " not exported"); return false; }
                 std::vector<std::uint32_t> call_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
                 call_args.insert(call_args.end(), extra.begin(), extra.end());
+                dispatcher.reset_import_counts();
                 const auto r = dispatcher.call(runtime, sym->address, call_args, stack_base + stack_bytes,
-                                               return_sentinel, config_.native_init_budget);
-                if (r.stop != Stop::returned) { fail(describe_stop(name, r)); return false; }
+                                               return_sentinel, config_.surface_call_budget);
+                if (r.stop != Stop::returned) {
+                    if (r.stop == Stop::budget_exhausted) log_(describe_state(runtime, dispatcher));
+                    fail(describe_stop(name, r));
+                    return false;
+                }
                 log_(std::string(name) + " returned 0x" + hex(runtime.cpu.registers[0]));
                 return true;
             };

@@ -102,6 +102,9 @@ public:
     [[nodiscard]] CallOutcome call_back(Runtime& runtime, std::uint32_t target,
                                         std::span<const std::uint32_t> arguments);
     [[nodiscard]] std::uint64_t remaining_budget() const noexcept { return remaining_; }
+    // Diagnostics: how often each import ran since the last reset (for telling a spin/wait loop from long work).
+    [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_counts() const noexcept { return counts_; }
+    void reset_import_counts() { counts_.clear(); }
 
     // Attaches the guest thread scheduler (optional). Without one the dispatcher runs a
     // single guest thread and blocking services report a deadlock diagnostic instead.
@@ -116,6 +119,7 @@ private:
     [[nodiscard]] CallOutcome run_to_return(Runtime& runtime, std::uint32_t return_target, bool pump = false);
     GuestThreads* threads_{};
     std::unordered_map<std::string, ImportService> services_;
+    std::unordered_map<std::string, std::uint64_t> counts_;
     std::unordered_map<std::uint32_t, std::string> traps_;  // trap base address -> name
     std::uint32_t return_target_{};
     std::uint64_t remaining_{};

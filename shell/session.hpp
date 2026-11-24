@@ -17,6 +17,7 @@ struct SessionConfig {
     AudioSink* audio_sink{};                    // device sink; nullptr uses a silent recording sink
     std::string data_root;                      // guest-visible file root (the app Documents folder); empty disables stdio
     std::uint64_t native_init_budget{200000000};  // retired instructions for MainActivity.nativeInit
+    std::uint64_t surface_call_budget{1000000000};  // retired instructions per createUISF/createGLSF/changedUISF/renderGLSF call
     std::uint32_t render_frames{3};               // renderGLSF calls after the surface is created
     GlBackend* gl_backend{};                      // GLES2/EGL sink (Metal on devices); nullptr uses a no-op backend
     const SurfaceState* surface{};                // host surface size in native pixels; nullptr means unknown
