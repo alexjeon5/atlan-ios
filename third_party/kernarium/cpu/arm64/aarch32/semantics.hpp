@@ -149,6 +149,24 @@ struct StepResult final {
 	const Instruction &instruction, A32Memory &memory) noexcept;
 
 /*
+ * An instruction whose dispatch was resolved ahead of time. prepare_a32()
+ * performs the checks and table lookups that execute_a32() repeats on every
+ * call (status, coverage, op_info, the operation switch) once, and returns the
+ * handler to call with the same arguments plus `info`. `run` is null when the
+ * instruction has no resolved handler (undefined or uncovered forms); callers
+ * then use execute_a32(), which reports the event. The caller must have
+ * verified key_is_aarch32(cpu.pc), as execute_a32() does. Results are
+ * identical to execute_a32() for every instruction.
+ */
+struct PreparedInstruction final {
+	using Run = StepResult (*)(CpuState &cpu, const Instruction &instruction,
+		A32Memory &memory, const void *info) noexcept;
+	Run run{};
+	const void *info{};
+};
+[[nodiscard]] PreparedInstruction prepare_a32(const Instruction &instruction) noexcept;
+
+/*
  * The single-instruction contract: fetches the instruction at the PC key in
  * `cpu.pc` through `memory` (access `execute`), decodes it against `profile`
  * in the ITSTATE in `cpu.a32_itstate`, and executes it. The engines decode

@@ -28,6 +28,7 @@ void Memory::map(std::uint32_t base, std::uint64_t size, Permissions permissions
         staged.emplace(static_cast<std::uint32_t>(base + offset), std::move(page));
     }
     pages_.merge(staged);
+    ++generation_;
 }
 
 std::byte* Memory::translate(std::uint64_t address, MemoryAccess access) noexcept {
@@ -81,6 +82,7 @@ void Memory::protect(std::uint32_t base, std::uint64_t size, Permissions permiss
             throw std::invalid_argument("unmapped ARM32 protection range");
     for (std::uint64_t at = base; at < end; at += page_size)
         pages_.at(static_cast<std::uint32_t>(at))->permissions = permissions;
+    ++generation_;
 }
 void Memory::unmap(std::uint32_t base, std::uint64_t size) {
     if (size == 0 || size > (std::uint64_t{1} << 32) - base || base % page_size != 0 || size % page_size != 0)

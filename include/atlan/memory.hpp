@@ -23,6 +23,8 @@ public:
     // Removes whole pages; unmapped pages inside the range are ignored.
     void unmap(std::uint32_t base, std::uint64_t size);
     void protect(std::uint32_t base, std::uint64_t size, Permissions permissions);
+    // Bumped by every map() and protect(); caches of decoded code compare it.
+    [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
 
 private:
     struct alignas(8) Page {
@@ -30,5 +32,6 @@ private:
         Permissions permissions{};
     };
     std::map<std::uint32_t, std::unique_ptr<Page>> pages_;
+    std::uint64_t generation_{};
 };
 }
