@@ -107,6 +107,11 @@ if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   target_link_libraries(block-cache-tests PRIVATE atlan_runtime kernarium_aarch32)
   target_compile_options(block-cache-tests PRIVATE -Wall -Wextra -Werror)
   add_test(NAME block-cache-differential COMMAND block-cache-tests)
+  if(ATLAN_SANITIZERS)
+    # ASan stack-use-after-return fake stacks make this test's tiny hot helpers ~100x slower on arm64 Linux.
+    set_tests_properties(block-cache-differential PROPERTIES
+      ENVIRONMENT "ASAN_OPTIONS=detect_stack_use_after_return=0" TIMEOUT 600)
+  endif()
 endif()
 
 if(ATLAN_BUILD_IOS)
