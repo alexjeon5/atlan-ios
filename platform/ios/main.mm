@@ -2,8 +2,11 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "apple_audio_sink.hpp"
+#include "metal_gl_backend.hpp"
+#import <QuartzCore/CAMetalLayer.h>
 #include "atlan/demo.hpp"
 #include "shell/data_file.hpp"
+#include "shell/render_config.hpp"
 #include "shell/session.hpp"
 #include <exception>
 #include <memory>
@@ -18,6 +21,9 @@
     UILabel* _map;
     std::unique_ptr<atlan::shell::GuestSession> _session;
     atlan::AppleAudioSink _audio;
+    atlan::shell::SurfaceState _surface;
+    UIView* _metalView;
+    std::unique_ptr<atlan::MetalGlBackend> _gl;
 }
 
 - (NSURL*)libraryURL {
@@ -88,10 +94,15 @@
     _log = [UITextView new];
     _log.editable = NO;
     _log.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-    _log.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    _log.backgroundColor = [UIColor.secondarySystemBackgroundColor colorWithAlphaComponent:0.55];
+    _metalView = [UIView new];
+    _metalView.layer.opaque = YES;
     auto* bar = [[UIStackView alloc] initWithArrangedSubviews:@[_library, _run, _map]];
     bar.spacing = 20;
     bar.alignment = UIStackViewAlignmentCenter;
+    [self.view insertSubview:_metalView atIndex:0];
+    _metalView.frame = self.view.bounds;
+    _metalView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     for (UIView* view in @[bar, _log]) {
         view.translatesAutoresizingMaskIntoConstraints = NO;
         [self.view addSubview:view];
@@ -156,6 +167,19 @@
     config.library_path = self.libraryURL.path.UTF8String;
     config.audio_sink = &_audio;
     config.data_root = self.documentsPath.UTF8String;
+    _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
+                                           self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
+    config.surface = &_surface;
+    // A CAMetalLayer sublayer sized in native pixels; GL output is presented there.
+    {
+        const auto size = _surface.get();
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.frame = _metalView.bounds;
+        layer.drawableSize = CGSizeMake(size.width, size.height);
+        [_metalView.layer addSublayer:layer];
+        _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
+        config.gl_backend = _gl.get();
+    }
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,
         [weakSelf](const std::string& line) {

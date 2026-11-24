@@ -124,6 +124,7 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
             return finish(Stop::unresolved_import, result);
         }
         const auto link = static_cast<std::uint32_t>(runtime.cpu.registers[14]);
+        ++counts_[trap->second];
         ImportCall call(*this, runtime, trap->second);
         if (auto error = service->second(call)) {
             outcome.import = trap->second;

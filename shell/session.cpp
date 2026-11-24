@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
+#include <algorithm>
+#include "atlan/gles.hpp"
 #include "atlan/elf.hpp"
 #include "atlan/android_log.hpp"
 #include "atlan/files.hpp"
@@ -67,6 +69,16 @@ std::string describe_stop(const std::string& label, const CallOutcome& outcome) 
     else if (outcome.stop == Stop::budget_exhausted) line += " budget_exhausted";
     else line += std::string(" event=") + event_name(outcome.cpu.event);
     return line;
+}
+std::string describe_state(const Runtime& runtime, const ImportDispatcher& dispatcher) {
+    std::string out = "state pc=0x" + hex(runtime.pc()) + " lr=0x" + hex(runtime.cpu.registers[14]) +
+                      " sp=0x" + hex(runtime.cpu.registers[13]);
+    for (unsigned i = 0; i < 4; ++i) out += " r" + std::to_string(i) + "=0x" + hex(runtime.cpu.registers[i]);
+    std::vector<std::pair<std::string, std::uint64_t>> top(dispatcher.import_counts().begin(), dispatcher.import_counts().end());
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    out += " imports:";
+    for (std::size_t i = 0; i < top.size() && i < 8; ++i) out += " " + top[i].first + "=" + std::to_string(top[i].second);
+    return out;
 }
 }
 
@@ -159,6 +171,9 @@ void GuestSession::run() {
             log_("android_log " + std::to_string(entry.priority) + " " + entry.tag + ": " + entry.message);
         });
         android_log.install(dispatcher);
+        NullGlBackend null_gl;
+        Gles2 gles(config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl), Gles2::Config{guard_page + 0x800});
+        gles.install(dispatcher);
         dispatcher.attach(image);
         auto initializers = std::move(image.initializers);
         const auto* on_load = image.find("JNI_OnLoad");
@@ -200,6 +215,12 @@ void GuestSession::run() {
                 std::string args;
                 for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
                 log_("java MainActivity.setSurfaces(" + args + ")");
+                if (config_.surface) {
+                    const auto size = config_.surface->get();
+                    log_("host surface " + std::to_string(size.width) + "x" + std::to_string(size.height));
+                }
+                if (config_.on_set_surfaces && m.args.size() >= 2)
+                    config_.on_set_surfaces(static_cast<std::int32_t>(m.args[0]), static_cast<std::int32_t>(m.args[1]));
                 m.result = 0;
                 return std::nullopt;
             });
@@ -233,6 +254,33 @@ void GuestSession::run() {
                 log_("nativeInit returned 0x" + hex(runtime.cpu.registers[0]));
             } else {
                 log_("nativeInit not exported");
+            }
+            // Surface and render entry points (plain Java_ exports: (env, this[, surface]) -> int).
+            const auto native = [&](const char* name, std::vector<std::uint32_t> extra) -> bool {
+                const auto* sym = image.find(name);
+                if (!sym || sym->type != 2) { log_(std::string(name) + " not exported"); return false; }
+                std::vector<std::uint32_t> call_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
+                call_args.insert(call_args.end(), extra.begin(), extra.end());
+                dispatcher.reset_import_counts();
+                const auto r = dispatcher.call(runtime, sym->address, call_args, stack_base + stack_bytes,
+                                               return_sentinel, config_.surface_call_budget);
+                if (r.stop != Stop::returned) {
+                    if (r.stop == Stop::budget_exhausted) log_(describe_state(runtime, dispatcher));
+                    fail(describe_stop(name, r));
+                    return false;
+                }
+                log_(std::string(name) + " returned 0x" + hex(runtime.cpu.registers[0]));
+                return true;
+            };
+            bool surfaces_ok = native_init_address != 0;
+            if (surfaces_ok) {
+                const auto surface = java.new_object(java.class_handle("android/view/Surface"));
+                surfaces_ok = native("Java_com_atlan_AtlanUISurfaceView_createUISF", {surface}) &&
+                              native("Java_com_atlan_AtlanGLSurfaceView_createGLSF", {}) &&
+                              native("Java_com_atlan_AtlanUISurfaceView_changedUISF", {});
+                for (std::uint32_t i = 0; surfaces_ok && i < config_.render_frames && !stop_.load(); ++i)
+                    surfaces_ok = native("Java_com_atlan_AtlanGLSurfaceView_renderGLSF", {});
+                if (!surfaces_ok) return;  // fail() already recorded the stop
             }
             // Run guest threads the library started, then deliver finished audio buffers.
             const auto pumped = dispatcher.pump(runtime, config_.initializer_budget);
