@@ -10,6 +10,7 @@
 #include "atlan/data_symbols.hpp"
 #include "atlan/stdio.hpp"
 #include "atlan/libc_services.hpp"
+#include "atlan/libc_extra.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/opensles.hpp"
 #include "atlan/string_services.hpp"
@@ -118,6 +119,8 @@ void GuestSession::run() {
         ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         install_libc_services(dispatcher);
+        install_time_services(dispatcher, guard_page + 0x400);
+        install_libc_extra(dispatcher);
         GuestHeap heap;
         install_heap_services(dispatcher, heap);
         install_string_services(dispatcher);
@@ -131,9 +134,12 @@ void GuestSession::run() {
             stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
+            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
+            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
+        if (stdio) mmap_arena.set_file_reader([&](std::uint32_t fd, std::uint64_t offset, std::span<std::byte> out) { return stdio->read_descriptor(fd, offset, out); });
         mmap_arena.install(dispatcher);
         GuestThreads::Config thread_config;
         thread_config.errno_address = guard_page + 0x200;
@@ -207,6 +213,18 @@ void GuestSession::run() {
                 m.result = 0;
                 return std::nullopt;
             });
+            // Other void UI callbacks the guest raises on MainActivity: recorded in the log, no host effect yet.
+            for (const auto& [name, signature] : {std::pair<const char*, const char*>{"SendMsgFromAtlan", "(III[B)V"},
+                                                  {"JniArSettingData", "(IIII)V"}}) {
+                java.register_method("com/atlan/MainActivity", name, signature,
+                                     [this, name = std::string(name)](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+                    std::string args;
+                    for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
+                    log_("java MainActivity." + name + "(" + args + ")");
+                    m.result = 0;
+                    return std::nullopt;
+                });
+            }
             const std::array<std::uint32_t, 2> args{java.vm(), 0};
             const auto outcome = dispatcher.call(runtime, on_load_address, args, stack_base + stack_bytes,
                                                  return_sentinel, config_.initializer_budget);

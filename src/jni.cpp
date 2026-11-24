@@ -2,6 +2,7 @@
 #include "atlan/jni.hpp"
 #include "atlan/abi.hpp"
 #include "atlan/text_codec.hpp"
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <stdexcept>
@@ -407,7 +408,14 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
         const std::string label = native_names()[slot];
         dispatcher.bind(label, [state, env_check, label, is_static, nonvirtual, shift, type, form](ImportCall& call) -> std::optional<std::string> {
             if (call.arg(0) != env_check) return label + " called with a foreign JNIEnv pointer";
-            const auto receiver = call.arg(1), id = call.arg(2 + shift);
+            // A global reference stands for its referent (class or object); the guest caches these across calls.
+            const auto resolve = [&state](std::uint32_t h) {
+                if (h >= global_handle_base + 4 && (h - global_handle_base) % 4 == 0 && (h - global_handle_base) / 4 <= state->globals.size() &&
+                    state->globals[(h - global_handle_base) / 4 - 1] != 0)
+                    return state->globals[(h - global_handle_base) / 4 - 1];
+                return h;
+            };
+            const auto receiver = resolve(call.arg(1)), id = call.arg(2 + shift);
             const auto valid = [](std::uint32_t h, std::uint32_t base, std::size_t count) {
                 return h >= base + 4 && (h - base) % 4 == 0 && (h - base) / 4 <= count;
             };
@@ -419,12 +427,15 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
                                 state->classes[(receiver - class_handle_base) / 4 - 1] != member.class_name
                           : !valid(receiver, object_handle_base, state->objects.size()) ||
                                 state->objects[(receiver - object_handle_base) / 4 - 1] != member.class_name)
-                return label + " receiver does not match the method's class";
+                return label + " receiver 0x" + [&] { char b[16]; std::snprintf(b, sizeof b, "%x", receiver); return std::string(b); }() +
+                       " (" + (!is_static && valid(receiver, object_handle_base, state->objects.size())
+                                   ? state->objects[(receiver - object_handle_base) / 4 - 1] : std::string("not a live handle")) +
+                       ") does not match the method's class " + member.class_name + "." + member.name;
             const auto handler = state->methods.find(member.class_name + '\x1f' + member.name + '\x1f' + member.signature);
             if (handler == state->methods.end())
                 return label + ": no host implementation for " + member.class_name + "." + member.name + member.signature;
             if (nonvirtual) {
-                const auto clazz = call.arg(2);
+                const auto clazz = resolve(call.arg(2));
                 if (!valid(clazz, class_handle_base, state->classes.size()) ||
                     state->classes[(clazz - class_handle_base) / 4 - 1] != member.class_name)
                     return label + " class argument does not match the method's class";
@@ -510,11 +521,17 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
         return at;
     };
     // jstring NewStringUTF(env, const char* text)
-    dispatcher.bind("JNIEnv::NewStringUTF", [this, env_check, from_guest](ImportCall& call) -> std::optional<std::string> {
+    dispatcher.bind("JNIEnv::NewStringUTF", [this, state, env_check, from_guest](ImportCall& call) -> std::optional<std::string> {
         if (call.arg(0) != env_check) return "JNIEnv::NewStringUTF called with a foreign JNIEnv pointer";
         std::string text;
         if (call.arg(1) == 0) { call.set_result(0); return std::nullopt; }
         if (!read_guest_string(call.runtime().memory, call.arg(1), 1U << 20, text)) return "JNIEnv::NewStringUTF text is unreadable or too long";
+        auto& stats = state->input_stats;
+        ++stats.calls;
+        if (std::none_of(text.begin(), text.end(), [](char c) { return static_cast<unsigned char>(c) >= 0x80; })) ++stats.ascii;
+        else if (text::utf8_to_utf16(text)) ++stats.utf8;
+        else if (text::cp949_to_utf16(text)) ++stats.cp949_only;
+        else ++stats.neither;
         const auto utf8 = from_guest(text);
         if (!utf8) return "JNIEnv::NewStringUTF text cannot be converted";
         const auto handle = new_string(*utf8);

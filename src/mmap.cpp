@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/mmap.hpp"
+#include <vector>
 
 namespace atlan {
 std::uint32_t GuestMmap::map(Memory& memory, std::uint32_t length, Permissions permissions) {
@@ -42,11 +43,29 @@ void GuestMmap::install(ImportDispatcher& dispatcher) {
         if (!call.read_arg(4, fd) || !call.read_arg(5, offset)) return "mmap stack arguments are unreadable";
         const auto addr = call.arg(0), length = call.arg(1), prot = call.arg(2), flags = call.arg(3);
         constexpr std::uint32_t map_private = 2, map_anonymous = 0x20;
-        if (flags != (map_private | map_anonymous) || fd != 0xffffffffU || offset != 0 || addr != 0)
-            return "mmap supports only anonymous private mappings without a hint (flags=" + std::to_string(flags) +
-                   " fd=" + std::to_string(static_cast<std::int32_t>(fd)) + ")";
+        const bool anonymous = flags == (map_private | map_anonymous) && fd == 0xffffffffU && offset == 0;
+        const bool file = flags == map_private && fd != 0xffffffffU && offset % Memory::page_size == 0;
+        if ((!anonymous && !file) || addr != 0 || (file && !reader_))
+            return "mmap supports only private mappings without a hint (flags=" + std::to_string(flags) +
+                   " fd=" + std::to_string(static_cast<std::int32_t>(fd)) + (file && !reader_ ? ", no file reader" : "") + ")";
         if (prot != 1 && prot != 3) return "mmap prot " + std::to_string(prot) + " is not supported";
-        const auto at = map(call.runtime().memory, length, prot == 1 ? Permissions::read : Permissions::read_write);
+        const auto permissions = prot == 1 ? Permissions::read : Permissions::read_write;
+        std::uint32_t at = 0;
+        if (anonymous) at = map(call.runtime().memory, length, permissions);
+        else {
+            if (length == 0 || length > limit_) { call.set_result(0xffffffffU); return std::nullopt; }
+            std::vector<std::byte> content(length);
+            const auto got = reader_(fd, offset, content);
+            if (!got) { call.set_result(0xffffffffU); return std::nullopt; }  // EBADF: MAP_FAILED
+            at = map(call.runtime().memory, length, Permissions::read_write);
+            if (at != 0) {
+                if (!call.runtime().memory.write(at, std::span<const std::byte>(content.data(), *got)))
+                    return "mmap could not fill the file mapping";
+                if (permissions != Permissions::read_write) {
+                    call.runtime().memory.protect(at, (std::uint64_t{length} + Memory::page_size - 1) & ~std::uint64_t{Memory::page_size - 1}, permissions);
+                }
+            }
+        }
         call.set_result(at != 0 ? at : 0xffffffffU);  // MAP_FAILED
         return std::nullopt;
     });

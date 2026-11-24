@@ -7,6 +7,7 @@
 #include "atlan/heap.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/libc_services.hpp"
+#include "atlan/libc_extra.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/opensles.hpp"
 #include "atlan/stdio.hpp"
@@ -103,6 +104,8 @@ int main(int argc, char* argv[]) {
         atlan::ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         atlan::install_libc_services(dispatcher);
+        atlan::install_time_services(dispatcher, guard_page + 0x400);
+        atlan::install_libc_extra(dispatcher);
         atlan::GuestHeap heap;
         atlan::install_heap_services(dispatcher, heap);
         atlan::install_string_services(dispatcher);
@@ -112,6 +115,8 @@ int main(int argc, char* argv[]) {
             stdio.emplace(root, guard_page + 0x200, [&](const std::string& path, const std::string& mode, bool ok) {
                 if (log) std::cout << "[fopen] " << path << " mode=" << mode << (ok ? " ok" : " failed") << '\n';
             });
+            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
+            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->install(dispatcher);
         }
         const std::map<std::string, std::string> properties;
@@ -119,6 +124,7 @@ int main(int argc, char* argv[]) {
             if (log) std::cout << "[property] " << name << (known ? "" : " (unset)") << '\n';
         });
         atlan::GuestMmap mmap_arena;
+        if (stdio) mmap_arena.set_file_reader([&](std::uint32_t fd, std::uint64_t offset, std::span<std::byte> out) { return stdio->read_descriptor(fd, offset, out); });
         mmap_arena.install(dispatcher);
         atlan::GuestThreads::Config thread_config;
         thread_config.errno_address = guard_page + 0x200;
@@ -221,6 +227,13 @@ int main(int argc, char* argv[]) {
             }
             if (!ok) return 2;
         }
+        const auto print_string_stats = [&] {
+            if (!java) return;
+            const auto& st = java->string_input_stats();
+            std::cout << "jni NewStringUTF input: calls=" << st.calls << " ascii=" << st.ascii << " utf8=" << st.utf8
+                      << " cp949_only=" << st.cp949_only << " neither=" << st.neither << '\n';
+        };
+        print_string_stats();
         if (pump_budget != 0) {
             const auto outcome = dispatcher.pump(runtime, pump_budget);
             std::cout << "pump stop=" << static_cast<int>(outcome.stop) << " retired=" << outcome.retired
@@ -230,6 +243,7 @@ int main(int argc, char* argv[]) {
             if (outcome.stop == atlan::Stop::service_error) std::cout << " failing_service=" << outcome.import;
             if (outcome.thread != 0) std::cout << " guest_thread=" << outcome.thread << " pc=0x" << std::hex << runtime.pc() << std::dec;
             std::cout << '\n';
+            print_string_stats();
             if (outcome.stop != atlan::Stop::returned) return 2;
         }
     } catch (const std::exception& error) {

@@ -2,6 +2,9 @@
 #include "atlan/libc_services.hpp"
 #include <array>
 #include <chrono>
+#include <cstring>
+#include <ctime>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -154,6 +157,63 @@ void install_libc_services(ImportDispatcher& dispatcher) {
     dispatcher.bind("__stack_chk_fail", [](ImportCall&) -> std::optional<std::string> {
         return "guest stack protector failure (__stack_chk_fail)";
     });
+    // setpriority/getpriority(PRIO_PROCESS, id): guest threads are cooperative and the host schedules them, so the
+    // value is kept as state only (what getpriority reports back); it does not change scheduling.
+    const auto nice = std::make_shared<std::map<std::uint32_t, std::int32_t>>();
+    dispatcher.bind("setpriority", [nice](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != 0) return "setpriority supports only PRIO_PROCESS";
+        const auto value = static_cast<std::int32_t>(call.arg(2));
+        (*nice)[call.arg(1)] = value < -20 ? -20 : value > 19 ? 19 : value;
+        call.set_result(0);
+        return std::nullopt;
+    });
+    dispatcher.bind("getpriority", [nice](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != 0) return "getpriority supports only PRIO_PROCESS";
+        const auto found = nice->find(call.arg(1));
+        call.set_result(static_cast<std::uint32_t>(found == nice->end() ? 0 : found->second));
+        return std::nullopt;
+    });
+    // setjmp/longjmp family. The jmp_buf holds, in this host's own layout: r4-r11, sp, lr (bit 0 = Thumb state),
+    // then d8-d15 (26 words, within Bionic's 64-word jmp_buf). A jump returns to the saved lr with the saved
+    // callee-saved state, so it works across any number of frames and Thumb/ARM callers. Signal masks are not kept.
+    for (const char* name : {"setjmp", "_setjmp", "sigsetjmp"}) {
+        dispatcher.bind(name, [name](ImportCall& call) -> std::optional<std::string> {
+            auto& cpu = call.runtime().cpu;
+            std::array<std::byte, 26 * 4> raw{};
+            const auto put = [&](unsigned word, std::uint32_t value) {
+                for (unsigned b = 0; b < 4; ++b) raw[4 * word + b] = std::byte((value >> (8 * b)) & 255);
+            };
+            for (unsigned i = 0; i < 8; ++i) put(i, static_cast<std::uint32_t>(cpu.registers[4 + i]));
+            put(8, static_cast<std::uint32_t>(cpu.registers[13]));
+            put(9, static_cast<std::uint32_t>(cpu.registers[14]));
+            std::memcpy(raw.data() + 40, reinterpret_cast<const std::byte*>(cpu.vectors.data()) + 64, 64);
+            if (!call.runtime().memory.write(call.arg(0), raw)) return std::string(name) + " jmp_buf is not writable";
+            call.set_result(0);
+            return std::nullopt;
+        });
+    }
+    for (const char* name : {"longjmp", "_longjmp", "siglongjmp"}) {
+        dispatcher.bind(name, [name](ImportCall& call) -> std::optional<std::string> {
+            auto& cpu = call.runtime().cpu;
+            std::array<std::byte, 26 * 4> raw{};
+            if (!call.runtime().memory.read(call.arg(0), raw)) return std::string(name) + " jmp_buf is unreadable";
+            const auto get = [&](unsigned word) {
+                std::uint32_t value = 0;
+                for (unsigned b = 0; b < 4; ++b) value |= std::uint32_t(std::to_integer<std::uint8_t>(raw[4 * word + b])) << (8 * b);
+                return value;
+            };
+            if (get(8) == 0 || get(9) == 0) return std::string(name) + " jmp_buf was never filled by setjmp";
+            const std::uint32_t value = call.arg(1) == 0 ? 1 : call.arg(1);
+            for (unsigned i = 0; i < 8; ++i) cpu.registers[4 + i] = get(i);
+            cpu.registers[13] = get(8);
+            cpu.registers[14] = get(9);
+            std::memcpy(reinterpret_cast<std::byte*>(cpu.vectors.data()) + 64, raw.data() + 40, 64);
+            call.set_result(value);
+            call.runtime().start(get(9));  // resume at the setjmp return address instead of longjmp's caller
+            call.transfer();
+            return std::nullopt;
+        });
+    }
     // int clock_gettime(clockid_t clock, struct timespec* out), 32-bit Linux ABI.
     // Only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) are supported.
     dispatcher.bind("clock_gettime", [](ImportCall& call) -> std::optional<std::string> {
@@ -169,6 +229,95 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         for (unsigned i = 0; i < 8; ++i) bytes[i] = std::byte((words[i / 4] >> (8 * (i % 4))) & 255);
         if (!call.runtime().memory.write(call.arg(1), bytes)) return "clock_gettime guest memory fault";
         call.set_result(0);
+        return std::nullopt;
+    });
+    // int gettimeofday(struct timeval* tv, struct timezone* tz): wall clock, 32-bit ABI; tz is reported as UTC.
+    dispatcher.bind("gettimeofday", [](ImportCall& call) -> std::optional<std::string> {
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now);
+        const auto micros = static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - seconds).count());
+        const std::uint32_t words[2]{static_cast<std::uint32_t>(seconds.count()), micros};
+        if (call.arg(0) != 0) {
+            std::array<std::byte, 8> bytes{};
+            for (unsigned i = 0; i < 8; ++i) bytes[i] = std::byte((words[i / 4] >> (8 * (i % 4))) & 255);
+            if (!call.runtime().memory.write(call.arg(0), bytes)) return "gettimeofday guest memory fault";
+        }
+        if (call.arg(1) != 0) {
+            const std::array<std::byte, 8> zone{};
+            if (!call.runtime().memory.write(call.arg(1), zone)) return "gettimeofday timezone guest memory fault";
+        }
+        call.set_result(0);
+        return std::nullopt;
+    });
+    // time_t time(time_t* out)
+    dispatcher.bind("time", [](ImportCall& call) -> std::optional<std::string> {
+        const auto seconds = static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        if (call.arg(0) != 0) {
+            std::array<std::byte, 4> bytes{};
+            for (unsigned i = 0; i < 4; ++i) bytes[i] = std::byte((seconds >> (8 * i)) & 255);
+            if (!call.runtime().memory.write(call.arg(0), bytes)) return "time guest memory fault";
+        }
+        call.set_result(seconds);
+        return std::nullopt;
+    });
+}
+}
+
+namespace atlan {
+namespace {
+// Bionic 32-bit struct tm: nine ints, then tm_gmtoff (long) and tm_zone (const char*).
+bool read_tm(Memory& memory, std::uint32_t address, std::tm& out) {
+    std::array<std::byte, 36> raw{};
+    if (!memory.read(address, raw)) return false;
+    std::int32_t v[9];
+    for (unsigned i = 0; i < 9; ++i) {
+        std::uint32_t word = 0;
+        for (unsigned b = 0; b < 4; ++b) word |= std::uint32_t(std::to_integer<std::uint8_t>(raw[4 * i + b])) << (8 * b);
+        v[i] = static_cast<std::int32_t>(word);
+    }
+    out = {};
+    out.tm_sec = v[0]; out.tm_min = v[1]; out.tm_hour = v[2]; out.tm_mday = v[3]; out.tm_mon = v[4];
+    out.tm_year = v[5]; out.tm_wday = v[6]; out.tm_yday = v[7]; out.tm_isdst = v[8];
+    return true;
+}
+bool write_tm(Memory& memory, std::uint32_t address, const std::tm& t) {
+    const std::int32_t v[11]{t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday,
+                             t.tm_isdst, static_cast<std::int32_t>(t.tm_gmtoff), 0};
+    std::array<std::byte, 44> raw{};
+    for (unsigned i = 0; i < 11; ++i)
+        for (unsigned b = 0; b < 4; ++b) raw[4 * i + b] = std::byte((static_cast<std::uint32_t>(v[i]) >> (8 * b)) & 255);
+    return memory.write(address, raw);
+}
+}
+void install_time_services(ImportDispatcher& dispatcher, std::uint32_t static_tm) {
+    for (const bool local : {true, false}) {
+        for (const bool reentrant : {false, true}) {
+            const std::string name = std::string(local ? "localtime" : "gmtime") + (reentrant ? "_r" : "");
+            dispatcher.bind(name, [name, local, reentrant, static_tm](ImportCall& call) -> std::optional<std::string> {
+                std::array<std::byte, 4> word{};
+                if (!call.runtime().memory.read(call.arg(0), word)) return name + " time_t is unreadable";
+                std::int64_t seconds = 0;
+                for (unsigned b = 0; b < 4; ++b) seconds |= std::int64_t(std::to_integer<std::uint8_t>(word[b])) << (8 * b);
+                seconds = static_cast<std::int32_t>(seconds);
+                const std::time_t t = static_cast<std::time_t>(seconds);
+                std::tm out{};
+                if (!(local ? localtime_r(&t, &out) : gmtime_r(&t, &out))) { call.set_result(0); return std::nullopt; }
+                const auto target = reentrant ? call.arg(1) : static_tm;
+                if (!write_tm(call.runtime().memory, target, out)) return name + " result buffer is not writable";
+                call.set_result(target);
+                return std::nullopt;
+            });
+        }
+    }
+    // time_t mktime(struct tm*): normalizes the fields in place.
+    dispatcher.bind("mktime", [](ImportCall& call) -> std::optional<std::string> {
+        std::tm t{};
+        if (!read_tm(call.runtime().memory, call.arg(0), t)) return "mktime struct tm is unreadable";
+        t.tm_isdst = -1;
+        const std::time_t result = std::mktime(&t);
+        if (!write_tm(call.runtime().memory, call.arg(0), t)) return "mktime struct tm is not writable";
+        call.set_result(static_cast<std::uint32_t>(result == static_cast<std::time_t>(-1) ? 0xffffffffu : static_cast<std::uint32_t>(result)));
         return std::nullopt;
     });
 }

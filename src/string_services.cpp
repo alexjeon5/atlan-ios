@@ -14,12 +14,16 @@ bool byte_at(Memory& memory, std::uint32_t address, std::uint32_t offset, std::u
     return true;
 }
 // Compares up to `limit` bytes, stopping after a NUL when `text` is set.
-std::optional<std::string> compare(ImportCall& call, bool text, std::uint32_t limit, const char* name) {
+std::optional<std::string> compare(ImportCall& call, bool text, std::uint32_t limit, const char* name, bool fold = false) {
     if (limit > max_scan) return std::string(name) + " size exceeds service bound";
     for (std::uint32_t i = 0; i < limit; ++i) {
         std::uint8_t a{}, b{};
         if (!byte_at(call.runtime().memory, call.arg(0), i, a) || !byte_at(call.runtime().memory, call.arg(1), i, b))
             return std::string(name) + " read left mapped guest memory";
+        if (fold) {  // C locale: only ASCII letters fold
+            if (a >= 'A' && a <= 'Z') a = static_cast<std::uint8_t>(a + 32);
+            if (b >= 'A' && b <= 'Z') b = static_cast<std::uint8_t>(b + 32);
+        }
         if (a != b || (text && a == 0)) {
             call.set_result(static_cast<std::uint32_t>(static_cast<int>(a) - static_cast<int>(b)));
             return std::nullopt;
@@ -32,6 +36,8 @@ std::optional<std::string> compare(ImportCall& call, bool text, std::uint32_t li
 void install_string_services(ImportDispatcher& dispatcher) {
     dispatcher.bind("strcmp", [](ImportCall& call) { return compare(call, true, max_scan, "strcmp"); });
     dispatcher.bind("strncmp", [](ImportCall& call) { return compare(call, true, call.arg(2), "strncmp"); });
+    dispatcher.bind("strcasecmp", [](ImportCall& call) { return compare(call, true, max_scan, "strcasecmp", true); });
+    dispatcher.bind("strncasecmp", [](ImportCall& call) { return compare(call, true, call.arg(2), "strncasecmp", true); });
     dispatcher.bind("memcmp", [](ImportCall& call) { return compare(call, false, call.arg(2), "memcmp"); });
     // char* strncpy(char* dst, const char* src, size_t n): pads with NUL up to n.
     dispatcher.bind("strncpy", [](ImportCall& call) -> std::optional<std::string> {
@@ -69,6 +75,68 @@ void install_string_services(ImportDispatcher& dispatcher) {
             return "strchr exceeds service bound";
         });
     }
+    // char* strtok_r(char* s, const char* delim, char** save): the guest word at `save` carries the position.
+    dispatcher.bind("strtok_r", [](ImportCall& call) -> std::optional<std::string> {
+        auto& memory = call.runtime().memory;
+        const auto save = call.arg(2);
+        std::string delimiters;
+        if (!read_guest_string(memory, call.arg(1), max_scan, delimiters)) return "strtok_r delimiters are unreadable";
+        std::uint32_t cursor = call.arg(0);
+        if (cursor == 0) {
+            std::array<std::byte, 4> word{};
+            if (!memory.read(save, word)) return "strtok_r save pointer is unreadable";
+            for (unsigned i = 0; i < 4; ++i) cursor |= std::uint32_t(std::to_integer<std::uint8_t>(word[i])) << (8 * i);
+            if (cursor == 0) { call.set_result(0); return std::nullopt; }
+        }
+        const auto store = [&](std::uint32_t value) {
+            std::array<std::byte, 4> word{};
+            for (unsigned i = 0; i < 4; ++i) word[i] = std::byte((value >> (8 * i)) & 255);
+            return memory.write(save, word);
+        };
+        const auto is_delimiter = [&](std::uint8_t c) { return delimiters.find(static_cast<char>(c)) != std::string::npos; };
+        std::uint8_t value{};
+        std::uint32_t i = 0;
+        for (;; ++i) {  // skip leading delimiters
+            if (i >= max_scan) return "strtok_r exceeds service bound";
+            if (!byte_at(memory, cursor, i, value)) return "strtok_r read left mapped guest memory";
+            if (value == 0) { if (!store(cursor + i)) return "strtok_r save pointer is not writable"; call.set_result(0); return std::nullopt; }
+            if (!is_delimiter(value)) break;
+        }
+        const std::uint32_t token = cursor + i;
+        for (;; ++i) {
+            if (i >= max_scan) return "strtok_r exceeds service bound";
+            if (!byte_at(memory, cursor, i, value)) return "strtok_r read left mapped guest memory";
+            if (value == 0 || is_delimiter(value)) break;
+        }
+        const std::uint32_t end = cursor + i;
+        if (value == 0) {
+            if (!store(end)) return "strtok_r save pointer is not writable";
+        } else {
+            const std::array<std::byte, 1> nul{std::byte{0}};
+            if (!memory.write(end, nul)) return "strtok_r token is not writable";
+            if (!store(end + 1)) return "strtok_r save pointer is not writable";
+        }
+        call.set_result(token);
+        return std::nullopt;
+    });
+    // int atoi(const char*) : C-locale decimal, optional leading blanks and sign, saturating like strtol cast to int.
+    dispatcher.bind("atoi", [](ImportCall& call) -> std::optional<std::string> {
+        std::string text;
+        if (!read_guest_string(call.runtime().memory, call.arg(0), 4096, text)) return "atoi string is unreadable or too long";
+        std::size_t i = 0;
+        while (i < text.size() && (text[i] == ' ' || (text[i] >= '\t' && text[i] <= '\r'))) ++i;
+        bool negative = false;
+        if (i < text.size() && (text[i] == '-' || text[i] == '+')) negative = text[i++] == '-';
+        std::int64_t value = 0;
+        for (; i < text.size() && text[i] >= '0' && text[i] <= '9'; ++i) {
+            value = value * 10 + (text[i] - '0');
+            if (value > 0x7fffffffLL + 1) value = 0x7fffffffLL + 1;
+        }
+        if (negative) value = -value;
+        value = value > 0x7fffffffLL ? 0x7fffffffLL : value;
+        call.set_result(static_cast<std::uint32_t>(static_cast<std::int32_t>(value)));
+        return std::nullopt;
+    });
 }
 void install_system_properties(ImportDispatcher& dispatcher, const std::map<std::string, std::string>& properties,
                                std::function<void(const std::string&, bool)> trace) {
