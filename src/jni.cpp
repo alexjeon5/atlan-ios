@@ -6,7 +6,7 @@
 
 namespace atlan {
 namespace {
-constexpr std::uint32_t class_handle_base = 0xc0000000, member_handle_base = 0xd0000000, object_handle_base = 0xe0000000, global_handle_base = 0xe8000000;
+constexpr std::uint32_t class_handle_base = 0xc0000000, member_handle_base = 0xd0000000, object_handle_base = 0xe0000000, global_handle_base = 0xe8000000, array_handle_base = 0xe6000000;
 std::vector<std::string> make_native_names() {
     std::vector<std::string> names(4);  // reserved0-3
     const auto add = [&](std::string name) { names.push_back("JNIEnv::" + std::move(name)); };
@@ -106,6 +106,16 @@ std::optional<std::string> JavaBootstrap::string_text(std::uint32_t handle) cons
         (handle - object_handle_base) / 4 > state_->objects.size() || !state_->is_string[(handle - object_handle_base) / 4 - 1])
         return std::nullopt;
     return state_->texts[(handle - object_handle_base) / 4 - 1];
+}
+std::uint32_t JavaBootstrap::new_byte_array(const std::vector<std::uint8_t>& bytes) {
+    if (state_->byte_arrays.size() >= 65536 || bytes.size() > (1U << 24)) return 0;
+    state_->byte_arrays.push_back(bytes);
+    return array_handle_base + 4 * static_cast<std::uint32_t>(state_->byte_arrays.size());
+}
+std::optional<std::vector<std::uint8_t>> JavaBootstrap::byte_array(std::uint32_t handle) const {
+    if (handle < array_handle_base + 4 || (handle - array_handle_base) % 4 != 0 || (handle - array_handle_base) / 4 > state_->byte_arrays.size())
+        return std::nullopt;
+    return state_->byte_arrays[(handle - array_handle_base) / 4 - 1];
 }
 const std::string& JavaBootstrap::invoke_name(std::size_t slot) { return invoke_names().at(slot); }
 const std::string& JavaBootstrap::native_name(std::size_t slot) { return native_names().at(slot); }
@@ -327,15 +337,17 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
     }
     // Call<T>Method / Call<T>MethodV / Call<T>MethodA (slots 34-63) and the static
     // forms (114-143): only host-registered methods run; everything else stops by name.
-    for (unsigned slot : [] { std::array<unsigned, 60> all{}; unsigned n = 0;
-                              for (unsigned base : {34u, 114u}) for (unsigned i = 0; i < 30; ++i) all[n++] = base + i;
+    for (unsigned slot : [] { std::array<unsigned, 90> all{}; unsigned n = 0;
+                              for (unsigned base : {34u, 64u, 114u}) for (unsigned i = 0; i < 30; ++i) all[n++] = base + i;
                               return all; }()) {
-        const bool is_static = slot >= 114;
-        const unsigned type = (slot - (is_static ? 114 : 34)) / 3, form = (slot - (is_static ? 114 : 34)) % 3;
+        const bool is_static = slot >= 114, nonvirtual = slot >= 64 && slot < 94;
+        const unsigned shift = nonvirtual ? 1 : 0;  // CallNonvirtual*(env, obj, clazz, mid, ...)
+        const unsigned base_slot = is_static ? 114 : nonvirtual ? 64 : 34;
+        const unsigned type = (slot - base_slot) / 3, form = (slot - base_slot) % 3;
         const std::string label = native_names()[slot];
-        dispatcher.bind(label, [state, env_check, label, is_static, type, form](ImportCall& call) -> std::optional<std::string> {
+        dispatcher.bind(label, [state, env_check, label, is_static, nonvirtual, shift, type, form](ImportCall& call) -> std::optional<std::string> {
             if (call.arg(0) != env_check) return label + " called with a foreign JNIEnv pointer";
-            const auto receiver = call.arg(1), id = call.arg(2);
+            const auto receiver = call.arg(1), id = call.arg(2 + shift);
             const auto valid = [](std::uint32_t h, std::uint32_t base, std::size_t count) {
                 return h >= base + 4 && (h - base) % 4 == 0 && (h - base) / 4 <= count;
             };
@@ -351,6 +363,12 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
             const auto handler = state->methods.find(member.class_name + '\x1f' + member.name + '\x1f' + member.signature);
             if (handler == state->methods.end())
                 return label + ": no host implementation for " + member.class_name + "." + member.name + member.signature;
+            if (nonvirtual) {
+                const auto clazz = call.arg(2);
+                if (!valid(clazz, class_handle_base, state->classes.size()) ||
+                    state->classes[(clazz - class_handle_base) / 4 - 1] != member.class_name)
+                    return label + " class argument does not match the method's class";
+            }
             // Return-type slot must match the signature's return type.
             const char kinds[] = "LZBCSIJFDV";
             const auto close = member.signature.find(')');
@@ -364,8 +382,8 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
             request.signature = member.signature;
             request.receiver = receiver;
             std::optional<VarArgs> list;
-            if (form == 0) list = VarArgs::from_call(call, 3);
-            else if (form == 1) list = VarArgs::from_va_list(call.runtime().memory, call.arg(3));
+            if (form == 0) list = VarArgs::from_call(call, 3 + shift);
+            else if (form == 1) list = VarArgs::from_va_list(call.runtime().memory, call.arg(3 + shift));
             unsigned index = 0;
             for (std::size_t i = 1; i < close; ++i) {
                 char c = member.signature[i];
@@ -375,8 +393,8 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
                 const bool wide = c == 'J' || c == 'D';
                 if (form == 2) {  // jvalue array: 8 bytes per argument
                     std::array<std::byte, 8> raw{};
-                    if (call.arg(3) == 0 || std::uint64_t{call.arg(3)} + 8ULL * (index + 1) > 0x100000000ULL ||
-                        !call.runtime().memory.read(call.arg(3) + 8 * index, raw))
+                    if (call.arg(3 + shift) == 0 || std::uint64_t{call.arg(3 + shift)} + 8ULL * (index + 1) > 0x100000000ULL ||
+                        !call.runtime().memory.read(call.arg(3 + shift) + 8 * index, raw))
                         return label + " jvalue array is unreadable";
                     for (unsigned b = 0; b < 8; ++b) value |= std::to_integer<std::uint64_t>(raw[b]) << (8 * b);
                     if (!wide) value &= 0xffffffffULL;
@@ -450,6 +468,110 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
         if (call.arg(0) != env_check) return "JNIEnv::ReleaseStringUTFChars called with a foreign JNIEnv pointer";
         if (state->copies.erase(call.arg(2)) != 1) return "JNIEnv::ReleaseStringUTFChars pointer is not a live copy";
         if (state->copies.empty()) state->scratch_used = 0;
+        return std::nullopt;
+    });
+    // jint GetVersion(env)
+    dispatcher.bind("JNIEnv::GetVersion", [env_check](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetVersion called with a foreign JNIEnv pointer";
+        call.set_result(JavaBootstrap::version_1_6);
+        return std::nullopt;
+    });
+    // No host-side code throws Java exceptions (Throw/ThrowNew stop by name), so none is ever pending.
+    for (const char* name : {"JNIEnv::ExceptionCheck", "JNIEnv::ExceptionOccurred", "JNIEnv::ExceptionClear"}) {
+        dispatcher.bind(name, [env_check, name](ImportCall& call) -> std::optional<std::string> {
+            if (call.arg(0) != env_check) return std::string(name) + " called with a foreign JNIEnv pointer";
+            call.set_result(0);
+            return std::nullopt;
+        });
+    }
+    // jclass GetObjectClass(env, obj)
+    dispatcher.bind("JNIEnv::GetObjectClass", [this, env_check, state](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetObjectClass called with a foreign JNIEnv pointer";
+        const auto h = call.arg(1);
+        if (h < object_handle_base + 4 || (h - object_handle_base) % 4 != 0 || (h - object_handle_base) / 4 > state->objects.size())
+            return "JNIEnv::GetObjectClass argument is not a host object";
+        call.set_result(class_handle(state->objects[(h - object_handle_base) / 4 - 1]));
+        return std::nullopt;
+    });
+    // byte[] support: NewByteArray, GetArrayLength, Get/SetByteArrayRegion, Get/ReleaseByteArrayElements.
+    const auto array_ok = [state](std::uint32_t h) {
+        return h >= array_handle_base + 4 && (h - array_handle_base) % 4 == 0 && (h - array_handle_base) / 4 <= state->byte_arrays.size();
+    };
+    const auto array_ref = [state](std::uint32_t h) -> std::vector<std::uint8_t>& { return state->byte_arrays[(h - array_handle_base) / 4 - 1]; };
+    dispatcher.bind("JNIEnv::NewByteArray", [this, env_check](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::NewByteArray called with a foreign JNIEnv pointer";
+        const auto length = static_cast<std::int32_t>(call.arg(1));
+        if (length < 0 || length > (1 << 24)) return "JNIEnv::NewByteArray length is invalid or too large";
+        const auto handle = new_byte_array(std::vector<std::uint8_t>(static_cast<std::size_t>(length)));
+        if (handle == 0) return "JNIEnv::NewByteArray reference table is full";
+        call.set_result(handle);
+        return std::nullopt;
+    });
+    dispatcher.bind("JNIEnv::GetArrayLength", [env_check, array_ok, array_ref](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetArrayLength called with a foreign JNIEnv pointer";
+        if (!array_ok(call.arg(1))) return "JNIEnv::GetArrayLength argument is not a byte array (other array types are not modelled)";
+        call.set_result(static_cast<std::uint32_t>(array_ref(call.arg(1)).size()));
+        return std::nullopt;
+    });
+    for (const bool set : {false, true}) {
+        const std::string label = set ? "JNIEnv::SetByteArrayRegion" : "JNIEnv::GetByteArrayRegion";
+        dispatcher.bind(label, [env_check, array_ok, array_ref, set, label](ImportCall& call) -> std::optional<std::string> {
+            if (call.arg(0) != env_check) return label + " called with a foreign JNIEnv pointer";
+            if (!array_ok(call.arg(1))) return label + " argument is not a byte array";
+            auto& bytes = array_ref(call.arg(1));
+            const auto start = static_cast<std::int32_t>(call.arg(2)), length = static_cast<std::int32_t>(call.arg(3));
+            if (start < 0 || length < 0 || std::uint64_t{static_cast<std::uint32_t>(start)} + static_cast<std::uint32_t>(length) > bytes.size())
+                return label + " range is outside the array (ArrayIndexOutOfBounds is not modelled)";
+            std::vector<std::byte> window(static_cast<std::size_t>(length));
+            std::uint32_t buffer{};
+            if (!call.read_arg(4, buffer)) return label + " buffer argument is unreadable";  // fifth word: on the stack
+            if (set) {
+                if (length != 0 && !call.runtime().memory.read(buffer, window)) return label + " buffer is unreadable";
+                for (std::size_t i = 0; i < window.size(); ++i) bytes[static_cast<std::size_t>(start) + i] = std::to_integer<std::uint8_t>(window[i]);
+            } else {
+                for (std::size_t i = 0; i < window.size(); ++i) window[i] = std::byte{bytes[static_cast<std::size_t>(start) + i]};
+                if (length != 0 && !call.runtime().memory.write(buffer, window)) return label + " buffer is not writable";
+            }
+            return std::nullopt;
+        });
+    }
+    // jbyte* GetByteArrayElements(env, array, jboolean* isCopy): a guest scratch copy.
+    dispatcher.bind("JNIEnv::GetByteArrayElements", [state, env_check, array_ok, array_ref](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetByteArrayElements called with a foreign JNIEnv pointer";
+        if (!array_ok(call.arg(1))) return "JNIEnv::GetByteArrayElements argument is not a byte array";
+        const auto& bytes = array_ref(call.arg(1));
+        const auto size = static_cast<std::uint32_t>(bytes.size());
+        if (state->scratch_used + std::uint64_t{size} + 8 > state->scratch_size) return "JNIEnv::GetByteArrayElements scratch memory is exhausted";
+        const auto at = state->scratch_base + state->scratch_used;
+        std::vector<std::byte> window(bytes.size());
+        for (std::size_t i = 0; i < window.size(); ++i) window[i] = std::byte{bytes[i]};
+        if (size != 0 && !call.runtime().memory.write(at, window)) return "JNIEnv::GetByteArrayElements cannot write the copy";
+        if (call.arg(2) != 0 && !put_guest8(call.runtime().memory, call.arg(2), 1)) return "JNIEnv::GetByteArrayElements isCopy is not writable";
+        state->copies[at] = size;
+        state->array_copies[at] = call.arg(1);
+        state->scratch_used += (size + 7) & ~7U;
+        call.set_result(at);
+        return std::nullopt;
+    });
+    // void ReleaseByteArrayElements(env, array, jbyte* elems, jint mode): 0 copy back+free, 1 JNI_COMMIT, 2 JNI_ABORT.
+    dispatcher.bind("JNIEnv::ReleaseByteArrayElements", [state, env_check, array_ok, array_ref](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::ReleaseByteArrayElements called with a foreign JNIEnv pointer";
+        const auto found = state->array_copies.find(call.arg(2));
+        if (!array_ok(call.arg(1)) || found == state->array_copies.end() || found->second != call.arg(1))
+            return "JNIEnv::ReleaseByteArrayElements pointer is not a live copy of the array";
+        const auto mode = call.arg(3);
+        if (mode > 2) return "JNIEnv::ReleaseByteArrayElements mode is invalid";
+        auto& bytes = array_ref(call.arg(1));
+        if (mode != 2 && !bytes.empty()) {
+            std::vector<std::byte> window(bytes.size());
+            if (!call.runtime().memory.read(call.arg(2), window)) return "JNIEnv::ReleaseByteArrayElements copy is unreadable";
+            for (std::size_t i = 0; i < window.size(); ++i) bytes[i] = std::to_integer<std::uint8_t>(window[i]);
+        }
+        if (mode != 1) {
+            state->copies.erase(call.arg(2));
+            state->array_copies.erase(found);
+            if (state->copies.empty()) state->scratch_used = 0;
+        }
         return std::nullopt;
     });
     // jint JavaVM::GetEnv(JavaVM* vm, void** penv, jint version)
