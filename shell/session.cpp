@@ -223,6 +223,28 @@ void GuestSession::run() {
             } else {
                 log_("nativeInit not exported");
             }
+            // Surface and render entry points (plain Java_ exports: (env, this[, surface]) -> int).
+            const auto native = [&](const char* name, std::vector<std::uint32_t> extra) -> bool {
+                const auto* sym = image.find(name);
+                if (!sym || sym->type != 2) { log_(std::string(name) + " not exported"); return false; }
+                std::vector<std::uint32_t> call_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
+                call_args.insert(call_args.end(), extra.begin(), extra.end());
+                const auto r = dispatcher.call(runtime, sym->address, call_args, stack_base + stack_bytes,
+                                               return_sentinel, config_.native_init_budget);
+                if (r.stop != Stop::returned) { fail(describe_stop(name, r)); return false; }
+                log_(std::string(name) + " returned 0x" + hex(runtime.cpu.registers[0]));
+                return true;
+            };
+            bool surfaces_ok = native_init_address != 0;
+            if (surfaces_ok) {
+                const auto surface = java.new_object(java.class_handle("android/view/Surface"));
+                surfaces_ok = native("Java_com_atlan_AtlanUISurfaceView_createUISF", {surface}) &&
+                              native("Java_com_atlan_AtlanGLSurfaceView_createGLSF", {}) &&
+                              native("Java_com_atlan_AtlanUISurfaceView_changedUISF", {});
+                for (std::uint32_t i = 0; surfaces_ok && i < config_.render_frames && !stop_.load(); ++i)
+                    surfaces_ok = native("Java_com_atlan_AtlanGLSurfaceView_renderGLSF", {});
+                if (!surfaces_ok) return;  // fail() already recorded the stop
+            }
             // Run guest threads the library started, then deliver finished audio buffers.
             const auto pumped = dispatcher.pump(runtime, config_.initializer_budget);
             log_("pump stop=" + std::to_string(static_cast<int>(pumped.stop)) + " retired=" + std::to_string(pumped.retired) +
