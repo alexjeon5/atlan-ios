@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/jni.hpp"
 #include "atlan/abi.hpp"
+#include "atlan/text_codec.hpp"
 #include <bit>
 #include <cstdio>
 #include <stdexcept>
@@ -483,50 +484,123 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
     runtime.memory.map(config.scratch_base, config.scratch_size, Permissions::read_write);
     state_->scratch_base = config.scratch_base;
     state_->scratch_size = config.scratch_size;
+    state_->guest_chars = config.guest_chars;
     const std::uint32_t scratch_end = config.scratch_base + config.scratch_size;
     (void)scratch_end;
     const auto string_of = [this](std::uint32_t h) { return string_text(h); };
-    // jstring NewStringUTF(env, const char* utf8)
-    dispatcher.bind("JNIEnv::NewStringUTF", [this, env_check](ImportCall& call) -> std::optional<std::string> {
+    const bool cp949 = config.guest_chars == Config::CharEncoding::cp949;
+    // Guest char* text (the configured encoding) <-> host UTF-8.
+    const auto from_guest = [cp949](const std::string& raw) -> std::optional<std::string> {
+        if (!cp949) return raw;
+        return text::cp949_to_utf8(raw, text::Policy::replace);
+    };
+    const auto to_guest = [cp949](const std::string& utf8) -> std::optional<std::string> {
+        if (!cp949) return utf8;
+        return text::utf8_to_cp949(utf8, text::Policy::replace);
+    };
+    // Copies bytes into guest scratch (NUL-terminated by `terminator` zero bytes); 0 if it does not fit.
+    const auto stash = [state](Memory& memory, std::vector<std::byte> bytes, std::size_t terminator) -> std::uint32_t {
+        bytes.resize(bytes.size() + terminator);
+        const auto size = static_cast<std::uint32_t>(bytes.size());
+        if (state->scratch_used + std::uint64_t{size} + 7 > state->scratch_size) return 0;
+        const std::uint32_t at = state->scratch_base + state->scratch_used;
+        if (!memory.write(at, bytes)) return 0;
+        state->copies[at] = size;
+        state->scratch_used += (size + 7) & ~7U;
+        return at;
+    };
+    // jstring NewStringUTF(env, const char* text)
+    dispatcher.bind("JNIEnv::NewStringUTF", [this, env_check, from_guest](ImportCall& call) -> std::optional<std::string> {
         if (call.arg(0) != env_check) return "JNIEnv::NewStringUTF called with a foreign JNIEnv pointer";
         std::string text;
         if (call.arg(1) == 0) { call.set_result(0); return std::nullopt; }
         if (!read_guest_string(call.runtime().memory, call.arg(1), 1U << 20, text)) return "JNIEnv::NewStringUTF text is unreadable or too long";
-        const auto handle = new_string(text);
+        const auto utf8 = from_guest(text);
+        if (!utf8) return "JNIEnv::NewStringUTF text cannot be converted";
+        const auto handle = new_string(*utf8);
         if (handle == 0) return "JNIEnv::NewStringUTF cannot create the string";
         call.set_result(handle);
         return std::nullopt;
     });
-    // jsize GetStringUTFLength(env, jstring)
-    dispatcher.bind("JNIEnv::GetStringUTFLength", [env_check, string_of](ImportCall& call) -> std::optional<std::string> {
+    // jsize GetStringUTFLength(env, jstring): bytes in the guest encoding
+    dispatcher.bind("JNIEnv::GetStringUTFLength", [env_check, string_of, to_guest](ImportCall& call) -> std::optional<std::string> {
         if (call.arg(0) != env_check) return "JNIEnv::GetStringUTFLength called with a foreign JNIEnv pointer";
         const auto text = string_of(call.arg(1));
         if (!text) return "JNIEnv::GetStringUTFLength argument is not a String";
-        call.set_result(static_cast<std::uint32_t>(text->size()));
+        const auto encoded = to_guest(*text);
+        if (!encoded) return "JNIEnv::GetStringUTFLength text cannot be converted";
+        call.set_result(static_cast<std::uint32_t>(encoded->size()));
         return std::nullopt;
     });
     // const char* GetStringUTFChars(env, jstring, jboolean* isCopy): always a copy in guest scratch memory.
-    dispatcher.bind("JNIEnv::GetStringUTFChars", [state, env_check, string_of](ImportCall& call) -> std::optional<std::string> {
+    dispatcher.bind("JNIEnv::GetStringUTFChars", [env_check, string_of, to_guest, stash](ImportCall& call) -> std::optional<std::string> {
         if (call.arg(0) != env_check) return "JNIEnv::GetStringUTFChars called with a foreign JNIEnv pointer";
         const auto text = string_of(call.arg(1));
         if (!text) return "JNIEnv::GetStringUTFChars argument is not a String";
-        const std::uint32_t size = static_cast<std::uint32_t>(text->size() + 1);
-        const std::uint32_t at = state->scratch_base + state->scratch_used;
-        if (state->scratch_used + std::uint64_t{size + 7} > state->scratch_size) return "JNIEnv::GetStringUTFChars scratch memory is exhausted";
-        std::vector<std::byte> bytes(size);
-        for (std::size_t i = 0; i < text->size(); ++i) bytes[i] = static_cast<std::byte>((*text)[i]);
-        if (!call.runtime().memory.write(at, bytes)) return "JNIEnv::GetStringUTFChars cannot write the copy";
+        const auto encoded = to_guest(*text);
+        if (!encoded) return "JNIEnv::GetStringUTFChars text cannot be converted";
+        std::vector<std::byte> bytes(encoded->size());
+        for (std::size_t i = 0; i < encoded->size(); ++i) bytes[i] = static_cast<std::byte>((*encoded)[i]);
+        const auto at = stash(call.runtime().memory, std::move(bytes), 1);
+        if (at == 0) return "JNIEnv::GetStringUTFChars scratch memory is exhausted or unwritable";
         if (call.arg(2) != 0 && !put_guest8(call.runtime().memory, call.arg(2), 1)) return "JNIEnv::GetStringUTFChars isCopy is not writable";
-        state->copies[at] = size;
-        state->scratch_used += (size + 7) & ~7U;
         call.set_result(at);
         return std::nullopt;
     });
-    // void ReleaseStringUTFChars(env, jstring, const char*): space is reclaimed once all copies are released.
-    dispatcher.bind("JNIEnv::ReleaseStringUTFChars", [state, env_check](ImportCall& call) -> std::optional<std::string> {
-        if (call.arg(0) != env_check) return "JNIEnv::ReleaseStringUTFChars called with a foreign JNIEnv pointer";
-        if (state->copies.erase(call.arg(2)) != 1) return "JNIEnv::ReleaseStringUTFChars pointer is not a live copy";
-        if (state->copies.empty()) state->scratch_used = 0;
+    // void ReleaseStringUTFChars(env, jstring, const char*) and ReleaseStringChars: space is reclaimed once all copies are released.
+    for (const char* name : {"JNIEnv::ReleaseStringUTFChars", "JNIEnv::ReleaseStringChars"})
+        dispatcher.bind(name, [state, env_check, label = std::string(name)](ImportCall& call) -> std::optional<std::string> {
+            if (call.arg(0) != env_check) return label + " called with a foreign JNIEnv pointer";
+            if (state->copies.erase(call.arg(2)) != 1) return label + " pointer is not a live copy";
+            if (state->copies.empty()) state->scratch_used = 0;
+            return std::nullopt;
+        });
+    // jstring NewString(env, const jchar* utf16, jsize length)
+    dispatcher.bind("JNIEnv::NewString", [this, env_check](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::NewString called with a foreign JNIEnv pointer";
+        const auto length = call.arg(2);
+        if (length > (1U << 19)) return "JNIEnv::NewString length is out of range";
+        std::u16string wide(length, u'\0');
+        if (length != 0) {
+            std::vector<std::byte> bytes(std::size_t{length} * 2);
+            if (call.arg(1) == 0 || !call.runtime().memory.read(call.arg(1), bytes)) return "JNIEnv::NewString text is unreadable";
+            for (std::size_t i = 0; i < length; ++i)
+                wide[i] = static_cast<char16_t>(std::to_integer<unsigned>(bytes[2 * i]) | (std::to_integer<unsigned>(bytes[2 * i + 1]) << 8));
+        }
+        const auto utf8 = text::utf16_to_utf8(wide, text::Policy::replace);
+        if (!utf8) return "JNIEnv::NewString text cannot be converted";
+        const auto handle = new_string(*utf8);
+        if (handle == 0) return "JNIEnv::NewString cannot create the string";
+        call.set_result(handle);
+        return std::nullopt;
+    });
+    // jsize GetStringLength(env, jstring): UTF-16 code units
+    dispatcher.bind("JNIEnv::GetStringLength", [env_check, string_of](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetStringLength called with a foreign JNIEnv pointer";
+        const auto text = string_of(call.arg(1));
+        if (!text) return "JNIEnv::GetStringLength argument is not a String";
+        const auto wide = text::utf8_to_utf16(*text, text::Policy::replace);
+        if (!wide) return "JNIEnv::GetStringLength text cannot be converted";
+        call.set_result(static_cast<std::uint32_t>(wide->size()));
+        return std::nullopt;
+    });
+    // const jchar* GetStringChars(env, jstring, jboolean* isCopy): little-endian UTF-16 copy in guest scratch memory.
+    dispatcher.bind("JNIEnv::GetStringChars", [env_check, string_of, stash](ImportCall& call) -> std::optional<std::string> {
+        if (call.arg(0) != env_check) return "JNIEnv::GetStringChars called with a foreign JNIEnv pointer";
+        const auto text = string_of(call.arg(1));
+        if (!text) return "JNIEnv::GetStringChars argument is not a String";
+        const auto wide = text::utf8_to_utf16(*text, text::Policy::replace);
+        if (!wide) return "JNIEnv::GetStringChars text cannot be converted";
+        std::vector<std::byte> bytes;
+        bytes.reserve(wide->size() * 2);
+        for (const char16_t unit : *wide) {
+            bytes.push_back(static_cast<std::byte>(unit & 0xFF));
+            bytes.push_back(static_cast<std::byte>(unit >> 8));
+        }
+        const auto at = stash(call.runtime().memory, std::move(bytes), 2);
+        if (at == 0) return "JNIEnv::GetStringChars scratch memory is exhausted or unwritable";
+        if (call.arg(2) != 0 && !put_guest8(call.runtime().memory, call.arg(2), 1)) return "JNIEnv::GetStringChars isCopy is not writable";
+        call.set_result(at);
         return std::nullopt;
     });
     // jint GetVersion(env)
