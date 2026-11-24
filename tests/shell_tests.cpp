@@ -112,7 +112,10 @@ struct Collector {
     }
 };
 atlan::shell::SessionState run(const std::string& library, Collector& collector) {
-    atlan::shell::GuestSession session({library, 100000}, collector.log());
+    atlan::shell::SessionConfig config;
+    config.library_path = library;
+    config.initializer_budget = 100000;
+    atlan::shell::GuestSession session(config, collector.log());
     check(session.start(), "session thread starts");
     check(!session.start(), "session cannot start twice");
     session.join();

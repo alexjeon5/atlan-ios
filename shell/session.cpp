@@ -6,6 +6,8 @@
 #include "atlan/heap.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/abi.hpp"
+#include "atlan/data_symbols.hpp"
+#include "atlan/stdio.hpp"
 #include "atlan/libc_services.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/opensles.hpp"
@@ -102,6 +104,7 @@ void GuestSession::run() {
             if (name == "__stack_chk_guard") return guard_page;
             if (name == "__sF") return guard_page + 0x100;
             if (const auto iid = OpenSles::data_symbol(name)) return *iid;
+            if (const auto data = BionicData::symbol(name)) return *data;
             return std::nullopt;
         };
         auto image = elf::load(read_library(config_.library_path), options);
@@ -122,6 +125,13 @@ void GuestSession::run() {
         install_system_properties(dispatcher, properties, [this](const std::string& name, bool known) {
             log_("property " + name + (known ? "" : " (unset)"));
         });
+        std::optional<GuestStdio> stdio;
+        if (!config_.data_root.empty()) {
+            stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
+                log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
+            });
+            stdio->install(dispatcher);
+        }
         GuestMmap mmap_arena;
         mmap_arena.install(dispatcher);
         GuestThreads::Config thread_config;
@@ -133,6 +143,7 @@ void GuestSession::run() {
         CondTable conds(threads, mutexes);
         conds.install(dispatcher);
         VirtualFiles files(guard_page + 0x200);
+        if (stdio) files.set_regular_file_size([&](std::uint32_t fd) { return stdio->descriptor_size(fd); });
         files.install(dispatcher);
         SemaphoreTable semaphores(&threads);
         semaphores.install(dispatcher);
@@ -146,6 +157,8 @@ void GuestSession::run() {
         auto initializers = std::move(image.initializers);
         const auto* on_load = image.find("JNI_OnLoad");
         const std::uint32_t on_load_address = on_load && on_load->type == 2 ? on_load->address : 0;
+        const auto* native_init = image.find("Java_com_atlan_MainActivity_nativeInit");
+        const std::uint32_t native_init_address = native_init && native_init->type == 2 ? native_init->address : 0;
         runtime.memory = std::move(image.memory);
         runtime.memory.map(guard_page, Memory::page_size, Permissions::read_write);
         {
@@ -156,6 +169,7 @@ void GuestSession::run() {
             if (!runtime.memory.write(guard_page, word)) throw std::runtime_error("cannot initialize stack guard");
         }
         runtime.memory.map(stack_base, stack_bytes, Permissions::read_write);
+        BionicData::map(runtime.memory);
         RecordingAudioSink fallback_sink(true);  // used when the embedder supplies no device sink
         std::optional<OpenSles> audio;
         {
@@ -173,6 +187,16 @@ void GuestSession::run() {
         log_("initializers_completed=" + std::to_string(initializers.size()));
         if (on_load_address != 0 && !stop_.load()) {
             JavaBootstrap java(runtime, dispatcher, JavaBootstrap::Config{});
+            // Host side of the Java callbacks the guest invokes. The UI layer does not exist yet, so the call is
+            // logged with its arguments and succeeds without effect (a void method has no result to invent).
+            java.register_method("com/atlan/MainActivity", "setSurfaces", "(II)V",
+                                 [this](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+                std::string args;
+                for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
+                log_("java MainActivity.setSurfaces(" + args + ")");
+                m.result = 0;
+                return std::nullopt;
+            });
             const std::array<std::uint32_t, 2> args{java.vm(), 0};
             const auto outcome = dispatcher.call(runtime, on_load_address, args, stack_base + stack_bytes,
                                                  return_sentinel, config_.initializer_budget);
@@ -180,6 +204,15 @@ void GuestSession::run() {
             for (const auto& m : java.native_methods()) log_("jni native " + m.class_name + "." + m.name + m.signature);
             if (outcome.stop != Stop::returned) { fail(describe_stop("JNI_OnLoad", outcome)); return; }
             log_("JNI_OnLoad returned 0x" + hex(runtime.cpu.registers[0]));
+            if (native_init_address != 0) {
+                const std::array<std::uint32_t, 2> init_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
+                const auto started = dispatcher.call(runtime, native_init_address, init_args, stack_base + stack_bytes,
+                                                     return_sentinel, config_.native_init_budget);
+                if (started.stop != Stop::returned) { fail(describe_stop("nativeInit", started)); return; }
+                log_("nativeInit returned 0x" + hex(runtime.cpu.registers[0]));
+            } else {
+                log_("nativeInit not exported");
+            }
             // Run guest threads the library started, then deliver finished audio buffers.
             const auto pumped = dispatcher.pump(runtime, config_.initializer_budget);
             log_("pump stop=" + std::to_string(static_cast<int>(pumped.stop)) + " retired=" + std::to_string(pumped.retired) +

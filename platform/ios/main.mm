@@ -28,6 +28,10 @@
     return [base URLByAppendingPathComponent:@"guest.so"];
 }
 
+- (NSString*)documentsPath {
+    return [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
+}
+
 // The map stays where the user put it; the largest regular file in Documents is used in place.
 - (NSString*)mapPath {
     NSURL* docs = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
@@ -148,8 +152,12 @@
         [self append:@"map missing"];
     }
     __weak ShellViewController* weakSelf = self;
+    atlan::shell::SessionConfig config;
+    config.library_path = self.libraryURL.path.UTF8String;
+    config.audio_sink = &_audio;
+    config.data_root = self.documentsPath.UTF8String;
     _session = std::make_unique<atlan::shell::GuestSession>(
-        atlan::shell::SessionConfig{self.libraryURL.path.UTF8String, 3000000, &_audio},
+        config,
         [weakSelf](const std::string& line) {
             NSString* text = [NSString stringWithUTF8String:line.c_str()] ?: @"?";
             dispatch_async(dispatch_get_main_queue(), ^{

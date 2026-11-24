@@ -14,6 +14,8 @@ struct SessionConfig {
     std::string library_path;                   // user-supplied ARM32 ELF32 shared object
     std::uint64_t initializer_budget{3000000};  // retired instructions per initializer
     AudioSink* audio_sink{};                    // device sink; nullptr uses a silent recording sink
+    std::string data_root;                      // guest-visible file root (the app Documents folder); empty disables stdio
+    std::uint64_t native_init_budget{200000000};  // retired instructions for MainActivity.nativeInit
 };
 
 // Loads the guest image and runs its constructors on one dedicated thread.
