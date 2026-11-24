@@ -2,6 +2,7 @@
 #include "atlan/libc_services.hpp"
 #include <array>
 #include <chrono>
+#include <memory>
 #include <vector>
 
 namespace atlan {
@@ -9,6 +10,18 @@ namespace {
 constexpr std::uint32_t max_block = 64U * 1024 * 1024;  // bound one service call
 }
 void install_libc_services(ImportDispatcher& dispatcher) {
+    // POSIX drand48 family (only srand48/lrand48 are imported): X = (0x5DEECE66D * X + 0xB) mod 2^48,
+    // seeded as (seed << 16) | 0x330E; the default state is 0x1234ABCD330E.
+    const auto rand48 = std::make_shared<std::uint64_t>(0x1234ABCD330EULL);
+    dispatcher.bind("srand48", [rand48](ImportCall& call) -> std::optional<std::string> {
+        *rand48 = (std::uint64_t{call.arg(0)} << 16) | 0x330E;
+        return std::nullopt;
+    });
+    dispatcher.bind("lrand48", [rand48](ImportCall& call) -> std::optional<std::string> {
+        *rand48 = (0x5DEECE66DULL * *rand48 + 0xB) & ((1ULL << 48) - 1);
+        call.set_result(static_cast<std::uint32_t>(*rand48 >> 17));
+        return std::nullopt;
+    });
     // void* memset(void* dest, int value, size_t count)
     dispatcher.bind("memset", [](ImportCall& call) -> std::optional<std::string> {
         const auto dest = call.arg(0), count = call.arg(2);

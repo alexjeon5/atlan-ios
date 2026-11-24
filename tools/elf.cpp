@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/abi.hpp"
 #include "atlan/android_log.hpp"
+#include "atlan/data_symbols.hpp"
 #include "atlan/elf.hpp"
 #include "atlan/files.hpp"
 #include "atlan/heap.hpp"
@@ -52,6 +53,7 @@ int main(int argc, char* argv[]) {
         std::uint32_t budget = 100000, pump_budget = 0;
         bool initialize = false, log = false, jni = false;
         std::string root;
+        std::vector<std::string> java_record;  // exploration only: "Class.name(sig)ret" methods that log and return 0
         for (int i = 2; i < argc; ++i) {
             const std::string_view arg = argv[i];
             if (arg == "--trap-imports") options.unresolved = atlan::elf::UnresolvedImports::diagnostic_traps;
@@ -59,6 +61,7 @@ int main(int argc, char* argv[]) {
             else if (arg == "--log") log = true;
             else if (arg == "--root" && i + 1 < argc) root = argv[++i];
             else if (arg == "--jni") jni = true;
+            else if (arg == "--java-record" && i + 1 < argc) java_record.push_back(argv[++i]);
             else if (arg == "--pump" && i + 1 < argc) pump_budget = number(argv[++i]);
             else if (arg == "--bias" && i + 1 < argc) options.load_bias = number(argv[++i]);
             else if (arg == "--budget" && i + 1 < argc) budget = number(argv[++i]);
@@ -79,6 +82,7 @@ int main(int argc, char* argv[]) {
             // Bionic's stdin/stdout/stderr FILE array (3 x 84 bytes); stdio services identify streams by address.
             if (name == "__sF") return guard_page + 0x100;
             if (const auto iid = atlan::OpenSles::data_symbol(name)) return *iid;
+            if (const auto data = atlan::BionicData::symbol(name)) return *data;
             return std::nullopt;
         };
         std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
@@ -125,6 +129,7 @@ int main(int argc, char* argv[]) {
         atlan::CondTable conds(threads, mutexes);
         conds.install(dispatcher);
         atlan::VirtualFiles files(guard_page + 0x200);
+        if (stdio) files.set_regular_file_size([&](std::uint32_t fd) { return stdio->descriptor_size(fd); });
         files.install(dispatcher);
         atlan::SemaphoreTable semaphores(&threads);
         semaphores.install(dispatcher);
@@ -145,6 +150,20 @@ int main(int argc, char* argv[]) {
         runtime.memory.map(0x70000000, 1024 * 1024, atlan::Permissions::read_write);
         std::optional<atlan::JavaBootstrap> java;
         if (jni) java.emplace(runtime, dispatcher, atlan::JavaBootstrap::Config{});
+        if (java)
+            for (const auto& spec : java_record) {  // exploration aid: log the call, return 0/null, never part of the runtime
+                const auto dot = spec.find('.'), paren = spec.find('(');
+                if (dot == std::string::npos || paren == std::string::npos || dot > paren) throw std::invalid_argument("--java-record needs Class.name(sig)ret");
+                const auto cls = spec.substr(0, dot), name = spec.substr(dot + 1, paren - dot - 1), sig = spec.substr(paren);
+                java->register_method(cls, name, sig, [spec](atlan::JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+                    std::cout << "[java-record] " << spec << " args=";
+                    for (auto a : m.args) std::cout << a << ',';
+                    std::cout << '\n';
+                    m.result = 0;
+                    return std::nullopt;
+                });
+            }
+        atlan::BionicData::map(runtime.memory);
         atlan::RecordingAudioSink audio_sink(true);  // headless: consumes PCM as soon as it plays
         std::optional<atlan::OpenSles> audio;
         {
@@ -166,7 +185,8 @@ int main(int argc, char* argv[]) {
             if (outcome.stop == atlan::Stop::deadlock) std::cout << " deadlock";
             if (outcome.thread > 1) std::cout << " guest_thread=" << outcome.thread;
             if (result.event != atlan::Event::function_return) {
-                std::cout << " fault=0x" << std::hex << result.address << std::dec;
+                std::cout << " fault=0x" << std::hex << result.address << " r1=0x" << runtime.cpu.registers[1] << " r2=0x" << runtime.cpu.registers[2]
+                          << " r3=0x" << runtime.cpu.registers[3] << " lr=0x" << runtime.cpu.registers[14] << std::dec;
                 if (const auto* import = image.import_at(result.event == atlan::Event::memory_fault ? result.address : runtime.pc()))
                     std::cout << " unresolved_import=" << import->name;
             }

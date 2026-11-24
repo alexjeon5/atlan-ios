@@ -17,6 +17,22 @@ void VirtualFiles::install(ImportDispatcher& dispatcher) {
     // streams are reported as character devices; they are not attached to a host terminal.
     dispatcher.bind("fstat", [this](ImportCall& call) -> std::optional<std::string> {
         auto& memory = call.runtime().memory;
+        if (!descriptors_.contains(call.arg(0)) && size_of_) {
+            if (const auto size = size_of_(call.arg(0))) {
+                std::array<std::byte, 104> stat{};
+                const auto put = [&](unsigned at, std::uint64_t value, unsigned bytes) {
+                    for (unsigned i = 0; i < bytes; ++i) stat[at + i] = std::byte((value >> (8 * i)) & 255);
+                };
+                put(16, 0100644, 4);
+                put(20, 1, 4);
+                put(48, *size, 8);
+                put(56, 4096, 4);
+                put(64, (*size + 511) / 512, 8);
+                if (!memory.write(call.arg(1), stat)) return "fstat guest memory fault";
+                call.set_result(0);
+                return std::nullopt;
+            }
+        }
         if (!descriptors_.contains(call.arg(0))) {
             std::array<std::byte, 4> code{std::byte{ebadf}};
             if (!memory.write(errno_address_, code)) return "fstat could not write errno";

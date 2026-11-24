@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/abi.hpp"
 #include "atlan/jni.hpp"
+#include "atlan/data_symbols.hpp"
+#include "atlan/libc_services.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/stdio.hpp"
 #include "atlan/string_services.hpp"
@@ -43,7 +45,11 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"sprintf", 0xf0000020}, {"mmap", 0xf0000024}, {"munmap", 0xf0000028}, {"fopen", 0xf000002c},
                       {"fclose", 0xf0000030}, {"fread", 0xf0000034}, {"fwrite", 0xf0000038}, {"fseek", 0xf000003c},
                       {"ftell", 0xf0000040}, {"stat", 0xf0000044}, {"__system_property_get", 0xf0000048},
-                      {"feof", 0xf000004c}};
+                      {"feof", 0xf000004c}, {"opendir", 0xf0000050}, {"readdir", 0xf0000054}, {"closedir", 0xf0000058},
+                      {"mkdir", 0xf000005c}, {"remove", 0xf0000060}, {"rename", 0xf0000064}, {"open", 0xf0000068},
+                      {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
+                      {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
+                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -68,6 +74,7 @@ struct Fixture {
         atlan::install_string_services(dispatcher);
         atlan::install_printf_services(dispatcher);
         atlan::install_system_properties(dispatcher, properties);
+        atlan::install_libc_services(dispatcher);
         arena.install(dispatcher);
         stdio.install(dispatcher);
     }
@@ -154,6 +161,74 @@ void files() {
     check(f.call("stat", {data + 0x40, data + 0x200}).stop == atlan::Stop::returned && f.r0() == 0xffffffff, "stat of a missing path fails");
     check(f.opened.size() >= 3 && f.opened[0] == "/dir/a.txt+", "open attempts are traced");
 }
+void directories_and_descriptors() {
+    Fixture f;
+    put_text(f.runtime.memory, data, "/dir");
+    check(f.call("opendir", {data}).stop == atlan::Stop::returned && f.r0() != 0, "opendir");
+    const auto dir = f.r0();
+    std::vector<std::string> names;
+    for (;;) {
+        check(f.call("readdir", {dir}).stop == atlan::Stop::returned, "readdir returns");
+        if (f.r0() == 0) break;
+        names.push_back(text_at(f.runtime.memory, f.r0() + 19));
+    }
+    check(names.size() == 3 && names[0] == "." && names[1] == ".." && names[2] == "a.txt", "listing is ., .. then sorted entries");
+    check(f.call("closedir", {dir}).stop == atlan::Stop::returned && f.r0() == 0, "closedir");
+    check(f.call("readdir", {dir}).stop == atlan::Stop::service_error, "a closed DIR is rejected");
+    put_text(f.runtime.memory, data + 0x20, "/nope");
+    check(f.call("opendir", {data + 0x20}).stop == atlan::Stop::returned && f.r0() == 0 && get32(f.runtime.memory, data + 0xf00) == 2, "missing directory: NULL and ENOENT");
+    check(f.call("mkdir", {data + 0x20, 0777}).stop == atlan::Stop::returned && f.r0() == 0 && std::filesystem::is_directory(f.root / "nope"), "mkdir creates one level");
+    check(f.call("mkdir", {data + 0x20, 0777}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 17, "mkdir of an existing path is EEXIST");
+    put_text(f.runtime.memory, data + 0x30, "");
+    check(f.call("mkdir", {data + 0x30, 0777}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 2, "mkdir of an empty path is ENOENT");
+    put_text(f.runtime.memory, data + 0x40, "/a/b/c");
+    check(f.call("mkdir", {data + 0x40, 0777}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 2, "mkdir without a parent is ENOENT");
+    // POSIX descriptors: create, write, seek, read back, truncate, close, remove, rename.
+    put_text(f.runtime.memory, data + 0x60, "/dir/fd.bin");
+    check(f.call("open", {data + 0x60, 0102, 0644}).stop == atlan::Stop::returned && f.r0() >= 3, "open O_RDWR|O_CREAT");
+    const auto fd = f.r0();
+    put_text(f.runtime.memory, data + 0x80, "abcdef");
+    check(f.call("write", {fd, data + 0x80, 6}).stop == atlan::Stop::returned && f.r0() == 6, "write");
+    check(f.call("lseek", {fd, 2, 0}).stop == atlan::Stop::returned && f.r0() == 2, "lseek SEEK_SET");
+    check(f.call("read", {fd, data + 0x100, 10}).stop == atlan::Stop::returned && f.r0() == 4 && text_at(f.runtime.memory, data + 0x100).rfind("cdef", 0) == 0, "read from the offset");
+    check(f.call("lseek", {fd, 0, 2}).stop == atlan::Stop::returned && f.r0() == 6, "lseek SEEK_END");
+    check(f.call("ftruncate", {fd, 3}).stop == atlan::Stop::returned && f.r0() == 0 && std::filesystem::file_size(f.root / "dir" / "fd.bin") == 3, "ftruncate");
+    check(f.call("fsync", {fd}).stop == atlan::Stop::returned && f.r0() == 0, "fsync");
+    check(f.stdio.descriptor_size(fd) == 3u, "descriptor size is visible to fstat");
+    check(f.call("close", {fd}).stop == atlan::Stop::returned && f.r0() == 0 && f.stdio.open_descriptors() == 0, "close");
+    check(f.call("read", {fd, data + 0x100, 1}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 9, "closed descriptor is EBADF");
+    put_text(f.runtime.memory, data + 0xa0, "/dir/fd2.bin");
+    check(f.call("rename", {data + 0x60, data + 0xa0}).stop == atlan::Stop::returned && f.r0() == 0 && std::filesystem::exists(f.root / "dir" / "fd2.bin"), "rename");
+    check(f.call("remove", {data + 0xa0}).stop == atlan::Stop::returned && f.r0() == 0 && !std::filesystem::exists(f.root / "dir" / "fd2.bin"), "remove");
+    check(f.call("remove", {data + 0xa0}).stop == atlan::Stop::returned && f.r0() == 0xffffffff, "remove of a missing file fails");
+    put_text(f.runtime.memory, data + 0xc0, "/../x");
+    check(f.call("open", {data + 0xc0, 0101, 0644}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 13, "open cannot escape the root");
+    check(f.call("open", {data + 0x60, 0x1000000, 0}).stop == atlan::Stop::service_error, "unsupported open flags stop");
+    check(f.call("umask", {077}).stop == atlan::Stop::returned, "umask call");
+    check(f.r0() == 022, "umask returns the default mask first");
+    check(f.call("umask", {022}).stop == atlan::Stop::returned, "umask call again");
+    check(f.r0() == 077, "umask returns the previous mask");
+    // fgets
+    put_text(f.runtime.memory, data + 0xe0, "/dir/a.txt");
+    put_text(f.runtime.memory, data + 0xf0, "r");
+    check(f.call("fopen", {data + 0xe0, data + 0xf0}).stop == atlan::Stop::returned && f.r0() != 0, "fopen for fgets");
+    const auto file = f.r0();
+    check(f.call("fgets", {data + 0x100, 6, file}).stop == atlan::Stop::returned && f.r0() == data + 0x100 && text_at(f.runtime.memory, data + 0x100) == "hello", "fgets stops at n-1");
+    check(f.call("fgets", {data + 0x100, 64, file}).stop == atlan::Stop::returned && text_at(f.runtime.memory, data + 0x100) == " world", "fgets reads to EOF");
+    check(f.call("fgets", {data + 0x100, 64, file}).stop == atlan::Stop::returned && f.r0() == 0, "fgets at EOF is NULL");
+    // lrand48 follows the POSIX LCG (srand48(1) -> 89400484, 976015093)
+    check(f.call("srand48", {1}).stop == atlan::Stop::returned, "srand48");
+    check(f.call("lrand48", {}).stop == atlan::Stop::returned && f.r0() == 89400484, "lrand48 #1");
+    check(f.call("lrand48", {}).stop == atlan::Stop::returned && f.r0() == 976015093, "lrand48 #2");
+    // _toupper_tab_ is a pointer variable to short[257]
+    atlan::Memory memory;
+    atlan::BionicData::map(memory);
+    check(atlan::BionicData::symbol("_toupper_tab_") == atlan::BionicData::base && !atlan::BionicData::symbol("_tolower_tab_"), "only _toupper_tab_ is provided");
+    check(get32(memory, atlan::BionicData::base) == atlan::BionicData::base + 0x100, "the variable holds the table pointer");
+    std::array<std::byte, 2> entry{};
+    check(memory.read(atlan::BionicData::base + 0x100 + 2 * ('a' + 1), entry) && entry[0] == std::byte{'A'}, "table[1+'a'] is 'A'");
+    check(memory.read(atlan::BionicData::base + 0x100, entry) && entry[0] == std::byte{0xff} && entry[1] == std::byte{0xff}, "table[0] is EOF");
+}
 void properties_and_strings() {
     Fixture f;
     put_text(f.runtime.memory, data, "ro.test");
@@ -228,6 +303,7 @@ int main() {
         printf_family();
         mapping();
         files();
+        directories_and_descriptors();
         properties_and_strings();
         jni_strings();
         jni_arrays_and_misc();

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "atlan/imports.hpp"
+#include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <filesystem>
 #include <functional>
 #include <vector>
@@ -13,7 +15,7 @@ namespace atlan {
 // A missing file is a normal fopen failure: NULL with ENOENT in guest errno.
 class GuestStdio {
 public:
-    static constexpr std::size_t max_open = 256;
+    static constexpr std::size_t max_open = 256, max_dirs = 16;
     // errno_address: guest word receiving error codes. trace (optional) sees
     // every open attempt: guest path, mode, success.
     GuestStdio(std::filesystem::path root, std::uint32_t errno_address,
@@ -24,10 +26,17 @@ public:
     GuestStdio& operator=(const GuestStdio&) = delete;
     void install(ImportDispatcher& dispatcher);
     [[nodiscard]] std::size_t open_files() const noexcept;
+    [[nodiscard]] std::size_t open_descriptors() const noexcept;
+    // Size of the regular file behind a POSIX descriptor opened through open(), for fstat.
+    [[nodiscard]] std::optional<std::uint64_t> descriptor_size(std::uint32_t fd) const;
 private:
     std::filesystem::path root_;
     std::uint32_t errno_address_;
     std::function<void(const std::string&, const std::string&, bool)> trace_;
-    std::vector<std::FILE*> files_;  // slot -> host stream; handle = base + 4*(slot+1)
+    struct Dir { std::vector<std::pair<std::string, bool>> entries; std::size_t next{}; bool open{}; };  // (name, is_directory)
+    std::vector<Dir> dirs_;  // slot -> directory stream; handle = 0xe5000000 + 4*(slot+1)
+    std::vector<std::FILE*> files_;
+    struct Fd { int host{-1}; std::uint64_t offset{}; bool append{}; bool writable{}, readable{}; };
+    std::vector<Fd> fds_;  // guest descriptor = 3 + index; host descriptors are never exposed  // slot -> host stream; handle = base + 4*(slot+1)
 };
 }

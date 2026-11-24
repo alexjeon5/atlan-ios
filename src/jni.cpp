@@ -2,6 +2,7 @@
 #include "atlan/jni.hpp"
 #include "atlan/abi.hpp"
 #include <bit>
+#include <cstdio>
 #include <stdexcept>
 
 namespace atlan {
@@ -61,6 +62,24 @@ const std::vector<std::string>& invoke_names() {
 }
 void put(std::vector<std::byte>& bytes, std::size_t at, std::uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) bytes[at + i] = std::byte((value >> (8 * i)) & 255);
+}
+bool read32(Memory& memory, std::uint32_t at, std::uint32_t& out) {
+    std::array<std::byte, 4> b{};
+    if (!memory.read(at, b)) return false;
+    out = 0;
+    for (unsigned i = 0; i < 4; ++i) out |= std::to_integer<std::uint32_t>(b[i]) << (8 * i);
+    return true;
+}
+bool valid_utf8(const std::string& text) {
+    for (std::size_t i = 0; i < text.size();) {
+        const auto c = static_cast<unsigned char>(text[i]);
+        const std::size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        if (n == 0 || i + n > text.size() || (n == 2 && c < 0xc2)) return false;
+        for (std::size_t k = 1; k < n; ++k)
+            if ((static_cast<unsigned char>(text[i + k]) & 0xc0) != 0x80) return false;
+        i += n;
+    }
+    return true;
 }
 bool put_guest8(Memory& memory, std::uint32_t at, std::uint8_t value) {
     const std::array<std::byte, 1> bytes{std::byte(value)};
@@ -249,11 +268,49 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
             const auto& member = state->members[(ctor - member_handle_base) / 4 - 1];
             if (member.kind != JavaBootstrap::Member::Kind::method || member.class_name != cls || member.name != "<init>")
                 return label + " method id is not a constructor of the class";
-            if (member.signature != "()V")
+            std::string text_content;
+            bool is_text = false;
+            if (cls == "java/lang/String" && member.signature == "([BLjava/lang/String;)V") {
+                // new String(byte[] bytes, String charsetName): UTF-8 content only.
+                std::uint32_t words[2]{};
+                const std::string_view fn = function;
+                if (fn == "JNIEnv::NewObjectA") {  // jvalue[]: 8 bytes per argument
+                    for (unsigned i = 0; i < 2; ++i)
+                        if (!read32(call.runtime().memory, call.arg(3) + 8 * i, words[i])) return label + " jvalue array is unreadable";
+                } else {
+                    auto list = fn == "JNIEnv::NewObject" ? VarArgs::from_call(call, 3) : VarArgs::from_va_list(call.runtime().memory, call.arg(3));
+                    if (!list.next32(words[0]) || !list.next32(words[1])) return label + " constructor arguments are unreadable";
+                }
+                const auto array = words[0];
+                if (array < array_handle_base + 4 || (array - array_handle_base) % 4 != 0 || (array - array_handle_base) / 4 > state->byte_arrays.size())
+                    return label + " String(byte[],String) argument is not a byte array";
+                const auto charset = [&]() -> std::optional<std::string> {
+                    const auto h = words[1];
+                    if (h < object_handle_base + 4 || (h - object_handle_base) % 4 != 0 || (h - object_handle_base) / 4 > state->objects.size() ||
+                        !state->is_string[(h - object_handle_base) / 4 - 1])
+                        return std::nullopt;
+                    return state->texts[(h - object_handle_base) / 4 - 1];
+                }();
+                if (!charset) return label + " String(byte[],String) charset is not a String object";
+                // UTF-8, and EUC-KR only while the content is ASCII (a Hangul table is not implemented).
+                const bool utf8 = *charset == "UTF-8" || *charset == "utf-8" || *charset == "UTF8";
+                const bool euckr = *charset == "euc-kr" || *charset == "EUC-KR";
+                if (!utf8 && !euckr)
+                    return label + " String(byte[],String) charset '" + *charset + "' is not implemented";
+                const auto& bytes = state->byte_arrays[(array - array_handle_base) / 4 - 1];
+                text_content.assign(bytes.begin(), bytes.end());
+                if (euckr)
+                    for (const char ch : text_content)
+                        if (static_cast<unsigned char>(ch) >= 0x80)
+                            return label + " String(byte[],String) EUC-KR content with non-ASCII bytes is not implemented";
+                if (text_content.find('\0') != std::string::npos || !valid_utf8(text_content))
+                    return label + " String(byte[],String) content has NUL or invalid UTF-8";
+                is_text = true;
+            } else if (member.signature != "()V")
                 return label + " does not model constructor " + cls + ".<init>" + member.signature;
             if (state->objects.size() >= max_objects) return label + " object table is full";
             state->objects.push_back(cls);
-            state->texts.emplace_back();
+            state->texts.push_back(is_text ? std::move(text_content) : std::string());
             state->is_string.push_back(cls == "java/lang/String");
             state->fields.emplace_back();
             call.set_result(object_handle_base + 4 * static_cast<std::uint32_t>(state->objects.size()));
@@ -287,9 +344,11 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
     });
     // void DeleteLocalRef(env, localRef): validates the reference. Class and object
     // table entries are not reclaimed (bounded tables), so deletion changes nothing else.
-    dispatcher.bind("JNIEnv::DeleteLocalRef", [env_check, referent_ok](ImportCall& call) -> std::optional<std::string> {
+    dispatcher.bind("JNIEnv::DeleteLocalRef", [state, env_check, referent_ok](ImportCall& call) -> std::optional<std::string> {
         if (call.arg(0) != env_check) return "JNIEnv::DeleteLocalRef called with a foreign JNIEnv pointer";
-        if (call.arg(1) != 0 && !referent_ok(call.arg(1))) return "JNIEnv::DeleteLocalRef reference is not valid";
+        const auto h = call.arg(1);
+        const bool is_array = h >= array_handle_base + 4 && (h - array_handle_base) % 4 == 0 && (h - array_handle_base) / 4 <= state->byte_arrays.size();
+        if (h != 0 && !is_array && !referent_ok(h)) return "JNIEnv::DeleteLocalRef reference is not valid";
         return std::nullopt;
     });
     // Field access on opaque host objects. Unset fields read as zero, as in Java.
@@ -487,9 +546,13 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
     // jclass GetObjectClass(env, obj)
     dispatcher.bind("JNIEnv::GetObjectClass", [this, env_check, state](ImportCall& call) -> std::optional<std::string> {
         if (call.arg(0) != env_check) return "JNIEnv::GetObjectClass called with a foreign JNIEnv pointer";
-        const auto h = call.arg(1);
+        auto h = call.arg(1);
+        // A global reference resolves to its referent (a live one only).
+        if (h >= global_handle_base + 4 && (h - global_handle_base) % 4 == 0 && (h - global_handle_base) / 4 <= state->globals.size() &&
+            state->globals[(h - global_handle_base) / 4 - 1] != 0)
+            h = state->globals[(h - global_handle_base) / 4 - 1];
         if (h < object_handle_base + 4 || (h - object_handle_base) % 4 != 0 || (h - object_handle_base) / 4 > state->objects.size())
-            return "JNIEnv::GetObjectClass argument is not a host object";
+            return "JNIEnv::GetObjectClass argument 0x" + [&] { char b[16]; std::snprintf(b, sizeof b, "%x", h); return std::string(b); }() + " is not a host object";
         call.set_result(class_handle(state->objects[(h - object_handle_base) / 4 - 1]));
         return std::nullopt;
     });
@@ -585,6 +648,23 @@ JavaBootstrap::JavaBootstrap(Runtime& runtime, ImportDispatcher& dispatcher, Con
         for (auto v : supported) ok = ok || v == version;
         if (!put_guest(call.runtime().memory, call.arg(1), ok ? env : 0)) return "JavaVM::GetEnv output pointer is not writable";
         call.set_result(ok ? 0U : static_cast<std::uint32_t>(-3));  // JNI_OK / JNI_EVERSION
+        return std::nullopt;
+    });
+    // Built-in java.lang.String.getBytes(String charset): UTF-8, or EUC-KR for ASCII-only text.
+    (void)register_method("java/lang/String", "getBytes", "(Ljava/lang/String;)[B", [this](MethodCall& m) -> std::optional<std::string> {
+        const auto text = string_text(m.receiver);
+        if (!text) return "String.getBytes receiver is not a String";
+        const auto charset = string_text(static_cast<std::uint32_t>(m.args.at(0)));
+        if (!charset) return "String.getBytes charset is not a String";
+        const bool utf8 = *charset == "UTF-8" || *charset == "utf-8" || *charset == "UTF8";
+        const bool euckr = *charset == "euc-kr" || *charset == "EUC-KR";
+        if (!utf8 && !euckr) return "String.getBytes charset '" + *charset + "' is not implemented";
+        if (euckr)
+            for (const char ch : *text)
+                if (static_cast<unsigned char>(ch) >= 0x80) return "String.getBytes EUC-KR of non-ASCII text is not implemented";
+        const auto handle = new_byte_array(std::vector<std::uint8_t>(text->begin(), text->end()));
+        if (handle == 0) return "String.getBytes byte array table is full";
+        m.result = handle;
         return std::nullopt;
     });
 }
