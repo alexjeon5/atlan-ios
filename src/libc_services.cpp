@@ -171,5 +171,35 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         call.set_result(0);
         return std::nullopt;
     });
+    // int gettimeofday(struct timeval* tv, struct timezone* tz): wall clock, 32-bit ABI; tz is reported as UTC.
+    dispatcher.bind("gettimeofday", [](ImportCall& call) -> std::optional<std::string> {
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now);
+        const auto micros = static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - seconds).count());
+        const std::uint32_t words[2]{static_cast<std::uint32_t>(seconds.count()), micros};
+        if (call.arg(0) != 0) {
+            std::array<std::byte, 8> bytes{};
+            for (unsigned i = 0; i < 8; ++i) bytes[i] = std::byte((words[i / 4] >> (8 * (i % 4))) & 255);
+            if (!call.runtime().memory.write(call.arg(0), bytes)) return "gettimeofday guest memory fault";
+        }
+        if (call.arg(1) != 0) {
+            const std::array<std::byte, 8> zone{};
+            if (!call.runtime().memory.write(call.arg(1), zone)) return "gettimeofday timezone guest memory fault";
+        }
+        call.set_result(0);
+        return std::nullopt;
+    });
+    // time_t time(time_t* out)
+    dispatcher.bind("time", [](ImportCall& call) -> std::optional<std::string> {
+        const auto seconds = static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        if (call.arg(0) != 0) {
+            std::array<std::byte, 4> bytes{};
+            for (unsigned i = 0; i < 4; ++i) bytes[i] = std::byte((seconds >> (8 * i)) & 255);
+            if (!call.runtime().memory.write(call.arg(0), bytes)) return "time guest memory fault";
+        }
+        call.set_result(seconds);
+        return std::nullopt;
+    });
 }
 }
