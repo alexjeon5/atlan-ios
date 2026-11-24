@@ -277,7 +277,7 @@ OpenSles::OpenSles(Runtime& runtime, ImportDispatcher& dispatcher, Config config
     });
     // SLresult CreateOutputMix(SLEngineItf self, SLObjectItf* pMix, SLuint32 numInterfaces,
     //                          const SLInterfaceID* pInterfaceIds, const SLboolean* pInterfaceRequired)
-    dispatcher.bind("SLEngineItf::CreateOutputMix", [state, hex](ImportCall& call) -> std::optional<std::string> {
+    dispatcher.bind("SLEngineItf::CreateOutputMix", [state](ImportCall& call) -> std::optional<std::string> {
         State::Face* f{};
         if (auto e = state->face(call.arg(0), i_engine, "SLEngineItf::CreateOutputMix", f)) return e;
         std::uint32_t required_flags{};
