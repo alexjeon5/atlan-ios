@@ -209,6 +209,13 @@ void jni_korean_strings() {
     // Unconvertible text is replaced, not fatal.
     put_text(f.runtime.memory, data + 0x80, "\xB0");
     check(call(167, {java.env(), data + 0x80}).stop == atlan::Stop::returned && java.string_text(f.r0()) == "\xEF\xBF\xBD", "malformed CP949 becomes U+FFFD");
+    put_text(f.runtime.memory, data + 0xc0, "plain");
+    check(call(167, {java.env(), data + 0xc0}).stop == atlan::Stop::returned, "ASCII string");
+    put_text(f.runtime.memory, data + 0x100, "\xED\x95\x9C");  // "한" in UTF-8
+    check(call(167, {java.env(), data + 0x100}).stop == atlan::Stop::returned, "UTF-8 Hangul");
+    const auto& stats = java.string_input_stats();
+    check(stats.calls == 4 && stats.ascii == 1 && stats.utf8 == 1 && stats.cp949_only == 1 && stats.neither == 1,
+          "input statistics classify CP949, UTF-8, ASCII and malformed input");
 }
 }
 int main() {

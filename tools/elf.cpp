@@ -201,6 +201,13 @@ int main(int argc, char* argv[]) {
             }
             if (!ok) return 2;
         }
+        const auto print_string_stats = [&] {
+            if (!java) return;
+            const auto& st = java->string_input_stats();
+            std::cout << "jni NewStringUTF input: calls=" << st.calls << " ascii=" << st.ascii << " utf8=" << st.utf8
+                      << " cp949_only=" << st.cp949_only << " neither=" << st.neither << '\n';
+        };
+        print_string_stats();
         if (pump_budget != 0) {
             const auto outcome = dispatcher.pump(runtime, pump_budget);
             std::cout << "pump stop=" << static_cast<int>(outcome.stop) << " retired=" << outcome.retired
@@ -210,6 +217,7 @@ int main(int argc, char* argv[]) {
             if (outcome.stop == atlan::Stop::service_error) std::cout << " failing_service=" << outcome.import;
             if (outcome.thread != 0) std::cout << " guest_thread=" << outcome.thread << " pc=0x" << std::hex << runtime.pc() << std::dec;
             std::cout << '\n';
+            print_string_stats();
             if (outcome.stop != atlan::Stop::returned) return 2;
         }
     } catch (const std::exception& error) {

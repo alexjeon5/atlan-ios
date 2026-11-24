@@ -79,6 +79,14 @@ public:
     [[nodiscard]] std::uint32_t new_string(const std::string& utf8);
     // Content of a String object handle, if it is one.
     [[nodiscard]] std::optional<std::string> string_text(std::uint32_t handle) const;
+    // Counts of what the guest passed to NewStringUTF, by raw byte content (no text is kept).
+    // Tells whether an app hands over UTF-8 or CP949 bytes; independent of Config::guest_chars.
+    struct StringInputStats {
+        std::uint32_t calls{}, ascii{}, utf8{}, cp949_only{}, neither{};
+        // ascii: 7-bit only. utf8: valid multi-byte UTF-8 (CP949 text is almost never valid UTF-8).
+        // cp949_only: not UTF-8 but valid CP949. neither: invalid in both.
+    };
+    [[nodiscard]] const StringInputStats& string_input_stats() const noexcept { return state_->input_stats; }
     // Live global references (NewGlobalRef minus DeleteGlobalRef).
     [[nodiscard]] std::size_t live_global_refs() const noexcept {
         std::size_t n = 0;
@@ -101,6 +109,7 @@ private:
         std::map<std::uint32_t, std::uint32_t> copies;  // guest scratch copy address -> size
         std::uint32_t scratch_base{}, scratch_size{}, scratch_used{};
         Config::CharEncoding guest_chars{Config::CharEncoding::utf8};
+        StringInputStats input_stats;
         std::vector<std::map<std::uint32_t, std::uint64_t>> fields;  // per object: field id -> raw value
         std::map<std::string, MethodHandler> methods;  // "class\x1fname\x1fsignature"
         std::vector<std::uint32_t> globals;  // referent handle; 0 once deleted
