@@ -180,6 +180,36 @@ void jni_strings() {
           java.string_text(f.r0()) == "from guest", "NewStringUTF");
     check(f.dispatcher.call(f.runtime, slot(169), std::vector<std::uint32_t>{java.env(), 0xe0000abc, 0}, stack, sentinel, 1000).stop == atlan::Stop::service_error, "non-string is rejected");
 }
+void jni_korean_strings() {
+    Fixture f;
+    atlan::JavaBootstrap::Config config;
+    config.guest_chars = atlan::JavaBootstrap::Config::CharEncoding::cp949;
+    atlan::JavaBootstrap java(f.runtime, f.dispatcher, config);
+    const auto slot = [&](std::size_t index) { return get32(f.runtime.memory, get32(f.runtime.memory, java.env()) + 4 * static_cast<std::uint32_t>(index)); };
+    const auto call = [&](std::size_t index, std::vector<std::uint32_t> args) {
+        return f.dispatcher.call(f.runtime, slot(index), args, stack, sentinel, 1000);
+    };
+    put_text(f.runtime.memory, data, "A\xC7\xD1\xB1\xDB");  // "A한글" in CP949
+    check(call(167, {java.env(), data}).stop == atlan::Stop::returned && java.string_text(f.r0()) == "A한글", "NewStringUTF decodes CP949");
+    const auto s = java.new_string("A한글");
+    check(call(168, {java.env(), s}).stop == atlan::Stop::returned && f.r0() == 5, "GetStringUTFLength counts CP949 bytes");
+    check(call(169, {java.env(), s, 0}).stop == atlan::Stop::returned, "GetStringUTFChars");
+    const auto copy = f.r0();
+    check(text_at(f.runtime.memory, copy) == "A\xC7\xD1\xB1\xDB", "copy is CP949");
+    check(call(170, {java.env(), s, copy}).stop == atlan::Stop::returned, "release");
+    // UTF-16 side is independent of the guest char encoding.
+    check(call(164, {java.env(), s}).stop == atlan::Stop::returned && f.r0() == 3, "GetStringLength counts UTF-16 units");
+    check(call(165, {java.env(), s, 0}).stop == atlan::Stop::returned, "GetStringChars");
+    const auto wide = f.r0();
+    check(get32(f.runtime.memory, wide) == 0xD55C0041 && get32(f.runtime.memory, wide + 4) % 0x10000 == 0xAE00, "UTF-16 content");
+    check(call(166, {java.env(), s, wide}).stop == atlan::Stop::returned, "ReleaseStringChars");
+    const std::vector<std::byte> utf16{std::byte{0x5C}, std::byte{0xD5}, std::byte{0x00}, std::byte{0xAE}};
+    check(f.runtime.memory.write(data + 0x40, utf16), "write UTF-16 input");
+    check(call(163, {java.env(), data + 0x40, 2}).stop == atlan::Stop::returned && java.string_text(f.r0()) == "한글", "NewString from UTF-16");
+    // Unconvertible text is replaced, not fatal.
+    put_text(f.runtime.memory, data + 0x80, "\xB0");
+    check(call(167, {java.env(), data + 0x80}).stop == atlan::Stop::returned && java.string_text(f.r0()) == "\xEF\xBF\xBD", "malformed CP949 becomes U+FFFD");
+}
 }
 int main() {
     try {
@@ -189,6 +219,7 @@ int main() {
         files();
         properties_and_strings();
         jni_strings();
+        jni_korean_strings();
     } catch (const std::exception& error) {
         std::cerr << "service test failed: " << error.what() << '\n';
         return 1;
