@@ -2,6 +2,7 @@
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/session.hpp"
+#include "shell/surface.hpp"
 #include <array>
 #include <cstdio>
 #include <filesystem>
@@ -143,6 +144,12 @@ int main() {
         static_assert(atlan::shell::render_size(852, 393, 3).width == 2556);
         static_assert(atlan::shell::render_size(852, 393, 3, 0.5).height == 590);
         static_assert(atlan::shell::render_size(852, 393, 3, 0.01).width == 639);
+        {
+            atlan::shell::SurfaceState surface;
+            check(surface.get().width == 0 && surface.generation() == 0, "surface starts unknown");
+            surface.set({2556, 1179});
+            check(surface.get().width == 2556 && surface.get().height == 1179 && surface.generation() == 1, "surface publishes size");
+        }
         data_files();
         sessions();
         fs::remove_all(scratch);

@@ -194,6 +194,12 @@ void GuestSession::run() {
                 std::string args;
                 for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
                 log_("java MainActivity.setSurfaces(" + args + ")");
+                if (config_.surface) {
+                    const auto size = config_.surface->get();
+                    log_("host surface " + std::to_string(size.width) + "x" + std::to_string(size.height));
+                }
+                if (config_.on_set_surfaces && m.args.size() >= 2)
+                    config_.on_set_surfaces(static_cast<std::int32_t>(m.args[0]), static_cast<std::int32_t>(m.args[1]));
                 m.result = 0;
                 return std::nullopt;
             });

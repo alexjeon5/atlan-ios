@@ -4,6 +4,7 @@
 #include "apple_audio_sink.hpp"
 #include "atlan/demo.hpp"
 #include "shell/data_file.hpp"
+#include "shell/render_config.hpp"
 #include "shell/session.hpp"
 #include <exception>
 #include <memory>
@@ -18,6 +19,7 @@
     UILabel* _map;
     std::unique_ptr<atlan::shell::GuestSession> _session;
     atlan::AppleAudioSink _audio;
+    atlan::shell::SurfaceState _surface;
 }
 
 - (NSURL*)libraryURL {
@@ -156,6 +158,9 @@
     config.library_path = self.libraryURL.path.UTF8String;
     config.audio_sink = &_audio;
     config.data_root = self.documentsPath.UTF8String;
+    _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
+                                           self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
+    config.surface = &_surface;
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,
         [weakSelf](const std::string& line) {
