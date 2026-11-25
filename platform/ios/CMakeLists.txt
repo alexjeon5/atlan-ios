@@ -5,7 +5,7 @@ set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_EXTENSIONS OFF)
 add_executable(AtlanRuntime MACOSX_BUNDLE main.mm ../apple/metal_gl_backend.mm)
 target_include_directories(AtlanRuntime PRIVATE ../apple)
-target_link_libraries(AtlanRuntime PRIVATE atlan_shell atlan_apple_audio "-framework UIKit" "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework UniformTypeIdentifiers")
+target_link_libraries(AtlanRuntime PRIVATE atlan_shell atlan_apple_audio "-framework UIKit" "-framework Metal" "-framework QuartzCore" "-framework Foundation" "-framework UniformTypeIdentifiers" "-framework CoreLocation")
 target_compile_options(AtlanRuntime PRIVATE -fobjc-arc -Wall -Wextra -Werror)
 set_target_properties(AtlanRuntime PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"

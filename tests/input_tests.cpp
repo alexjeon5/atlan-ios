@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Host input bridge: queue coalescing, binding text, AAPCS32 argument words, and delivery into a synthetic guest
+// function that records the words it received. No app-specific names or values.
+#include "atlan/imports.hpp"
+#include "shell/input.hpp"
+#include <array>
+#include <bit>
+#include <iostream>
+#include <stdexcept>
+
+namespace {
+using namespace atlan::shell;
+unsigned checks{};
+void check(bool result, const char* message) {
+    ++checks;
+    if (!result) throw std::runtime_error(message);
+}
+
+void queue() {
+    InputQueue q;
+    q.push(TouchEvent{TouchPhase::down, 0, 1, 1, 10});
+    q.push(TouchEvent{TouchPhase::move, 0, 2, 2, 11});
+    q.push(TouchEvent{TouchPhase::move, 0, 3, 3, 12});      // replaces the queued move
+    q.push(LocationFix{37.0, 127.0, 0, 0, 0, 5, 1000});
+    q.push(LocationFix{37.5, 127.5, 0, 0, 0, 5, 2000});     // replaces the queued fix
+    q.push(TouchEvent{TouchPhase::move, 0, 4, 4, 13});      // newest touch event is a move of this finger: replaced
+    q.push(TouchEvent{TouchPhase::move, 1, 9, 9, 14});      // another finger: kept
+    q.push(TouchEvent{TouchPhase::up, 0, 4, 4, 15});
+    q.push(TouchEvent{TouchPhase::move, 1, 8, 8, 16});      // newest touch event is an up: not merged across it
+    const auto events = q.drain();
+    check(events.size() == 6, "moves and fixes coalesce");
+    check(std::get<TouchEvent>(events[0]).phase == TouchPhase::down, "down is kept first");
+    check(std::get<TouchEvent>(events[1]).x == 4 && std::get<TouchEvent>(events[1]).time_ms == 13, "latest move wins");
+    check(std::get<LocationFix>(events[2]).latitude == 37.5, "latest fix wins");
+    check(std::get<TouchEvent>(events[3]).pointer == 1 && std::get<TouchEvent>(events[4]).phase == TouchPhase::up &&
+          std::get<TouchEvent>(events[5]).x == 8, "order across fingers and phases is preserved");
+    check(q.drain().empty(), "drain empties the queue");
+
+    for (unsigned i = 0; i < InputQueue::capacity + 10; ++i) q.push(TouchEvent{TouchPhase::move, i, 0, 0, i});
+    check(q.dropped() == 10, "moves past capacity are dropped and counted");
+    q.push(LocationFix{});
+    check(q.dropped() == 11, "a fix past capacity is dropped");
+    q.push(TouchEvent{TouchPhase::up, 0, 0, 0, 0});
+    check(q.drain().size() == InputQueue::capacity + 1, "an up always enters");
+
+    const auto p = to_surface(426, 196.5, 852, 393, {800, 480});
+    check(p.x == 400 && p.y == 240, "view points scale to surface pixels");
+    const auto edge = to_surface(900, -5, 852, 393, {800, 480});
+    check(edge.x == 799 && edge.y == 0, "points outside the view clamp to the surface");
+    check(to_surface(1, 1, 0, 0, {800, 480}).x == 0 && to_surface(1, 1, 10, 10, {0, 0}).y == 0, "unknown sizes map to the origin");
+}
+
+void bindings_text() {
+    std::string error;
+    const auto parsed = parse_input_bindings(
+        "# synthetic adapter\n"
+        "touch example/Input onTouch (IFFI)V action x y pointer\n"
+        "touch.up example/Input onRelease (I)V pointer   # overrides one phase\n"
+        "location example/Input onFix (DDFJI)V latitude longitude speed*3.6 time 7\n"
+        "location example/Input onSentence (Ljava/lang/String;)V rmc\n"
+        "actions 10 12 11 13\n", error);
+    check(parsed.has_value() && error.empty(), "bindings text parses");
+    check(!parsed->empty() && parsed->touch[0]->name == "onTouch" && parsed->touch[1]->name == "onTouch" &&
+          parsed->touch[2]->name == "onRelease" && parsed->touch[3]->arguments.size() == 4, "touch rules bind phases");
+    check(parsed->location.size() == 2 && parsed->location[0].arguments[2].source == InputSource::speed &&
+          parsed->location[0].arguments[2].scale == 3.6 && parsed->location[0].arguments[4].source == InputSource::constant &&
+          parsed->location[0].arguments[4].scale == 7, "factors and constants parse");
+    check(parsed->location[1].name == "onSentence" && parsed->location[1].arguments[0].source == InputSource::rmc, "text rules parse");
+    check(parsed->actions == std::array<std::int32_t, 4>{10, 12, 11, 13}, "action codes parse");
+    check(parsed->matching(InputEvent{LocationFix{}}).size() == 2 &&
+          parsed->matching(InputEvent{TouchEvent{TouchPhase::up, 0, 0, 0, 0}}).front()->name == "onRelease", "events find their bindings");
+    check(InputBindings{}.empty() && InputBindings{}.matching(InputEvent{LocationFix{}}).empty(), "empty bindings bind nothing");
+
+    const auto rejected = [&](const char* text, const char* fragment) {
+        error.clear();
+        return !parse_input_bindings(text, error) && error.find(fragment) != std::string::npos;
+    };
+    check(rejected("touch a/B m (II)V x\n", "line 1: (II)V takes 2 arguments, 1 given"), "argument count must match the signature");
+    check(rejected("\nlocation a/B m (Ljava/lang/String;)V latitude\n", "line 2: latitude cannot fill a String"), "a number cannot fill a String");
+    check(rejected("location a/B m (I)V gga\n", "needs a Ljava/lang/String; parameter"), "a sentence needs a String parameter");
+    check(rejected("location a/B m ([B)V gga\n", "unsupported parameter type"), "other reference parameters are rejected");
+    check(rejected("touch a/B m (I)V latitude\n", "not available"), "a location source is rejected for touch");
+    check(rejected("location a/B m (I)V x\n", "not available"), "a touch source is rejected for location");
+    check(rejected("touch a/B m (I)V speed*fast\n", "bad factor") || rejected("touch a/B m (I)V x*fast\n", "bad factor"), "bad factor is rejected");
+    check(rejected("gesture a/B m ()V\n", "unknown rule"), "unknown rule is rejected");
+    check(rejected("touch a/B m II x y\n", "malformed signature"), "malformed signature is rejected");
+    check(rejected("actions 0 1 2\n", "actions needs"), "short action list is rejected");
+    check(rejected("touch a/B m (I)V wheel\n", "unknown argument"), "unknown source is rejected");
+    const auto missing = load_input_bindings("/nonexistent/atlan-input-bindings", error);
+    check(missing.has_value() && missing->empty(), "a missing bindings file means no bindings");
+}
+
+void put32(atlan::Memory& memory, std::uint32_t at, std::uint32_t value) {
+    std::array<std::byte, 4> bytes{};
+    for (unsigned i = 0; i < 4; ++i) bytes[i] = std::byte((value >> (8 * i)) & 255);
+    check(memory.write(at, bytes), "write guest word");
+}
+std::uint32_t get32(atlan::Memory& memory, std::uint32_t at) {
+    std::array<std::byte, 4> bytes{};
+    check(memory.read(at, bytes), "read guest word");
+    std::uint32_t value{};
+    for (unsigned i = 0; i < 4; ++i) value |= std::to_integer<std::uint32_t>(bytes[i]) << (i * 8);
+    return value;
+}
+
+// A guest function that stores r0-r3 and the first four stack words at `record`, then counts the call at record+32.
+constexpr std::uint32_t code = 0x1000, record = 0x4000, stack_top = 0x80000, sentinel = 0xffff0000;
+struct Guest {
+    atlan::Runtime runtime;
+    atlan::ImportDispatcher dispatcher;
+    Guest() {
+        runtime.memory.map(code, 0x1000, atlan::Permissions::read_write);
+        runtime.memory.map(record, 0x1000, atlan::Permissions::read_write);
+        runtime.memory.map(stack_top - 0x1000, 0x2000, atlan::Permissions::read_write);  // a page above for [sp+12]
+        const std::uint32_t recorder[] = {
+            0xe59fc03c,                                      // ldr r12, =record
+            0xe58c0000, 0xe58c1004, 0xe58c2008, 0xe58c300c,  // str r0-r3, [r12, #0..12]
+            0xe59d0000, 0xe58c0010, 0xe59d0004, 0xe58c0014,  // [sp], [sp+4] -> [r12, #16], [r12, #20]
+            0xe59d0008, 0xe58c0018, 0xe59d000c, 0xe58c001c,  // [sp+8], [sp+12] -> [r12, #24], [r12, #28]
+            0xe59c0020, 0xe2800001, 0xe58c0020,              // ++[r12, #32]
+            0xe12fff1e, record};                             // bx lr; literal
+        for (unsigned i = 0; i < std::size(recorder); ++i) put32(runtime.memory, code + 4 * i, recorder[i]);
+        runtime.memory.protect(code, 0x1000, atlan::Permissions::read_execute);
+    }
+    std::uint32_t word(unsigned i) { return get32(runtime.memory, record + 4 * i); }
+    void deliver(const InputBindings& bindings, const InputEvent& event) {
+        const auto matches = bindings.matching(event);
+        check(matches.size() == 1, "event has one binding");
+        const auto* binding = matches.front();
+        std::string error;
+        const auto words = native_call_words(*binding, event, bindings.actions, 0xe0e0e0e0, 0x0b0b0b0b, error);
+        check(words.has_value(), "argument words are built");
+        const auto outcome = dispatcher.call(runtime, code, *words, stack_top, sentinel, 1000);
+        check(outcome.stop == atlan::Stop::returned, "guest input handler returns");
+    }
+};
+
+void nmea() {
+    const LocationFix fix{37.5665, 126.978, 38.26, 10, 271.6, 5, 1700000000123ULL};  // 2023-11-14 22:13:20.12 UTC
+    const auto valid = [](const std::string& s) {
+        const auto star = s.rfind('*');
+        if (s.size() < 6 || s[0] != '$' || star == std::string::npos || s.substr(star + 3) != "\r\n") return false;
+        unsigned sum = 0;
+        for (std::size_t i = 1; i < star; ++i) sum ^= static_cast<unsigned char>(s[i]);
+        return std::stoul(s.substr(star + 1, 2), nullptr, 16) == sum;
+    };
+    const auto gga = nmea_gga(fix), rmc = nmea_rmc(fix);
+    check(valid(gga) && valid(rmc), "sentences carry a correct checksum and CR LF");
+    check(gga.starts_with("$GPGGA,221320.12,3733.9900,N,12658.6800,E,1,08,1.0,38.3,M,0.0,M,,*"), "GGA fields");
+    check(rmc.starts_with("$GPRMC,221320.12,A,3733.9900,N,12658.6800,E,19.44,271.60,141123,,,A*"), "RMC fields");
+    const LocationFix south{-33.999999999, -0.5, 0, -1, -1, 500, 951782400000ULL};  // 2000-02-29 00:00:00 UTC
+    check(nmea_gga(south).starts_with("$GPGGA,000000.00,3400.0000,S,00030.0000,W,1,08,50.0,0.0,M"), "minutes carry into degrees; hemispheres; HDOP bound");
+    check(nmea_rmc(south).starts_with("$GPRMC,000000.00,A,3400.0000,S,00030.0000,W,0.00,,290200,,,A*"), "unknown speed and course; leap day");
+}
+
+void delivery() {
+    std::string error;
+    const auto bindings = parse_input_bindings(
+        "touch example/Input onTouch (IFFIJ)V action x y pointer time\n"
+        "location example/Input onFix (DDFIJ)V latitude longitude speed*3.6 course time\n", error);
+    check(bindings.has_value(), "delivery bindings parse");
+    Guest guest;
+
+    guest.deliver(*bindings, TouchEvent{TouchPhase::move, 1, 400.5f, 240.0f, 0x100000002ULL});
+    // env, this, action, x | y, pointer, time lo, time hi  (words 6-7 are already an even pair)
+    check(guest.word(0) == 0xe0e0e0e0 && guest.word(1) == 0x0b0b0b0b, "env and receiver are in r0 and r1");
+    check(guest.word(2) == 2 && guest.word(3) == std::bit_cast<std::uint32_t>(400.5f), "action code and float x are in r2 and r3");
+    check(guest.word(4) == std::bit_cast<std::uint32_t>(240.0f) && guest.word(5) == 1, "y and pointer are the first stack words");
+    check(guest.word(6) == 2 && guest.word(7) == 1, "a long is passed low word first");
+    check(guest.word(8) == 1, "the handler ran once");
+
+    guest.deliver(*bindings, LocationFix{37.5665, 126.978, 30, 10, 271.6, 5, 1700000000123ULL});
+    // env, this, lat lo, lat hi | lon lo, lon hi, speed, course, (time on the next even pair, beyond the record)
+    const auto lat = std::bit_cast<std::uint64_t>(37.5665), lon = std::bit_cast<std::uint64_t>(126.978);
+    check(guest.word(2) == static_cast<std::uint32_t>(lat) && guest.word(3) == static_cast<std::uint32_t>(lat >> 32), "a double fills r2:r3");
+    check(guest.word(4) == static_cast<std::uint32_t>(lon) && guest.word(5) == static_cast<std::uint32_t>(lon >> 32), "the next double is on the stack");
+    check(guest.word(6) == std::bit_cast<std::uint32_t>(36.0f) && guest.word(7) == 272, "scaled float and rounded int follow");
+    check(guest.word(8) == 2, "the handler ran twice");
+
+    // Alignment: (I D) leaves r3 unused; (I J) likewise; an odd stack word is padded.
+    NativeBinding padded{"example/Input", "m", "(IDIJ)V",
+                         {{InputSource::constant, 5}, {InputSource::latitude, 1}, {InputSource::constant, 6}, {InputSource::time, 1}}};
+    const auto words = native_call_words(padded, LocationFix{1.5, 0, 0, 0, 0, 0, 9}, {}, 1, 2, error);
+    const auto bits = std::bit_cast<std::uint64_t>(1.5);
+    check(words && *words == std::vector<std::uint32_t>{1, 2, 5, 0, static_cast<std::uint32_t>(bits), static_cast<std::uint32_t>(bits >> 32), 6, 0, 9, 0},
+          "64-bit values start at even words");
+
+    NativeBinding extremes{"example/Input", "m", "(IIJZ)V",
+                           {{InputSource::constant, 1e12}, {InputSource::constant, -1e12}, {InputSource::constant, -2.5}, {InputSource::speed, 1}}};
+    const auto clamped = native_call_words(extremes, LocationFix{0, 0, 0, -1, 0, 0, 0}, {}, 0, 0, error);
+    check(clamped && (*clamped)[2] == 0x7fffffff && (*clamped)[3] == 0x80000000 && (*clamped)[4] == 0xfffffffe &&
+          (*clamped)[5] == 0xffffffff && (*clamped)[6] == 0xffffffff, "integers saturate and negatives sign-extend");
+
+    // A text argument is one word: the handle the caller returns for the sentence.
+    NativeBinding text{"example/Input", "onSentence", "(Ljava/lang/String;)V", {{InputSource::gga, 1}}};
+    std::string seen;
+    const LocationFix fix{1, 2, 3, 4, 5, 6, 7};
+    const auto with_text = native_call_words(text, fix, {}, 1, 2, error, [&](std::size_t index, const std::string& s) {
+        seen = std::to_string(index) + s;
+        return std::uint32_t{0xe0000004};
+    });
+    check(with_text && *with_text == std::vector<std::uint32_t>{1, 2, 0xe0000004} && seen == "0" + nmea_gga(fix), "String argument is the sentence's handle");
+    check(!native_call_words(text, fix, {}, 1, 2, error) && error.find("String") != std::string::npos, "a text argument needs a String maker");
+
+    NativeBinding mismatched{"example/Input", "m", "(II)V", {{InputSource::x, 1}}};
+    check(!native_call_words(mismatched, TouchEvent{}, {}, 0, 0, error) && !error.empty(), "argument count mismatch is an error");
+    NativeBinding reference{"example/Input", "m", "([B)V", {{InputSource::x, 1}}};
+    check(!native_call_words(reference, TouchEvent{}, {}, 0, 0, error), "reference parameter is an error");
+}
+}
+
+int main() {
+    try {
+        queue();
+        bindings_text();
+        nmea();
+        delivery();
+        std::cout << "input tests passed: " << checks << " checks\n";
+    } catch (const std::exception& error) {
+        std::cerr << "input test failed: " << error.what() << '\n';
+        return 1;
+    }
+}

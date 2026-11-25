@@ -23,7 +23,7 @@ Linux ARM64에서 CPU 코어를 실행한 결과는 iOS 기기 검증을 대체�
 - 지도: 복사하지 않는다. 사용자가 파일 앱·Finder로 앱 Documents 폴더에 직접 넣거나 옮기고(`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`), Documents에서 가장 큰 일반 파일을 그 자리에서 사용한다. 교체는 같은 폴더의 파일을 바꿔 넣는 것이다. 앱은 크기와 앞·뒤 4KB 읽기 가능 여부만 검증하고(`shell/data_file`), 형식별 헤더 검증은 형식이 정해지면 `magic`으로 추가한다. 잘못된 파일은 사유와 함께 거부하며 보관·롤백하지 않는다.
 - 실행: 해석기가 `diagnostic_traps`로 로드하고 libc·문자열·printf·힙·mmap·스레드·mutex·조건변수·세마포어·가상 파일·스레드 키·android_log·OpenSL ES(Apple AudioQueue 싱크) 서비스를 등록한 뒤 생성자를 차례로 실행하고, `JNI_OnLoad`가 있으면 최소 JavaVM/JNIEnv로 호출하고, `MainActivity.nativeInit`을 실행하며(Documents를 파일 루트로 사용, `setSurfaces`는 호출만 기록), 이어서 게스트 스레드와 오디오 콜백을 한 번 `pump`한다. 테스트 절차는 `docs/testing.md`. 서비스 구성은 `tools/elf.cpp`와 같아야 한다. 중지는 생성자 경계에서 협력적으로 처리된다(호출당 예산 3,000,000 명령).
 - 지도를 게스트 파일 접근에 연결하는 가상 파일 디스크립터는 M4b 범위이며 아직 없다.
-- 위치 같은 호스트 서비스(CoreLocation)는 `shell` 계층에 서비스 자리만 두고 구현하지 않았다.
+- 터치와 위치(CoreLocation)는 입력 큐를 거쳐 게스트 네이티브 메서드로 전달한다. 바인딩은 Documents의 `input.cfg`로 주입한다([입력 연결](input.md)). 첫 프레임들과 `pump` 뒤에는 중지될 때까지 프레임을 계속 그린다.
 
 CI는 `Release-iphoneos` 앱을 `Payload/`로 압축한 서명 없는 IPA(`atlan-runtime-ios-unsigned`)를 아티팩트로 올린다. 사이드로딩 도구(iloader 등)로 서명·설치한다.
 

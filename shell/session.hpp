@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include "shell/input.hpp"
 #include "shell/surface.hpp"
 
 namespace atlan { class AudioSink; class GlBackend; }
@@ -24,6 +25,14 @@ struct SessionConfig {
     // Called on the guest thread when the guest reports MainActivity.setSurfaces(a, b). Arguments are passed through
     // unchanged; the embedder decides what they mean.
     std::function<void(std::int32_t, std::int32_t)> on_set_surfaces;
+    // Host input. Events pushed to `input` (from any thread) are delivered on the guest thread before each rendered
+    // frame, through the native methods named in `input_bindings`. An event without a binding, or whose method the
+    // guest did not register or export, is reported once in the log and dropped.
+    InputQueue* input{};
+    InputBindings input_bindings;
+    // Keep rendering frames (and delivering input) after the first `render_frames` until stop() or a guest stop.
+    bool interactive{};
+    std::uint32_t frame_interval_ms{33};          // lower bound on the time per interactive frame
     bool block_cache{true};  // false: single-step interpreter (comparison and diagnosis)
     bool perf_log{};         // log instructions, seconds and MIPS per surface/render call, and block cache coverage
 };
