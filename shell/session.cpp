@@ -219,9 +219,6 @@ void GuestSession::run() {
             stdio->add_read_filter(settings_file, [](std::string text) {
                 return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
             });
-            if (config_.on_fixed_screen)
-                config_.on_fixed_screen(ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
-                                        ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0);
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
@@ -521,7 +518,8 @@ void GuestSession::run() {
                  " live_threads=" + std::to_string(threads.live_threads()) +
                  (pumped.message.empty() ? "" : " message=" + pumped.message));
             if (pumped.stop == Stop::unresolved_import) { fail("pump stopped at missing service " + pumped.import); return; }
-            if (pumped.stop != Stop::returned) { fail(describe_stop("pump", pumped)); return; }
+            // Guest threads still busy when the budget ends are not a failure: the interactive loop keeps pumping them.
+            if (pumped.stop != Stop::returned && pumped.stop != Stop::budget_exhausted) { fail(describe_stop("pump", pumped)); return; }
             const auto delivered = audio->pump(runtime, stack_base + stack_bytes, return_sentinel, config_.initializer_budget);
             if (delivered.error) { fail("audio callback: " + *delivered.error); return; }
             log_("audio callbacks=" + std::to_string(delivered.callbacks) + " players=" + std::to_string(audio->live_players()));
@@ -550,9 +548,23 @@ void GuestSession::run() {
                 // request for a frame is served as soon as the interval allows.
                 constexpr auto longest_nap = std::chrono::milliseconds(8);   // bounds the delay of host input
                 constexpr auto shortest_nap = std::chrono::milliseconds(2);  // a guest polling faster does not spin the host
+                const auto* program_exit = image.find("Java_com_atlan_MainActivity_nativeIsProgramExit");
+                auto next_exit_check = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                bool guest_exit = false;
                 while (!stop_.load()) {
                     const auto frame_start = std::chrono::steady_clock::now();
                     if (!deliver_input()) return;
+                    if (program_exit && program_exit->type == 2 && frame_start >= next_exit_check) {
+                        next_exit_check = frame_start + std::chrono::seconds(1);
+                        const auto asked = dispatcher.call(runtime, program_exit->address, render_args, stack_base + stack_bytes,
+                                                           return_sentinel, config_.surface_call_budget);
+                        if (asked.stop != Stop::returned) {
+                            log_(describe_state(runtime, dispatcher));
+                            fail(describe_stop("nativeIsProgramExit", asked));
+                            return;
+                        }
+                        if ((runtime.cpu.registers[0] & 0xff) == 1) { guest_exit = true; break; }
+                    }
                     CallOutcome frame;
                     bool draw = frame_start >= next_draw && (!on_demand || render_requested);
                     if (!draw && frame_start >= next_draw &&
@@ -649,7 +661,8 @@ void GuestSession::run() {
                         render_seconds = render_worst = pump_seconds = audio_seconds = idle_seconds = 0;
                     }
                 }
-                log_("stopped");
+                log_(guest_exit ? "guest exit" : "stopped");
+                if (guest_exit && config_.on_guest_exit) config_.on_guest_exit();
             }
         }
         state_.store(SessionState::finished);

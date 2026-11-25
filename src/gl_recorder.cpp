@@ -98,6 +98,12 @@ void LoggingGlSink::draw(const GlDraw& d) {
     }
     std::fprintf(out_, "]\n");
 }
+bool LoggingGlSink::read_pixels(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height, std::vector<std::byte>& out) {
+    std::fprintf(out_, "sink read_pixels x=%d y=%d size=%ux%u\n", x, y, width, height);
+    out.assign(std::size_t{width} * height * 4, std::byte{0x80});
+    for (std::size_t i = 3; i < out.size(); i += 4) out[i] = std::byte{0xff};
+    return true;
+}
 void LoggingGlSink::present() {
     ++presents;
     std::fprintf(out_, "sink present\n");

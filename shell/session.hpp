@@ -25,10 +25,6 @@ struct SessionConfig {
     std::uint32_t render_frames{3};               // renderGLSF calls after the surface is created
     GlBackend* gl_backend{};                      // GLES2/EGL sink (Metal on devices); nullptr uses a no-op backend
     const SurfaceState* surface{};                // host surface size in native pixels; nullptr means unknown
-    // Called on the guest thread before the guest starts, with whether its settings file fixes the screen size
-    // (non-zero FIXEDSCREENWIDTH and FIXEDSCREENHEIGHT). The app's own Android layout shows a fixed screen at its
-    // pixel size and stretches any other over the whole display, whatever its aspect ratio.
-    std::function<void(bool)> on_fixed_screen;
     // Called on the guest thread when the guest reports MainActivity.setSurfaces(a, b). Arguments are passed through
     // unchanged; the embedder decides what they mean.
     std::function<void(std::int32_t, std::int32_t)> on_set_surfaces;
@@ -39,6 +35,9 @@ struct SessionConfig {
     InputBindings input_bindings;
     // Keep rendering frames (and delivering input) after the first `render_frames` until stop() or a guest stop.
     bool interactive{};
+    // Called on the guest thread when the guest reports that the user chose to quit (the app's Java side polls
+    // MainActivity.nativeIsProgramExit once a second and then finishes the activity). The interactive loop ends.
+    std::function<void()> on_guest_exit;
     std::uint32_t frame_interval_ms{33};          // lower bound on the time per interactive frame
     // Interactive frames are drawn only when the guest asks for one (its GL thread's callBackGLThread, answered as
     // the app's Java side does: isStateReady -> setState(3) -> request), as a GLSurfaceView in RENDERMODE_WHEN_DIRTY

@@ -38,7 +38,6 @@
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
     std::vector<UITouch*> _fingers;            // slot index = pointer id; nil when free
     CLLocationManager* _location;
-    std::atomic<bool> _keepAspect;             // the guest's settings fix the screen size: show it undistorted
     NSString* _package;                        // the app package in Documents/ATLAN, run in preference to guest.so
     BOOL _autoStarted;
 }
@@ -61,9 +60,10 @@
 
 // Where the guest surface is shown inside the metal view; touches map through the same rectangle.
 - (atlan::shell::ViewRect)shownRect {
+    // The guest's screen is stretched over the whole display whatever its size, as the app's Android layout does
+    // on a phone; its UI is laid out for exactly that size.
     const CGSize view = _metalView.bounds.size;
-    if (!_keepAspect.load()) return {0, 0, view.width, view.height};  // stretched over the display, as on Android
-    return atlan::shell::fit_rect(view.width, view.height, self.touchSurface);
+    return {0, 0, view.width, view.height};
 }
 
 - (void)layoutSurface {
@@ -336,10 +336,10 @@
     _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
                                            self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
     config.surface = &_surface;
-    std::atomic<bool>* keepAspect = &_keepAspect;  // outlives the session (joined in dealloc)
-    config.on_fixed_screen = [weakSelf, keepAspect](bool fixed) {
-        keepAspect->store(fixed);
-        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf layoutSurface]; });
+    // The guest's own quit (its exit dialog): leave like the Android app does. The session thread has finished its
+    // work by then; a short delay lets the last log line and sound out.
+    config.on_guest_exit = [] {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ exit(0); });
     };
     config.frame_interval_ms = 50;  // 20 frames per second at most, for heat
     _guestSurface.store(0);
@@ -425,6 +425,7 @@
             });
         });
     if (!_session->start()) [self append:@"thread start failed"];
+    UIApplication.sharedApplication.idleTimerDisabled = YES;  // a navigation screen stays on without touches
     [self refresh];
 }
 

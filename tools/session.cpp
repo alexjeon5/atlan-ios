@@ -4,6 +4,7 @@
 #include "atlan/gl_context.hpp"
 #include "atlan/gl_recorder.hpp"
 #include "shell/session.hpp"
+#include "preview_sink.hpp"
 #include <chrono>
 #include <cstdio>
 #include <thread>
@@ -16,7 +17,15 @@ int main(int argc, char** argv) {
     std::FILE* trace = argc > 3 ? std::fopen(argv[3], "w") : nullptr;
     atlan::RecordingGlBackend recorder(trace ? trace : stderr, argc > 4);
     atlan::LoggingGlSink sink(trace ? trace : stderr);
-    atlan::GlContext context(sink);
+    // ATLAN_PREVIEW=DIR: also write a rough software picture of every ATLAN_PREVIEW_EVERY-th frame (default 1) as
+    // DIR/frame_NNNNN.ppm, ATLAN_PREVIEW_SIZE=WxH pixels (default 800x480). See preview_sink.hpp for what it shows.
+    unsigned preview_width = 800, preview_height = 480;
+    if (const char* size = std::getenv("ATLAN_PREVIEW_SIZE")) std::sscanf(size, "%ux%u", &preview_width, &preview_height);
+    const char* preview_directory = std::getenv("ATLAN_PREVIEW");
+    const char* preview_every = std::getenv("ATLAN_PREVIEW_EVERY");
+    atlan::tools::PreviewGlSink preview(preview_width, preview_height, preview_directory ? preview_directory : "",
+                                        preview_every ? static_cast<std::uint32_t>(std::atoi(preview_every)) : 1, &sink);
+    atlan::GlContext context(preview_directory ? static_cast<atlan::GlSink&>(preview) : static_cast<atlan::GlSink&>(sink));
     context.set_log([](const std::string& line) { std::cout << "gl: " << line << std::endl; });
     const bool raw = std::getenv("ATLAN_RAW_GL") != nullptr;
     atlan::shell::SessionConfig config;
@@ -63,7 +72,8 @@ int main(int argc, char** argv) {
     atlan::shell::GuestSession session(config, [](const std::string& line) { std::cout << line << std::endl; });
     session.start();
     if (interactive) {
-        // ATLAN_TAPS="MS:X,Y;MS:X,Y;...": taps (down, up 80 ms later) at those times after the start, in guest pixels.
+        // ATLAN_TAPS="MS:X,Y;MS:X,Y;...": taps (down, up ATLAN_TAP_HOLD_MS later, default 80) at those times after the start, in guest pixels.
+        const long hold_ms = std::getenv("ATLAN_TAP_HOLD_MS") ? std::atol(std::getenv("ATLAN_TAP_HOLD_MS")) : 80;  // down to up
         struct Tap { long ms; float x, y; };
         std::vector<Tap> taps;
         if (const char* list = std::getenv("ATLAN_TAPS")) {
@@ -83,8 +93,8 @@ int main(int argc, char** argv) {
             if (next_tap < taps.size() && elapsed >= taps[next_tap].ms) {
                 const auto& tap = taps[next_tap++];
                 input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed)});
-                std::this_thread::sleep_for(std::chrono::milliseconds(80));
-                input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed + 80)});
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+                input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed + hold_ms)});
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }

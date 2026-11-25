@@ -27,6 +27,8 @@ public:
     void clear(const GlClear& c) override;
     void draw(const GlDraw& d) override;
     void present() override;
+    // Logged; answers with an opaque mid-grey image so a guest that reads the screen back gets usable pixels.
+    bool read_pixels(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height, std::vector<std::byte>& out) override;
     std::uint64_t draws{}, presents{};
 private:
     std::FILE* out_;
