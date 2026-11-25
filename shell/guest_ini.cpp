@@ -45,7 +45,7 @@ std::optional<std::uint32_t> ini_number(std::string_view text, std::string_view 
     return number;
 }
 
-std::string ini_set(std::string text, std::string_view key, std::string_view value) {
+std::string ini_set(std::string text, std::string_view key, std::string_view value, char type) {
     std::string out;
     std::size_t copied = 0;
     bool found = false;
@@ -59,7 +59,7 @@ std::string ini_set(std::string text, std::string_view key, std::string_view val
     if (!found) {
         const bool crlf = text.find("\r\n") != std::string::npos;
         if (!text.empty() && text.back() != '\n') text += crlf ? "\r\n" : "\n";
-        text.append(key).append("|1=").append(value).append(crlf ? "\r\n" : "\n");
+        text.append(key).append("|").append(1, type).append("=").append(value).append(crlf ? "\r\n" : "\n");
         return text;
     }
     out.append(text, copied, std::string::npos);

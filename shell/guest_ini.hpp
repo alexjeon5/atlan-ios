@@ -12,6 +12,6 @@ namespace atlan::shell {
 // The same value as a non-negative decimal integer; nullopt if absent or not a number.
 [[nodiscard]] std::optional<std::uint32_t> ini_number(std::string_view text, std::string_view key);
 // `text` with the value of every entry named `key` replaced. Other bytes, including line endings, are kept.
-// Without such an entry, `KEY|1=VALUE` (an integer entry) is appended.
-[[nodiscard]] std::string ini_set(std::string text, std::string_view key, std::string_view value);
+// Without such an entry, `KEY|TYPE=VALUE` is appended (type 1: integer, 2: text).
+[[nodiscard]] std::string ini_set(std::string text, std::string_view key, std::string_view value, char type = '1');
 }

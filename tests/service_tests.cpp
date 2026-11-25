@@ -191,7 +191,7 @@ void path_mapping() {
     const auto file = f.r0();
     check(f.call("fread", {data + 0x100, 1, 64, file}).stop == atlan::Stop::returned && f.r0() == 8, "and sees the host file itself");
     check(f.call("fclose", {file}).stop == atlan::Stop::returned, "fclose");
-    check(f.stdio.host_path("/x/data/sub") == f.root / "DATA" / "Sub" && f.stdio.host_path("/x/data/../..").empty(), "host_path resolves like the guest calls");
+    check(std::filesystem::equivalent(f.stdio.host_path("/x/data/sub"), f.root / "DATA" / "Sub") && f.stdio.host_path("/x/data/../..").empty(), "host_path resolves like the guest calls");
 }
 void directories_and_descriptors() {
     Fixture f;

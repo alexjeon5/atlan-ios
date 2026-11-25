@@ -164,6 +164,7 @@ int main() {
             check(ini_number(text, "A2") == 7u && !ini_number(text, "PATH") && !ini_number(text, "NONE"), "numeric settings parse");
             check(ini_set(text, "A", "12") == "A|1=12\r\nPATH|2= /x/y \r\nA2|1=7\r\nBAD\r\nA|1=12\r\n", "every entry of a key is replaced in place");
             check(ini_set(text, "NEW", "3") == text + "NEW|1=3\r\n" && ini_set("A|1=1", "B", "2") == "A|1=1\nB|1=2\n", "a missing key is appended");
+            check(ini_set("A|1=1\r\n", "P", "/q", '2') == "A|1=1\r\nP|2=/q\r\n", "an appended entry takes the given type");
             check(ini_value("K|1=9", "K") == "9" && ini_set("K|1=9", "K", "10") == "K|1=10", "a last line without a newline works");
         }
         data_files();
