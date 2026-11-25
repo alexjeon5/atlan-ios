@@ -14,6 +14,7 @@
 namespace atlan {
 class ImportDispatcher;
 class GuestThreads;
+class GuestProfiler;
 
 // Arguments and result of one guest call into a host compatibility service.
 // arg() reads r0-r3 only. Word arguments past the fourth live on the guest
@@ -112,6 +113,9 @@ public:
     // single guest thread and blocking services report a deadlock diagnostic instead.
     void set_threads(GuestThreads* threads) noexcept { threads_ = threads; }
     [[nodiscard]] unsigned depth() const noexcept { return depth_; }
+    // Attaches a per-function profiler (optional, block cache only). While one is attached guest code runs one
+    // block at a time, which is slower; results are unchanged.
+    void set_profiler(GuestProfiler* profiler) noexcept { profiler_ = profiler; }
     // Guest code runs from the pre-decoded block cache (BlockRunner) by default; false selects Runtime::step()
     // for every instruction. Both give the same results; the switch exists for comparison and diagnosis.
     void set_block_cache(bool enabled) noexcept { block_cache_ = enabled; }
@@ -127,6 +131,7 @@ private:
     [[nodiscard]] CallOutcome run_to_return(Runtime& runtime, std::uint32_t return_target, bool pump = false);
     [[nodiscard]] BlockRunner& runner_for(Runtime& runtime);
     GuestThreads* threads_{};
+    GuestProfiler* profiler_{};
     std::unique_ptr<BlockRunner> runner_;  // block cache of the Runtime last executed
     Runtime* runner_runtime_{};
     bool block_cache_{true};

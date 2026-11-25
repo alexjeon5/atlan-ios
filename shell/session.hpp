@@ -43,6 +43,10 @@ struct SessionConfig {
     bool render_on_demand{};
     std::uint32_t idle_redraw_ms{1000};
     bool block_cache{true};  // false: single-step interpreter (comparison and diagnosis)
+    // Non-empty: profile guest functions (atlan/profiler.hpp) and write `<profile_path>.<phase>.tsv` per phase:
+    // init, each surface call, render (the first `render_frames` frames), frames (each interactive report
+    // interval; repeated phases are numbered). Slows the guest down.
+    std::string profile_path;
     bool perf_log{};         // log instructions, seconds and MIPS per surface/render call, and block cache coverage
 };
 

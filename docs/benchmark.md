@@ -42,6 +42,17 @@ x86-64 클라우드 VM(4 vCPU), GCC 13.3 Release, 반복 3회 중 최고값, 합
 - 대화형 단계는 10초마다 `perf frames:` 한 줄을 로그에 남긴다: fps, 프레임당 렌더·게스트 스레드·오디오·대기 시간(ms), 프레임당 명령 수와 MIPS. iOS 앱은 블록 통계와 import 상위 목록도 함께 남긴다.
 - `ATLAN_PERF=1 atlan-session …`은 surface/render 호출마다 명령 수·시간·MIPS와 블록 통계, 전용 핸들러가 없어 느린 경로로 간 명령 형태 상위 목록을 로그에 남긴다. 다음 전용 핸들러 후보는 이 목록으로 고른다.
 
+## 게스트 함수별 프로파일
+
+`GuestProfiler`(`include/atlan/profiler.hpp`)는 게스트 실행을 함수 단위로 나눠 호출 수, 명령 수, 호스트 시간을 센다. 각 값은 함수 자기 코드만(self)과 반환할 때까지(inclusive, 피호출 함수와 호스트 서비스 포함) 두 가지이고, 호출 관계(누가 누구를 몇 번)도 남긴다.
+
+- 함수 시작 주소는 export 심볼과 import 트랩, 그리고 실행 중 호출 대상으로 관찰된 주소다. 코드는 바로 아래의 가장 가까운 함수 시작에 귀속된다.
+- 호출은 "블록이 끝난 뒤 LR이 그 블록 바로 다음 주소"로, 반환은 "PC가 프레임의 반환 주소"로 판단한다. 호출자의 반환 주소와 스택이 복원된 채 함수 밖으로 나가면 꼬리 호출로 본다. self 값은 함수 시작 목록에만 의존하고, inclusive와 호출 수는 longjmp 같은 비정상 이동 근처에서 근사다.
+- 디스패처가 블록 하나씩 실행하게 되어 체이닝이 꺼진다. 명령 수는 정확하지만 시간에는 측정 비용이 섞이므로 함수끼리 비교하는 용도로만 쓴다. 실행 결과는 바뀌지 않는다.
+- `ATLAN_PROFILE=접두사 atlan-session …`은 단계별로 `접두사.<단계>.tsv`를 쓴다: `init`(생성자·`JNI_OnLoad`·`nativeInit`), surface 호출별, `render`(처음 `ATLAN_FRAMES` 프레임), `frames`(대화형 10초 구간마다, 반복되면 번호가 붙음). iOS 앱은 Documents에 `profile` 폴더가 있으면 그 안에 같은 파일을 쓴다.
+- `tools/profile_report.py 파일.tsv [--frames N] [--top N]`이 self 명령 수, inclusive 명령 수, self 시간 순의 표와 함수별 주요 호출자를 출력한다. 프로파일 파일에는 원본 라이브러리의 심볼과 주소가 들어 있으므로 저장소에 넣지 않는다.
+- `guest-profiler`(`tests/profiler_tests.cpp`)가 합성 게스트(루프 안 직접 호출, 레지스터를 통한 import 호출, 꼬리 호출)로 호출 수·self·inclusive·호출 관계를 확인한다.
+
 ## 차분 테스트
 
 `block-cache-differential`(`tests/block_cache_tests.cpp`)이 `Runtime::step/run`과 `BlockRunner`를 같은 초기 상태에서 돌려 결과 이벤트·주소·신드롬·레지스터·플래그·VFP 상태·ITSTATE·배타 모니터·메모리를 비교한다. 합성 워크로드를 임의 예산으로 쪼개 실행하고, 임의 A32/Thumb 단어 단일 명령, 포인터를 페이지 경계와 매핑 끝에 몰아 둔 단일 명령(전용 핸들러가 물러나는 경로), 임의 단어 프로그램, import를 부르는 프로그램을 디스패처의 두 경로로 임의 예산만큼 실행한 결과, 코드 덮어쓰기 후 무효화, 실행 권한 제거, 페이지 경계, 예산 0 경계를 다룬다. `exclusive_key`는 호스트 포인터라 비교에서 존재 여부만 본다. 시계를 읽는 MRRC(CNTVCT)는 두 실행의 시각이 달라 값이 다를 수 있다.

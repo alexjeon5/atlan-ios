@@ -17,6 +17,7 @@
 #include "atlan/libc_extra.hpp"
 #include "atlan/mmap.hpp"
 #include "atlan/opensles.hpp"
+#include "atlan/profiler.hpp"
 #include "atlan/string_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
@@ -143,6 +144,24 @@ void GuestSession::run() {
         Runtime runtime;
         ImportDispatcher dispatcher;
         dispatcher.set_block_cache(config_.block_cache);
+        // Per-function profile, written per phase; a phase ends where write_profile() is called.
+        std::optional<GuestProfiler> profiler;
+        std::map<std::string, unsigned> profile_phases;
+        if (!config_.profile_path.empty()) {
+            profiler.emplace();
+            for (const auto& symbol : image.exports)
+                if (symbol.type == 2) profiler->add_function(symbol.address, symbol.name);
+            for (const auto& import : image.trapped_imports) profiler->add_function(import.address, "import:" + import.name);
+            dispatcher.set_profiler(&*profiler);
+        }
+        const auto write_profile = [&](const std::string& phase) {
+            if (!profiler) return;
+            const unsigned n = profile_phases[phase]++;
+            const std::string path = config_.profile_path + "." + phase + (n ? "-" + std::to_string(n) : "") + ".tsv";
+            if (std::ofstream out(path); out) profiler->write(out);
+            log_("profile " + path + ": " + profiler->summary(12));
+            profiler->reset();
+        };
         ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         install_libc_services(dispatcher);
@@ -376,6 +395,8 @@ void GuestSession::run() {
                     log_(std::string("perf ") + name + ": " + std::to_string(r.retired) + " instructions, " + std::to_string(seconds) +
                          " s, " + std::to_string(seconds > 0 ? r.retired / seconds / 1e6 : 0.0) + " MIPS" + perf_details());
                 }
+                if (const std::string_view full(name); !full.ends_with("renderGLSF"))  // the first frames go into one file
+                    write_profile(std::string(full.substr(full.rfind('_') + 1)));
                 if (r.stop != Stop::returned) {
                     log_(describe_state(runtime, dispatcher));  // where it stopped: pc, lr, sp, r0-r3, busiest imports
                     fail(describe_stop(name, r));
@@ -436,6 +457,7 @@ void GuestSession::run() {
                 }
                 return true;
             };
+            write_profile("init");  // constructors, JNI_OnLoad, nativeInit
             bool surfaces_ok = native_init_address != 0;
             if (surfaces_ok) {
                 const auto surface = java.new_object(java.class_handle("android/view/Surface"));
@@ -455,6 +477,7 @@ void GuestSession::run() {
                 if (!surfaces_ok) return;  // fail() already recorded the stop
             }
             // Run guest threads the library started, then deliver finished audio buffers.
+            write_profile("render");  // the first `render_frames` frames and their input delivery
             const auto pumped = dispatcher.pump(runtime, config_.initializer_budget);
             log_("pump stop=" + std::to_string(static_cast<int>(pumped.stop)) + " retired=" + std::to_string(pumped.retired) +
                  " live_threads=" + std::to_string(threads.live_threads()) +
@@ -535,6 +558,7 @@ void GuestSession::run() {
                             " MIPS, threads " + std::to_string(pump_instructions / frames) + " instructions/frame";
                         if (config_.perf_log) line += perf_details();
                         log_(line);
+                        write_profile("frames");
                         dispatcher.reset_import_counts();
                         report_start = std::chrono::steady_clock::now();
                         frames = render_instructions = pump_instructions = drawn = render_requests = 0;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/imports.hpp"
+#include "atlan/profiler.hpp"
 #include "atlan/threads.hpp"
 #include <stdexcept>
 
@@ -87,6 +88,11 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
     const auto finish = [&](Stop stop, Result cpu) {
         outcome.stop = stop;
         outcome.cpu = cpu;
+        if (profiler_ != nullptr && depth_ == 1) {
+            // A finished top-level call leaves its root frame open: the return to the sentinel is not a block.
+            if (stop == Stop::returned && !pump) profiler_->unwind(threads_ != nullptr ? threads_->current_id() : 0);
+            profiler_->pause();
+        }
         if (threaded) {
             outcome.thread = threads_->current_id();
             threads_->end_run(runtime, stop == Stop::returned || stop == Stop::budget_exhausted);
@@ -94,6 +100,7 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
         return outcome;
     };
     if (threaded) threads_->begin_run(runtime, pump);
+    bool entered = !pump;  // the host started a call on this thread; the profiler cannot tell from the registers
     std::uint64_t slice = 0;
     // Whether the checks at the top of the loop act on the current PC (a return or a thread exit).
     const auto stops_here = [&] {
@@ -138,7 +145,19 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
             if (threaded && threads_->quantum() - slice < limit) limit = threads_->quantum() - slice;
             const bool stops_fault = runtime.memory.translate(return_target, MemoryAccess::execute) == nullptr &&
                 (!threaded || runtime.memory.translate(threads_->exit_sentinel(), MemoryAccess::execute) == nullptr);
-            result = stops_fault ? runner->run(limit) : runner->step_block(limit);
+            if (profiler_ != nullptr) [[unlikely]] {
+                const std::uint32_t id = threads_ != nullptr ? threads_->current_id() : 0;
+                const bool enters = entered && (!threaded || threads_->current_is_main());
+                if (enters) {
+                    entered = false;
+                    if (depth_ == 1) profiler_->unwind(id);
+                }
+                profiler_->begin(runtime, id, enters);
+                result = runner->step_block(limit);
+                profiler_->end(runtime, result.retired);
+            } else {
+                result = stops_fault ? runner->run(limit) : runner->step_block(limit);
+            }
             if (result.event == Event::budget_exhausted) result.event = Event::retired;
             if (stops_fault && result.event == Event::memory_fault && result.access == MemoryAccess::execute && stops_here()) {
                 outcome.retired += result.retired;
