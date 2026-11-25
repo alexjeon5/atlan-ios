@@ -167,8 +167,11 @@
 }
 
 - (void)append:(NSString*)line {
-    _log.text = [_log.text stringByAppendingFormat:@"%@\n", line];
-    [_log scrollRangeToVisible:NSMakeRange(_log.text.length, 0)];
+    // Appending in place keeps a long log cheap; the oldest half goes once it is large.
+    NSMutableString* text = _log.textStorage.mutableString;
+    if (text.length > 200000) [text deleteCharactersInRange:NSMakeRange(0, text.length / 2)];
+    [text appendFormat:@"%@\n", line];
+    if (!_log.hidden) [_log scrollRangeToVisible:NSMakeRange(text.length, 0)];
 }
 
 - (void)refresh {
@@ -293,6 +296,7 @@
     (void)_input.drain();
     config.input = &_input;
     config.interactive = true;
+    config.perf_log = true;  // the 10-second frame report also lists block cache coverage and the busiest imports
     {
         std::string why;
         if (auto bindings = atlan::shell::load_input_bindings(self.inputBindingsPath.UTF8String, why)) {
