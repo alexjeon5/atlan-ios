@@ -183,6 +183,9 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
             if (slot && slot->key == key && slot->itstate == it) {
                 block = slot;
                 ++stats_.block_entries;
+            } else if (d.memory.translate(a32::key_pc(key), MemoryAccess::execute) == nullptr) {
+                // Not executable (an import trap, a return sentinel): Runtime::step() below reports the fault
+                // without a block being allocated for nothing.
             } else {
                 const std::uint64_t flushes = stats_.flushes;
                 try { block = d.build(key, it); } catch (...) { block = nullptr; }

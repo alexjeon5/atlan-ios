@@ -271,6 +271,23 @@ void GuestSession::run() {
             } else {
                 log_("nativeInit not exported");
             }
+            // Block cache coverage since the start and the busiest imports since the last reset_import_counts().
+            const auto perf_details = [&]() -> std::string {
+                std::string line;
+                if (const auto* runner = dispatcher.block_runner()) {
+                    const auto& st = runner->stats();
+                    line += "; blocks built " + std::to_string(st.blocks_built) + ", flushes " + std::to_string(st.flushes) +
+                            ", without fast handler " + std::to_string(st.generic) + ", fallbacks " + std::to_string(st.fallbacks) +
+                            ", single steps " + std::to_string(st.slow_steps) + "; top forms without fast handler:";
+                    const auto forms = runner->generic_forms();
+                    for (std::size_t i = 0; i < forms.size() && i < 24; ++i) line += " " + forms[i].first + "=" + std::to_string(forms[i].second);
+                }
+                std::vector<std::pair<std::string, std::uint64_t>> top(dispatcher.import_counts().begin(), dispatcher.import_counts().end());
+                std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                line += "; top imports:";
+                for (std::size_t i = 0; i < top.size() && i < 16; ++i) line += " " + top[i].first + "=" + std::to_string(top[i].second);
+                return line;
+            };
             // Surface and render entry points (plain Java_ exports: (env, this[, surface]) -> int).
             const auto native = [&](const char* name, std::vector<std::uint32_t> extra) -> bool {
                 const auto* sym = image.find(name);
@@ -283,17 +300,8 @@ void GuestSession::run() {
                                                return_sentinel, config_.surface_call_budget);
                 if (config_.perf_log) {
                     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - perf_start).count();
-                    std::string line = std::string("perf ") + name + ": " + std::to_string(r.retired) + " instructions, " +
-                                       std::to_string(seconds) + " s, " + std::to_string(seconds > 0 ? r.retired / seconds / 1e6 : 0.0) + " MIPS";
-                    if (const auto* runner = dispatcher.block_runner()) {
-                        const auto& st = runner->stats();
-                        line += "; blocks built " + std::to_string(st.blocks_built) + ", flushes " + std::to_string(st.flushes) +
-                                ", without fast handler " + std::to_string(st.generic) + ", fallbacks " + std::to_string(st.fallbacks) +
-                                ", single steps " + std::to_string(st.slow_steps) + "; top forms without fast handler:";
-                        const auto forms = runner->generic_forms();
-                        for (std::size_t i = 0; i < forms.size() && i < 24; ++i) line += " " + forms[i].first + "=" + std::to_string(forms[i].second);
-                    }
-                    log_(line);
+                    log_(std::string("perf ") + name + ": " + std::to_string(r.retired) + " instructions, " + std::to_string(seconds) +
+                         " s, " + std::to_string(seconds > 0 ? r.retired / seconds / 1e6 : 0.0) + " MIPS" + perf_details());
                 }
                 if (r.stop != Stop::returned) {
                     log_(describe_state(runtime, dispatcher));  // where it stopped: pc, lr, sp, r0-r3, busiest imports
@@ -390,6 +398,15 @@ void GuestSession::run() {
                 if (!render || render->type != 2) { state_.store(SessionState::finished); return; }
                 const std::array<std::uint32_t, 2> render_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
                 log_("interactive");
+                // Every `report_seconds` one line says where the time of the frames since the last line went.
+                constexpr double report_seconds = 10.0;
+                const auto seconds_since = [](std::chrono::steady_clock::time_point from) {
+                    return std::chrono::duration<double>(std::chrono::steady_clock::now() - from).count();
+                };
+                auto report_start = std::chrono::steady_clock::now();
+                std::uint64_t frames = 0, render_instructions = 0, pump_instructions = 0;
+                double render_seconds = 0, render_worst = 0, pump_seconds = 0, audio_seconds = 0, idle_seconds = 0;
+                dispatcher.reset_import_counts();
                 while (!stop_.load()) {
                     const auto frame_start = std::chrono::steady_clock::now();
                     if (!deliver_input()) return;
@@ -403,12 +420,40 @@ void GuestSession::run() {
                     GlCall swap;
                     swap.op = GlOp::swap_buffers;
                     (config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl)).execute(swap);
+                    const double rendered = seconds_since(frame_start);
+                    const auto pump_start = std::chrono::steady_clock::now();
                     const auto background = dispatcher.pump(runtime, config_.initializer_budget);
                     if (background.stop == Stop::unresolved_import) { fail("pump stopped at missing service " + background.import); return; }
                     if (background.stop != Stop::returned && background.stop != Stop::budget_exhausted) { fail(describe_stop("pump", background)); return; }
+                    const double pumped_seconds = seconds_since(pump_start);
+                    const auto audio_start = std::chrono::steady_clock::now();
                     const auto sound = audio->pump(runtime, stack_base + stack_bytes, return_sentinel, config_.initializer_budget);
                     if (sound.error) { fail("audio callback: " + *sound.error); return; }
+                    audio_seconds += seconds_since(audio_start);
+                    const auto idle_start = std::chrono::steady_clock::now();
                     std::this_thread::sleep_until(frame_start + std::chrono::milliseconds(config_.frame_interval_ms));
+                    idle_seconds += seconds_since(idle_start);
+                    ++frames;
+                    render_instructions += frame.retired;
+                    pump_instructions += background.retired;
+                    render_seconds += rendered;
+                    render_worst = std::max(render_worst, rendered);
+                    pump_seconds += pumped_seconds;
+                    if (const double elapsed = seconds_since(report_start); elapsed >= report_seconds) {
+                        const auto ms = [&](double total) { return std::to_string(total * 1000.0 / static_cast<double>(frames)); };
+                        std::string line = "perf frames: " + std::to_string(static_cast<double>(frames) / elapsed) + " fps; per frame render " +
+                            ms(render_seconds) + " ms (worst " + std::to_string(render_worst * 1000.0) + "), threads " + ms(pump_seconds) +
+                            " ms, audio " + ms(audio_seconds) + " ms, idle " + ms(idle_seconds) + " ms; render " +
+                            std::to_string(render_instructions / frames) + " instructions/frame at " +
+                            std::to_string(render_seconds > 0 ? static_cast<double>(render_instructions) / render_seconds / 1e6 : 0.0) +
+                            " MIPS, threads " + std::to_string(pump_instructions / frames) + " instructions/frame";
+                        if (config_.perf_log) line += perf_details();
+                        log_(line);
+                        dispatcher.reset_import_counts();
+                        report_start = std::chrono::steady_clock::now();
+                        frames = render_instructions = pump_instructions = 0;
+                        render_seconds = render_worst = pump_seconds = audio_seconds = idle_seconds = 0;
+                    }
                 }
                 log_("stopped");
             }
