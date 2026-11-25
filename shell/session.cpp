@@ -143,6 +143,7 @@ void GuestSession::run() {
         Runtime runtime;
         ImportDispatcher dispatcher;
         dispatcher.set_block_cache(config_.block_cache);
+        dispatcher.set_import_timing(config_.perf_log);
         ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         install_libc_services(dispatcher);
@@ -359,6 +360,14 @@ void GuestSession::run() {
                 std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
                 line += "; top imports:";
                 for (std::size_t i = 0; i < top.size() && i < 16; ++i) line += " " + top[i].first + "=" + std::to_string(top[i].second);
+                // Host time inside import services (a service that calls back into the guest includes that code).
+                std::vector<std::pair<std::string, std::uint64_t>> slow(dispatcher.import_nanoseconds().begin(), dispatcher.import_nanoseconds().end());
+                std::sort(slow.begin(), slow.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                std::uint64_t total = 0;
+                for (const auto& entry : slow) total += entry.second;
+                line += "; import time " + std::to_string(static_cast<double>(total) / 1e6) + " ms:";
+                for (std::size_t i = 0; i < slow.size() && i < 16 && slow[i].second != 0; ++i)
+                    line += " " + slow[i].first + "=" + std::to_string(static_cast<double>(slow[i].second) / 1e6);
                 return line;
             };
             // Surface and render entry points (plain Java_ exports: (env, this[, surface]) -> int).
