@@ -40,14 +40,13 @@
 
 `glReadPixels`는 기본 프레임버퍼를 RGBA8로 읽는다. 그 시점까지 그린 내용을 커밋해 읽을 수 있는 텍스처로 복사하고 프레임은 새 커맨드 버퍼로 이어 간다(그래서 레이어는 `framebufferOnly`가 아니다). 게스트는 화면 전환 애니메이션에서 이전·다음 화면을 이렇게 읽어 텍스처로 올린 뒤 밀어서 그리므로, 읽기가 비어 있으면 전환 동안 검은 화면이 나온다.
 
-## 호출 실측 (게스트가 실제로 부르는 GL)
+## 구현 범위
 
-`atlan-session`(`ATLAN_RAW_GL=1`)으로 renderGLSF 12회(지도 draw 포함, draw_elements 4013회)를 집계했다.
+GL 기능은 게스트가 실제로 부르는 것만 구현하고, 나머지는 관측될 때까지 미룬다. 실제 호출은 `atlan-session`의 `ATLAN_RAW_GL=1` 기록으로 확인한다(기록 결과는 공개 문서에 남기지 않는다).
 
-- draw 모드는 `GL_TRIANGLES`(3601)와 `GL_TRIANGLE_STRIP`(412)뿐이다. 선·점은 없다. 인덱스는 ushort/ubyte, attribute는 float/byte/short/ubyte이고 VBO도 쓴다.
-- 텍스처는 전부 RGBA/UNSIGNED_BYTE이고 레벨 0~10의 밉맵 체인을 올린다. 최소화 필터는 `GL_LINEAR_MIPMAP_NEAREST`(9985)를 쓴다. 그래서 밉맵을 구현했다: 레벨별로 보관하고, 레벨 0부터 1x1까지 크기가 맞는 완전한 체인이면 Metal 밉 텍스처로 올리며, 밉맵 필터인데 체인이 불완전하면 GL처럼 검게 읽힌다.
-- `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`는 한 번도 불리지 않았다. 스텐실·scissor·FBO·`glBlendEquation` 계열은 import에 없다. 이들은 관측될 때까지 구현하지 않는다(넓은 선은 쿼드 확장으로 할 계획).
-- 확장 문자열(`GL_EXTENSIONS`)을 720회 조회한다.
+- draw는 삼각형 계열(`GL_TRIANGLES`, `GL_TRIANGLE_STRIP`)을 지원한다. 인덱스는 ushort/ubyte, attribute는 float/byte/short/ubyte, VBO를 지원한다.
+- 텍스처는 RGBA/UNSIGNED_BYTE와 밉맵 체인을 지원한다. 레벨별로 보관하고, 레벨 0부터 1x1까지 크기가 맞는 완전한 체인이면 Metal 밉 텍스처로 올리며, 밉맵 필터인데 체인이 불완전하면 GL처럼 검게 읽힌다.
+- 넓은 선(`glLineWidth`), 압축 텍스처, 스텐실·scissor·FBO·`glBlendEquation` 계열은 아직 구현하지 않았다(넓은 선은 쿼드 확장으로 할 계획).
 
 ## 검증
 
