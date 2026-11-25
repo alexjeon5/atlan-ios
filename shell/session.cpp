@@ -293,7 +293,9 @@ void GuestSession::run() {
                 if (auto parsed = parse_native_signatures(text, why)) native_options.signatures = std::move(*parsed);
                 else log_("native signatures rejected: " + why);
             }
-            install_native_functions(dispatcher, runtime, image.exports, runtime_library_sets(), native_options);
+            auto sets = runtime_library_sets();
+            for (auto& set : image_library_sets()) sets.push_back(std::move(set));
+            install_native_functions(dispatcher, runtime, image.exports, std::move(sets), native_options);
             dispatcher.reset_import_counts();
             if (profiler) profiler->reset();
         }

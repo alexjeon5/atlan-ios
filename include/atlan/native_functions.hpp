@@ -87,4 +87,6 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
 // Sets for code that toolchains and common libraries link into an image, by their standard names: the integer
 // division helpers of the ARM run-time ABI, and zlib's checksums and inflate.
 [[nodiscard]] std::vector<NativeSet> runtime_library_sets();
+// Sets for image code by its libraries' names: libpng's row filters and the PowerVR tools' ETC1 decoder.
+[[nodiscard]] std::vector<NativeSet> image_library_sets();
 }
