@@ -296,6 +296,7 @@
     (void)_input.drain();
     config.input = &_input;
     config.interactive = true;
+    config.render_on_demand = true;
     config.perf_log = true;  // the 10-second frame report also lists block cache coverage and the busiest imports
     {
         std::string why;

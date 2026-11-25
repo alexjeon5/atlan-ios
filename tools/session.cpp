@@ -3,7 +3,9 @@
 #include "atlan/gl_context.hpp"
 #include "atlan/gl_recorder.hpp"
 #include "shell/session.hpp"
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <cstdlib>
 #include <iostream>
 
@@ -46,8 +48,20 @@ int main(int argc, char** argv) {
         input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap_x, tap_y, 1000});
         input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap_x, tap_y, 1050});
     }
+    // ATLAN_INTERACTIVE_SECONDS=N: keep drawing after the first frames for N seconds (the interactive loop);
+    // ATLAN_ON_DEMAND=1 draws those frames only when the guest asks for one.
+    const char* interactive = std::getenv("ATLAN_INTERACTIVE_SECONDS");
+    config.interactive = interactive != nullptr;
+    config.render_on_demand = std::getenv("ATLAN_ON_DEMAND") != nullptr;
+    if (config.interactive && !config.input) config.input = &input;
     atlan::shell::GuestSession session(config, [](const std::string& line) { std::cout << line << std::endl; });
     session.start();
+    if (interactive) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::atoi(interactive));
+        while (session.state() == atlan::shell::SessionState::running && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        session.stop();
+    }
     session.join();
     if (trace) std::fclose(trace);
     const auto& st = context.stats();

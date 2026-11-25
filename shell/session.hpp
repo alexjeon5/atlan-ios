@@ -37,6 +37,11 @@ struct SessionConfig {
     // Keep rendering frames (and delivering input) after the first `render_frames` until stop() or a guest stop.
     bool interactive{};
     std::uint32_t frame_interval_ms{33};          // lower bound on the time per interactive frame
+    // Interactive frames are drawn only when the guest asks for one (its GL thread's callBackGLThread, answered as
+    // the app's Java side does: isStateReady -> setState(3) -> request), as a GLSurfaceView in RENDERMODE_WHEN_DIRTY
+    // would. Without a request a frame is still drawn once per `idle_redraw_ms`. false: draw every interval.
+    bool render_on_demand{};
+    std::uint32_t idle_redraw_ms{1000};
     bool block_cache{true};  // false: single-step interpreter (comparison and diagnosis)
     bool perf_log{};         // log instructions, seconds and MIPS per surface/render call, and block cache coverage
 };
