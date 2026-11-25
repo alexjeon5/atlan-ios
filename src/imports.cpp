@@ -66,12 +66,21 @@ CallOutcome ImportDispatcher::pump(Runtime& runtime, std::uint64_t budget) {
     remaining_ = budget;
     return run_to_return(runtime, return_target_, true);
 }
+BlockRunner& ImportDispatcher::runner_for(Runtime& runtime) {
+    // A Runtime that reuses the address of a destroyed one is told apart by Memory::code_generation().
+    if (!runner_ || runner_runtime_ != &runtime) {
+        runner_ = std::make_unique<BlockRunner>(runtime);
+        runner_runtime_ = &runtime;
+    }
+    return *runner_;
+}
 CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t return_target, bool pump) {
     struct Depth { unsigned& value; explicit Depth(unsigned& v) : value(v) { ++value; } ~Depth() { --value; } } depth(depth_);
     // Guest threads are multiplexed only by the outermost loop; a guest callback made by a
     // host service stays on its thread and can neither be preempted nor block.
     const bool threaded = threads_ != nullptr && depth_ == 1;
     CallOutcome outcome;
+    BlockRunner* const runner = block_cache_ ? &runner_for(runtime) : nullptr;
     const auto finish = [&](Stop stop, Result cpu) {
         outcome.stop = stop;
         outcome.cpu = cpu;
@@ -109,7 +118,16 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
             return finish(Stop::returned, {Event::function_return, outcome.retired});
         }
         if (remaining_ == 0) return finish(Stop::budget_exhausted, {Event::budget_exhausted, outcome.retired});
-        auto result = runtime.step();
+        // A block stops at every PC change, so the return, sentinel and trap checks above see the same PCs as
+        // with single steps; the budget keeps the remaining count and the thread quantum exact.
+        Result result;
+        if (runner != nullptr) {
+            std::uint64_t limit = remaining_;
+            if (threaded && threads_->quantum() - slice < limit) limit = threads_->quantum() - slice;
+            result = runner->step_block(limit);
+        } else {
+            result = runtime.step();
+        }
         outcome.retired += result.retired;
         remaining_ -= result.retired < remaining_ ? result.retired : remaining_;
         slice += result.retired;

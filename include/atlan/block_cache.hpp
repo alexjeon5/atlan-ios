@@ -12,9 +12,10 @@ namespace atlan {
 // retired instruction. Behaviour must stay identical to Runtime::step().
 //
 // A BlockRunner drives one Runtime and must be used from the same host thread.
-// Cached blocks are dropped whenever Memory::generation() changes, which covers
-// map() and protect(); guest stores cannot reach executable pages because the
-// permission model has no writable-and-executable state.
+// Cached blocks are dropped whenever Memory::code_generation() changes, which
+// covers every map(), unmap() and protect() that involves an executable page;
+// guest stores cannot reach executable pages because the permission model has
+// no writable-and-executable state.
 class BlockRunner {
 public:
     struct Stats {
@@ -41,6 +42,7 @@ public:
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
 
 private:
+    [[nodiscard]] Result execute(std::uint64_t budget, bool single) noexcept;
     struct Impl;
     std::unique_ptr<Impl> impl_;
     Stats stats_;

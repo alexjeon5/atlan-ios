@@ -9,9 +9,9 @@
 namespace atlan {
 namespace a32 = uml::cpu::arm64::aarch32;
 namespace {
-constexpr std::size_t max_block = 64;       // instructions per block
-constexpr std::size_t slot_count = 4096;    // direct-mapped lookup table
-constexpr std::size_t max_blocks = 8192;    // flush everything beyond this
+constexpr std::size_t max_block = 64;        // instructions per block
+constexpr std::size_t slot_count = 16384;    // direct-mapped lookup table
+constexpr std::size_t max_entries = 1U << 17;  // cached instructions; flush everything beyond this
 
 struct Entry {
     a32::Instruction insn;
@@ -21,10 +21,19 @@ struct Entry {
     std::uint32_t word;      // A32 word, for the VFP route
     bool route_vfp;          // offer the word to the VFP executor first
 };
+struct Block;
+// The successor a block last continued into, so a repeated transfer skips the table lookup. Links die with
+// the blocks: a flush destroys every block at once.
+struct Link {
+    std::uint64_t key{};
+    Block* block{};
+    std::uint8_t itstate{};
+};
 struct Block {
     std::uint64_t key;
     std::uint8_t itstate;
     std::vector<Entry> entries;
+    std::array<Link, 2> links{};
 };
 
 class Adapter final : public a32::A32Memory {
@@ -66,9 +75,11 @@ struct BlockRunner::Impl {
     std::uint64_t generation{};
     std::vector<std::unique_ptr<Block>> store;
     std::vector<Block*> slots;
+    std::size_t entries{};  // instructions held by `store`
 
     void flush() noexcept {
         store.clear();
+        entries = 0;
         std::fill(slots.begin(), slots.end(), nullptr);
     }
     // Returns nullptr when not even one instruction can be fetched and decoded
@@ -108,14 +119,22 @@ struct BlockRunner::Impl {
                                           info.check != a32::Check::none);
             const std::uint32_t next = pc + length;
             block->entries.push_back({insn, a32::prepare_a32(insn), thumb ? a32::t32_key(next) : a32::a32_key(next), pc, word, route});
-            constexpr auto ends = a32::trait::branch | a32::trait::interwork | a32::trait::alu_pc |
-                                  a32::trait::load_pc | a32::trait::exception;
-            if (!insn.legal() || (info.traits & ends) != 0) break;
+            // Execution leaves a block as soon as the PC is not the next entry's, so where a block ends here only
+            // decides how much is decoded ahead. The traits are per form ("may write the PC"), not per
+            // instruction: a conditional branch or an ALU/load form that might target the PC continues, and the
+            // block stops at an exception or at an unconditional transfer.
+            if (!insn.legal() || (info.traits & a32::trait::exception) != 0) break;
+            const bool always = insn.cond == 14 && !insn.in_it;
+            if (always && (info.traits & (a32::trait::branch | a32::trait::interwork)) != 0) break;
+            if (always && (info.traits & a32::trait::alu_pc) != 0 && insn.operands.d == 15) break;
+            if (always && (info.traits & a32::trait::load_pc) != 0 &&
+                (insn.operands.t == 15 || (insn.operands.registers & 0x8000U) != 0)) break;
             it = insn.next_it.bits();
             pc = next;
         }
         if (block->entries.empty()) return nullptr;
-        if (store.size() >= max_blocks) flush();
+        if (entries + block->entries.size() > max_entries) flush();
+        entries += block->entries.size();
         Block* raw = block.get();
         store.push_back(std::move(block));
         return raw;
@@ -126,75 +145,87 @@ BlockRunner::BlockRunner(Runtime& runtime) : impl_(std::make_unique<Impl>(runtim
 BlockRunner::~BlockRunner() = default;
 void BlockRunner::flush() noexcept { impl_->flush(); ++stats_.flushes; }
 
-Result BlockRunner::step_block(std::uint64_t budget) noexcept {
+// Runs blocks until an event, the budget, or (when `single`) the end of the first block.
+Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
     auto& d = *impl_;
     if (budget == 0) return {Event::budget_exhausted, 0};
-    if (d.generation != d.memory.generation()) {
-        d.generation = d.memory.generation();
+    if (d.generation != d.memory.code_generation()) {
+        d.generation = d.memory.code_generation();
         flush();
     }
-    const std::uint64_t key = d.cpu.pc;
-    const std::uint8_t it = d.cpu.a32_itstate;
-    Block* block = nullptr;
-    if (a32::key_is_canonical(key)) {
-        Block*& slot = d.slots[slot_of(key, it)];
-        if (slot && slot->key == key && slot->itstate == it) {
-            block = slot;
-            ++stats_.block_entries;
-        } else {
-            try { block = d.build(key, it); } catch (...) { block = nullptr; }
-            // build() may have flushed the table; re-resolve the slot.
-            if (block) {
-                d.slots[slot_of(key, it)] = block;
-                ++stats_.blocks_built;
-            }
-        }
-    }
-    if (!block) {
-        ++stats_.slow_steps;
-        return runtime_.step();
-    }
     std::uint64_t retired = 0;
-    const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(block->entries.size(), budget));
-    for (std::size_t i = 0; i < count; ++i) {
-        const Entry& e = block->entries[i];
-        if (e.route_vfp) {
-            const auto done = vfp::execute_a32(d.cpu, d.memory, e.word, e.pc);
-            switch (done.kind) {
-            case vfp::Execution::Kind::not_vfp: break;
-            case vfp::Execution::Kind::retired:
-                ++retired;
-                if (d.cpu.pc != e.next_key) return {Event::retired, retired};
-                continue;
-            case vfp::Execution::Kind::fault:
-                return {Event::memory_fault, retired, done.address, 0, done.access, done.alignment};
-            case vfp::Execution::Kind::unsupported:
-                return {Event::unsupported_instruction, retired, e.pc, e.word, MemoryAccess::execute, false, done.reason};
+    Block* previous = nullptr;
+    while (true) {
+        const std::uint64_t key = d.cpu.pc;
+        const std::uint8_t it = d.cpu.a32_itstate;
+        Block* block = nullptr;
+        if (previous != nullptr) {
+            for (const Link& link : previous->links)
+                if (link.block != nullptr && link.key == key && link.itstate == it) { block = link.block; break; }
+        }
+        if (block != nullptr) {
+            ++stats_.block_entries;
+        } else if (a32::key_is_canonical(key)) {
+            Block*& slot = d.slots[slot_of(key, it)];
+            if (slot && slot->key == key && slot->itstate == it) {
+                block = slot;
+                ++stats_.block_entries;
+            } else {
+                const std::uint64_t flushes = stats_.flushes;
+                try { block = d.build(key, it); } catch (...) { block = nullptr; }
+                // build() may have flushed the table; re-resolve the slot and forget the destroyed predecessor.
+                if (stats_.flushes != flushes || d.store.size() <= 1) previous = nullptr;
+                if (block) {
+                    d.slots[slot_of(key, it)] = block;
+                    ++stats_.blocks_built;
+                }
+            }
+            if (block != nullptr && previous != nullptr) {
+                Link& link = previous->links[0].block == nullptr ? previous->links[0] : previous->links[1];
+                link = {key, block, it};
             }
         }
-        const auto result = e.prepared.run ? e.prepared.run(d.cpu, e.insn, d.adapter, e.prepared.info)
-                                           : a32::execute_a32(d.cpu, e.insn, d.adapter);
-        if (result.event != a32::StepEvent::retired) {
-            const Event event = map_event(result.event);
-            if (event == Event::supervisor_call) ++retired;
-            return {event, retired, result.fault_address, result.syndrome, result.access, result.alignment};
+        if (!block) {
+            ++stats_.slow_steps;
+            auto result = runtime_.step();
+            retired += result.retired;
+            if (result.event != Event::retired) { result.retired = retired; return result; }
+            if (single) return {Event::retired, retired};
+            if (retired >= budget) return {Event::budget_exhausted, retired};
+            previous = nullptr;
+            continue;
         }
-        ++retired;
-        if (d.cpu.pc != e.next_key) break;
+        const Entry* e = block->entries.data();
+        const Entry* const end = e + static_cast<std::size_t>(std::min<std::uint64_t>(block->entries.size(), budget - retired));
+        for (; e != end; ++e) {
+            if (e->route_vfp) {
+                const auto done = vfp::execute_a32(d.cpu, d.memory, e->word, e->pc);
+                if (done.kind == vfp::Execution::Kind::retired) {
+                    ++retired;
+                    if (d.cpu.pc != e->next_key) break;
+                    continue;
+                }
+                if (done.kind == vfp::Execution::Kind::fault)
+                    return {Event::memory_fault, retired, done.address, 0, done.access, done.alignment};
+                if (done.kind == vfp::Execution::Kind::unsupported)
+                    return {Event::unsupported_instruction, retired, e->pc, e->word, MemoryAccess::execute, false, done.reason};
+            }
+            const auto result = e->prepared.run ? e->prepared.run(d.cpu, e->insn, d.adapter, e->prepared.info)
+                                                : a32::execute_a32(d.cpu, e->insn, d.adapter);
+            if (result.event != a32::StepEvent::retired) [[unlikely]] {
+                const Event event = map_event(result.event);
+                if (event == Event::supervisor_call) ++retired;
+                return {event, retired, result.fault_address, result.syndrome, result.access, result.alignment};
+            }
+            ++retired;
+            if (d.cpu.pc != e->next_key) break;
+        }
+        if (single) return {Event::retired, retired};
+        if (retired >= budget) return {Event::budget_exhausted, retired};
+        previous = block;
     }
-    return {Event::retired, retired};
 }
 
-Result BlockRunner::run(std::uint64_t budget) noexcept {
-    std::uint64_t retired = 0;
-    while (retired < budget) {
-        auto result = step_block(budget - retired);
-        retired += result.retired;
-        if (result.event != Event::retired) {
-            result.retired = retired;
-            return result;
-        }
-    }
-    return {Event::budget_exhausted, retired};
-}
+Result BlockRunner::step_block(std::uint64_t budget) noexcept { return execute(budget, true); }
+Result BlockRunner::run(std::uint64_t budget) noexcept { return execute(budget, false); }
 }

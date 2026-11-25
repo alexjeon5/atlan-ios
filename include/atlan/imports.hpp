@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include "atlan/block_cache.hpp"
 #include "atlan/elf.hpp"
 #include "atlan/runtime.hpp"
 #include <array>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -110,6 +112,10 @@ public:
     // single guest thread and blocking services report a deadlock diagnostic instead.
     void set_threads(GuestThreads* threads) noexcept { threads_ = threads; }
     [[nodiscard]] unsigned depth() const noexcept { return depth_; }
+    // Guest code runs from the pre-decoded block cache (BlockRunner) by default; false selects Runtime::step()
+    // for every instruction. Both give the same results; the switch exists for comparison and diagnosis.
+    void set_block_cache(bool enabled) noexcept { block_cache_ = enabled; }
+    [[nodiscard]] bool block_cache() const noexcept { return block_cache_; }
     // Runs ready guest threads other than the caller's thread until `budget` instructions
     // are retired or none can run (all blocked or finished). Returns `returned` when idle.
     // Only valid outside any guest call; the Runtime's CPU state is left unchanged.
@@ -117,7 +123,11 @@ public:
 
 private:
     [[nodiscard]] CallOutcome run_to_return(Runtime& runtime, std::uint32_t return_target, bool pump = false);
+    [[nodiscard]] BlockRunner& runner_for(Runtime& runtime);
     GuestThreads* threads_{};
+    std::unique_ptr<BlockRunner> runner_;  // block cache of the Runtime last executed
+    Runtime* runner_runtime_{};
+    bool block_cache_{true};
     std::unordered_map<std::string, ImportService> services_;
     std::unordered_map<std::string, std::uint64_t> counts_;
     std::unordered_map<std::uint32_t, std::string> traps_;  // trap base address -> name

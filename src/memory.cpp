@@ -1,9 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/memory.hpp"
 #include <algorithm>
+#include <atomic>
 #include <stdexcept>
 
 namespace atlan {
+std::uint64_t Memory::next_code_generation() noexcept {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+void Memory::set_slot(std::uint32_t page_address, std::byte* data, std::uint8_t permissions) {
+    auto& leaf = table_[page_address >> 22];
+    if (!leaf) {
+        if (permissions == 0) return;
+        leaf = std::make_unique<Leaf>();
+    }
+    (*leaf)[(page_address >> 12) & 1023U] = {data, permissions};
+}
 void Memory::map(std::uint32_t base, std::uint64_t size, Permissions permissions,
                  std::span<const std::byte> initial) {
     const auto end = std::uint64_t{base} + size;
@@ -29,8 +42,14 @@ void Memory::map(std::uint32_t base, std::uint64_t size, Permissions permissions
         }
         staged.emplace(static_cast<std::uint32_t>(base + offset), std::move(page));
     }
+    // Allocate the lookup leaves before committing, so a failure still leaves the address space unchanged.
+    for (std::uint64_t at = base; at < end; at += std::uint64_t{1} << 22)
+        if (auto& leaf = table_[at >> 22]; !leaf) leaf = std::make_unique<Leaf>();
+    if (auto& leaf = table_[(end - 1) >> 22]; !leaf) leaf = std::make_unique<Leaf>();
+    for (const auto& [at, page] : staged) set_slot(at, page->data, static_cast<std::uint8_t>(permissions));
     pages_.merge(staged);
     ++generation_;
+    if (permissions == Permissions::read_execute) code_generation_ = next_code_generation();
 }
 
 void Memory::map_external(std::uint32_t base, std::uint64_t size, Permissions permissions, std::byte* host,
@@ -50,18 +69,14 @@ void Memory::map_external(std::uint32_t base, std::uint64_t size, Permissions pe
         page->keepalive = keepalive;
         staged.emplace(static_cast<std::uint32_t>(base + offset), std::move(page));
     }
+    // Allocate the lookup leaves before committing, so a failure still leaves the address space unchanged.
+    for (std::uint64_t at = base; at < end; at += std::uint64_t{1} << 22)
+        if (auto& leaf = table_[at >> 22]; !leaf) leaf = std::make_unique<Leaf>();
+    if (auto& leaf = table_[(end - 1) >> 22]; !leaf) leaf = std::make_unique<Leaf>();
+    for (const auto& [at, page] : staged) set_slot(at, page->data, static_cast<std::uint8_t>(permissions));
     pages_.merge(staged);
     ++generation_;
-}
-
-std::byte* Memory::translate(std::uint64_t address, MemoryAccess access) noexcept {
-    if (address > UINT32_MAX) return nullptr;
-    const auto value = static_cast<std::uint32_t>(address);
-    const auto page = pages_.find(value & ~(page_size - 1U));
-    if (page == pages_.end() ||
-        (static_cast<unsigned>(page->second->permissions) & static_cast<unsigned>(access)) == 0)
-        return nullptr;
-    return page->second->data + (value & (page_size - 1U));
+    if (permissions == Permissions::read_execute) code_generation_ = next_code_generation();
 }
 
 bool Memory::read(std::uint32_t address, std::span<std::byte> out) noexcept {
@@ -103,14 +118,27 @@ void Memory::protect(std::uint32_t base, std::uint64_t size, Permissions permiss
     for (std::uint64_t at = base; at < end; at += page_size)
         if (!pages_.contains(static_cast<std::uint32_t>(at)))
             throw std::invalid_argument("unmapped ARM32 protection range");
-    for (std::uint64_t at = base; at < end; at += page_size)
-        pages_.at(static_cast<std::uint32_t>(at))->permissions = permissions;
+    bool code = permissions == Permissions::read_execute;
+    for (std::uint64_t at = base; at < end; at += page_size) {
+        auto& page = *pages_.at(static_cast<std::uint32_t>(at));
+        code = code || page.permissions == Permissions::read_execute;
+        page.permissions = permissions;
+        set_slot(static_cast<std::uint32_t>(at), page.data, static_cast<std::uint8_t>(permissions));
+    }
     ++generation_;
+    if (code) code_generation_ = next_code_generation();
 }
 void Memory::unmap(std::uint32_t base, std::uint64_t size) {
     if (size == 0 || size > (std::uint64_t{1} << 32) - base || base % page_size != 0 || size % page_size != 0)
         throw std::invalid_argument("invalid ARM32 unmap range");
-    for (std::uint64_t at = base; at < std::uint64_t{base} + size; at += page_size)
-        pages_.erase(static_cast<std::uint32_t>(at));
+    bool code = false;
+    for (std::uint64_t at = base; at < std::uint64_t{base} + size; at += page_size) {
+        const auto page = pages_.find(static_cast<std::uint32_t>(at));
+        if (page == pages_.end()) continue;
+        code = code || page->second->permissions == Permissions::read_execute;
+        set_slot(static_cast<std::uint32_t>(at), nullptr, 0);
+        pages_.erase(page);
+    }
+    if (code) code_generation_ = next_code_generation();
 }
 }
