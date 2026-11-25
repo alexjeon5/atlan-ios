@@ -19,7 +19,8 @@ Linux ARM64에서 CPU 코어를 실행한 결과는 iOS 기기 검증을 대체�
 
 앱은 `atlan_runtime`을 정적 링크하며 상단에 가져오기·실행 버튼과 지도 상태, 아래에 진단 로그를 보여준다. 게스트는 전용 pthread(8MB 스택)에서 실행하고 로그는 메인 스레드로 넘긴다.
 
-- 네이티브 라이브러리: 파일 앱 선택기로 가져와 `Application Support/guest.so`로 교체 저장한다(수십 MB 규모라 복사). 앱과 IPA에 번들하지 않는다.
+- 앱 패키지: Documents의 `ATLAN/APP/atlan.dat`(안드로이드 앱이 데이터 폴더에 두는 APK 사본, 12바이트 헤더와 4바이트 XOR 키), `ATLAN/APP/*.apk`, `ATLAN/*.apk` 중 수정 시각이 가장 새로운 패키지를 찾아(폴더·파일 이름 대소문자 무관, `shell/app_package`) 실행할 때마다 그 안의 ARM32 라이브러리(`lib/armeabi-v7a`, `lib/armeabi`의 `libatlan*.so` 우선)를 메모리로 꺼내 실행한다. 압축 해제는 자체 DEFLATE 디코더로 하고 CRC를 검사한다. 앱 업데이트는 새 `atlan.dat`이나 APK를 같은 폴더에 넣는 것이며, 꺼낸 라이브러리를 따로 저장하지 않으므로 이전 버전이 남지 않는다. 패키지가 있으면 앱을 열 때(또는 패키지를 넣고 앱으로 돌아올 때) 한 번 자동으로 실행한다. 버전은 APK의 `assets/version.txt`(없으면 .dat 헤더)로 `package … version …` 줄에 남는다.
+- 네이티브 라이브러리: 패키지가 없을 때만 쓴다. 파일 앱 선택기로 가져와 `Application Support/guest.so`로 교체 저장한다(수십 MB 규모라 복사). 앱과 IPA에 번들하지 않는다.
 - 지도: 복사하지 않는다. 사용자가 파일 앱·Finder로 앱 Documents 폴더에 직접 넣거나 옮기고(`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`), Documents에서 가장 큰 일반 파일을 그 자리에서 사용한다. 교체는 같은 폴더의 파일을 바꿔 넣는 것이다. 앱은 크기와 앞·뒤 4KB 읽기 가능 여부만 검증하고(`shell/data_file`), 형식별 헤더 검증은 형식이 정해지면 `magic`으로 추가한다. 잘못된 파일은 사유와 함께 거부하며 보관·롤백하지 않는다.
 - 실행: 해석기가 `diagnostic_traps`로 로드하고 libc·문자열·printf·힙·mmap·스레드·mutex·조건변수·세마포어·가상 파일·스레드 키·android_log·OpenSL ES(Apple AudioQueue 싱크) 서비스를 등록한 뒤 생성자를 차례로 실행하고, `JNI_OnLoad`가 있으면 최소 JavaVM/JNIEnv로 호출하고, `MainActivity.nativeInit`을 실행하며(Documents를 파일 루트로 사용, `setSurfaces`는 호출만 기록), 이어서 게스트 스레드와 오디오 콜백을 한 번 `pump`한다. 테스트 절차는 `docs/testing.md`. 서비스 구성은 `tools/elf.cpp`와 같아야 한다. 중지는 생성자 경계에서 협력적으로 처리된다(호출당 예산 3,000,000 명령).
 - 지도를 게스트 파일 접근에 연결하는 가상 파일 디스크립터는 M4b 범위이며 아직 없다.

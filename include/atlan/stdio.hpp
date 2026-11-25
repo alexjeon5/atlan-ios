@@ -7,6 +7,9 @@
 #include <span>
 #include <filesystem>
 #include <functional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace atlan {
@@ -47,6 +50,12 @@ public:
 private:
     [[nodiscard]] std::string alias(const std::string& path) const;
     [[nodiscard]] std::filesystem::path locate(const std::filesystem::path& relative) const;
+    // Names in one host directory, read once for the case-insensitive lookup of locate(). Dropped whenever a
+    // service creates, removes or renames something; a file another program adds is still found by its exact name.
+    struct Listing { std::unordered_set<std::string> names; std::unordered_map<std::string, std::string> lower; };
+    [[nodiscard]] const Listing& listing(const std::filesystem::path& directory) const;
+    void changed() const noexcept { listings_.clear(); }
+    mutable std::unordered_map<std::string, Listing> listings_;
     [[nodiscard]] std::FILE* open_filtered(const std::filesystem::path& relative) const;
     std::vector<std::pair<std::string, std::string>> aliases_;
     std::vector<std::pair<std::string, std::string>> anchors_;

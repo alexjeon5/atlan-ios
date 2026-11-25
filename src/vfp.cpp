@@ -199,7 +199,7 @@ using a32::fast_next;
 
 inline bool passes(const CpuState& cpu, const FastOp& op) { return (op.cond_mask >> (cpu.nzcv >> 28) & 1U) != 0U; }
 // execute_a32() moves the PC and leaves ITSTATE alone.
-inline unsigned next(CpuState& cpu, const FastOp& op) { cpu.pc = op.next_key; return fast_next; }
+inline unsigned next(CpuState&, const FastOp&) { return fast_next; }  // the block runner writes back the PC
 inline bool modes_unsupported(const CpuState& cpu) { return (cpu.fpscr & unsupported_fpscr_modes) != 0; }
 
 // arithmetic<T>() itself, kept out of line: a NaN operand's payload reaches the result by operand order, which

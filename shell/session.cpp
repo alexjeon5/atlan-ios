@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
 #include "shell/guest_ini.hpp"
+#include "shell/app_package.hpp"
 #include <iterator>
 #include <chrono>
 #include <algorithm>
@@ -135,7 +136,15 @@ void GuestSession::run() {
             if (const auto data = BionicData::symbol(name)) return *data;
             return std::nullopt;
         };
-        auto image = elf::load(read_library(config_.library_path), options);
+        const std::string library_path = config_.library_path.empty() ? find_package(config_.data_root) : config_.library_path;
+        if (library_path.empty()) throw std::runtime_error("no guest library or package (ATLAN/APP/atlan.dat, *.apk)");
+        auto library = read_library(library_path);
+        if (is_package(library)) {
+            auto package = open_package(library);
+            log_("package " + package.entry + (package.version.empty() ? "" : " version " + package.version));
+            library = std::move(package.library);
+        }
+        auto image = elf::load(library, options);
         log_("loaded mapped_bytes=" + std::to_string(image.mapped_bytes) +
              " exports=" + std::to_string(image.exports.size()) +
              " imports_trapped=" + std::to_string(image.trapped_imports.size()) +

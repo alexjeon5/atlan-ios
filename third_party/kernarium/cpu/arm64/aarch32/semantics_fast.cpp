@@ -52,10 +52,17 @@ constexpr std::uint16_t condition_mask(unsigned cond) noexcept
 	return (op.cond_mask >> (cpu.nzcv >> 28) & 1U) != 0U;
 }
 
-[[nodiscard]] inline unsigned advance(CpuState &cpu, const FastOp &op) noexcept
+/* clear_exclusive_monitor() after a store. A held reservation always has a
+ * 32-bit address, so an address of ~0 means every field is already clear. */
+inline void stored(CpuState &cpu) noexcept
 {
-	cpu.pc = op.next_key;
-	cpu.a32_itstate = op.next_it;
+	if (cpu.exclusive_address != ~std::uint64_t{0}) [[unlikely]]
+		cpu.clear_exclusive_monitor();
+}
+
+/* The caller writes back next_key and next_it (see fast_next). */
+[[nodiscard]] inline unsigned advance(CpuState &, const FastOp &) noexcept
+{
 	return fast_next;
 }
 
@@ -74,13 +81,6 @@ constexpr std::uint16_t condition_mask(unsigned cond) noexcept
 [[nodiscard]] inline bool flag_c(const CpuState &cpu) noexcept
 {
 	return (cpu.nzcv >> 29 & 1U) != 0U;
-}
-
-inline void set_nzcv(CpuState &cpu, std::uint32_t result, bool c, bool v) noexcept
-{
-	cpu.nzcv = (cpu.nzcv & 0x0fff'ffffU) | (result & 0x8000'0000U)
-		| (result == 0U ? 0x4000'0000U : 0U) | (c ? 0x2000'0000U : 0U)
-		| (v ? 0x1000'0000U : 0U);
 }
 
 inline void set_nzc(CpuState &cpu, std::uint32_t result, bool c) noexcept
@@ -106,8 +106,9 @@ constexpr bool is_compare(Op op) noexcept
 }
 
 /* The second operand's shape: an immediate, a register, a register shifted by
- * an immediate, a register shifted by a register (`shift_n` names it). */
-enum : int { shape_immediate, shape_register, shape_shifted, shape_by_register };
+ * an immediate, a register shifted by a register (`shift_n` names it), and a
+ * register shifted left by 1-31 where the shifter carry is not used. */
+enum : int { shape_immediate, shape_register, shape_shifted, shape_by_register, shape_lsl };
 
 /* exec_data_processing() for one operation, shape and flag setting. With
  * FirstConstant the first operand is the PC, whose value is `imm2`; with ToPc
@@ -125,6 +126,9 @@ unsigned data_processing(CpuState &cpu, const FastOp &op, Memory &) noexcept
 	} else if (Shape == shape_register) {
 		b = reg(cpu, op.m);
 		shifter_carry = flag_c(cpu);
+	} else if (Shape == shape_lsl) {
+		b = reg(cpu, op.m) << op.shift_n;
+		shifter_carry = false;  /* not read: see prepare_fast() */
 	} else {
 		const unsigned amount = Shape == shape_by_register ? reg(cpu, op.shift_n) & 0xffU
 								   : op.shift_n;
@@ -137,10 +141,14 @@ unsigned data_processing(CpuState &cpu, const FastOp &op, Memory &) noexcept
 		: FirstConstant ? op.imm2 : reg(cpu, op.n);
 	std::uint32_t result;
 	bool carry = shifter_carry;
-	bool overflow = false;
+	/* AddWithCarry() with C and V as flag bits 29 and 28, computed without
+	 * the 64-bit signed sum. */
+	std::uint32_t cv = 0;
 	const auto add = [&](std::uint32_t first, std::uint32_t second, bool carry_in) {
-		const auto sum = add_with_carry(first, second, carry_in);
-		result = sum.value; carry = sum.carry; overflow = sum.overflow;
+		const std::uint64_t sum = std::uint64_t{first} + second + (carry_in ? 1U : 0U);
+		result = static_cast<std::uint32_t>(sum);
+		cv = static_cast<std::uint32_t>(sum >> 32) << 29
+			| ((~(first ^ second) & (first ^ result)) >> 31) << 28;
 	};
 	switch (Operation) {
 	case Op::add: case Op::addw: case Op::cmn: add(a, b, false); break;
@@ -165,7 +173,8 @@ unsigned data_processing(CpuState &cpu, const FastOp &op, Memory &) noexcept
 		if (is_logical(Operation))
 			set_nzc(cpu, result, carry);
 		else
-			set_nzcv(cpu, result, carry, overflow);
+			cpu.nzcv = (cpu.nzcv & 0x0fff'ffffU) | (result & 0x8000'0000U)
+				| (result == 0U ? 0x4000'0000U : 0U) | cv;
 	}
 	return advance(cpu, op);
 }
@@ -269,7 +278,7 @@ unsigned multiply_accumulate(CpuState &cpu, const FastOp &op, Memory &) noexcept
 /* How a single transfer forms its address: a constant (the literal pool), the
  * base and an immediate, the base and a register, the base and a shifted
  * register. */
-enum : int { address_constant, address_immediate, address_register, address_shifted };
+enum : int { address_constant, address_immediate, address_register, address_shifted, address_lsl };
 
 /* exec_single_transfer() for the byte, halfword and word loads and stores of
  * one access inside a page. With BaseConstant the base is the PC, whose value
@@ -290,6 +299,8 @@ unsigned single_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noexce
 			offset = op.imm;
 		else if (Address == address_register)
 			offset = reg(cpu, op.m);
+		else if (Address == address_lsl)
+			offset = reg(cpu, op.m) << op.shift_n;
 		else
 			offset = shift_c(reg(cpu, op.m), static_cast<SRType>(op.shift_t), op.shift_n,
 				flag_c(cpu)).value;
@@ -324,7 +335,7 @@ unsigned single_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noexce
 		const std::uint32_t value = reg(cpu, op.d);
 		std::memcpy(host, &value, Size);
 		/* What the runtime's A32Memory::stored() does after every store. */
-		cpu.clear_exclusive_monitor();
+		stored(cpu);
 		if (Address != address_constant && !BaseConstant && op.wback)
 			cpu.registers[op.n] = offset_address;
 	}
@@ -397,7 +408,7 @@ unsigned multiple_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noex
 			std::memcpy(host, &word, 4);
 			host += 4;
 		}
-		cpu.clear_exclusive_monitor();
+		stored(cpu);
 		if (op.wback)
 			cpu.registers[op.n] = base + op.imm2;
 	}
@@ -553,6 +564,8 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 			op.shift_n = static_cast<std::uint8_t>(o.shift_n);
 			if (o.shift_n == 0 && o.shift_t != SRType::RRX)
 				op.run = data_processing_for<shape_register>(info.op, flags, first_constant, to_pc);
+			else if (o.shift_t == SRType::LSL && o.shift_n < 32 && !(flags && is_logical(info.op)))
+				op.run = data_processing_for<shape_lsl>(info.op, flags, first_constant, to_pc);
 			else
 				op.run = data_processing_for<shape_shifted>(info.op, flags, first_constant, to_pc);
 		} else if (info.shape == Shape::reg_shifted) {
@@ -627,6 +640,8 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 			op.shift_n = static_cast<std::uint8_t>(o.shift_n);
 			op.run = o.shift_n == 0 && o.shift_t != SRType::RRX
 				? single_transfer_for<address_register>(info.op, base_constant, to_pc)
+				: o.shift_t == SRType::LSL && o.shift_n < 32
+				? single_transfer_for<address_lsl>(info.op, base_constant, to_pc)
 				: single_transfer_for<address_shifted>(info.op, base_constant, to_pc);
 		} else {
 			op.imm = static_cast<std::uint32_t>(o.imm32);

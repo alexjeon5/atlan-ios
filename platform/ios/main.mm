@@ -6,6 +6,7 @@
 #include "metal_gl_backend.hpp"
 #import <QuartzCore/CAMetalLayer.h>
 #include "atlan/demo.hpp"
+#include "shell/app_package.hpp"
 #include "shell/data_file.hpp"
 #include <string>
 #include <cstdio>
@@ -37,6 +38,8 @@
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
     std::vector<UITouch*> _fingers;            // slot index = pointer id; nil when free
     CLLocationManager* _location;
+    NSString* _package;                        // the app package in Documents/ATLAN, run in preference to guest.so
+    BOOL _autoStarted;
 }
 
 // Bindings from host input to the guest's native methods: Documents/input.cfg (format in shell/input.hpp).
@@ -172,6 +175,36 @@
     return best.path;
 }
 
+// The app as installed on Android: ATLAN/APP/atlan.dat or an APK in the ATLAN folder (shell/app_package.hpp).
+- (void)findPackage {
+    const std::string path = atlan::shell::find_package(self.documentsPath.UTF8String);
+    _package = path.empty() ? nil : [NSString stringWithUTF8String:path.c_str()];
+}
+
+- (NSString*)guestLibraryPath {
+    if (_package) return _package;
+    NSString* imported = self.libraryURL.path;
+    return [NSFileManager.defaultManager fileExistsAtPath:imported] ? imported : nil;
+}
+
+// The package runs by itself once per launch, as soon as the view is on screen or the app returns with one in place.
+- (void)autoRun {
+    if (_autoStarted || _session || !_package || !self.view.window) return;
+    _autoStarted = YES;
+    [self runGuest];
+}
+
+- (void)becameActive {
+    [self findPackage];
+    [self refresh];
+    [self autoRun];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self autoRun];
+}
+
 - (void)append:(NSString*)line {
     // Appending in place keeps a long log cheap; the oldest half goes once it is large.
     NSMutableString* text = _log.textStorage.mutableString;
@@ -181,7 +214,7 @@
 }
 
 - (void)refresh {
-    BOOL hasLibrary = [NSFileManager.defaultManager fileExistsAtPath:self.libraryURL.path];
+    BOOL hasLibrary = self.guestLibraryPath != nil;
     NSString* path = self.mapPath;
     if (path) {
         const auto status = atlan::shell::inspect_data_file(path.UTF8String);
@@ -248,8 +281,9 @@
     } catch (const std::exception&) {
         [self append:@"selftest failed"];
     }
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh)
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(becameActive)
         name:UIApplicationDidBecomeActiveNotification object:nil];
+    [self findPackage];
     [self refresh];
 }
 
@@ -282,6 +316,11 @@
 
 - (void)runGuest {
     if (_session) { _session->stop(); _session->join(); _session.reset(); }
+    [self findPackage];
+    NSString* library = self.guestLibraryPath;
+    if (!library) { [self append:@"library missing"]; [self refresh]; return; }
+    const NSUInteger documents = self.documentsPath.length + 1;
+    [self append:_package && _package.length > documents ? [_package substringFromIndex:documents] : @"guest.so"];
     NSString* map = self.mapPath;
     if (map) {
         const auto status = atlan::shell::inspect_data_file(map.UTF8String);
@@ -291,7 +330,7 @@
     }
     __weak ShellViewController* weakSelf = self;
     atlan::shell::SessionConfig config;
-    config.library_path = self.libraryURL.path.UTF8String;
+    config.library_path = library.UTF8String;
     config.audio_sink = &_audio;
     config.data_root = self.documentsPath.UTF8String;
     _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
@@ -372,6 +411,7 @@
             });
         });
     if (!_session->start()) [self append:@"thread start failed"];
+    UIApplication.sharedApplication.idleTimerDisabled = YES;  // a navigation screen stays on without touches
     [self refresh];
 }
 
