@@ -239,6 +239,15 @@ std::string guest_strerror(std::uint32_t code) {  // Linux/Bionic errno numberin
     case 22: return "Invalid argument";
     case 24: return "Too many open files";
     case 28: return "No space left on device";
+    case 4: return "Interrupted system call";
+    case 11: return "Try again";
+    case 32: return "Broken pipe";
+    case 101: return "Network is unreachable";
+    case 104: return "Connection reset by peer";
+    case 110: return "Connection timed out";
+    case 111: return "Connection refused";
+    case 113: return "No route to host";
+    case 115: return "Operation now in progress";
     default: return "Unknown error " + std::to_string(code);
     }
 }
@@ -268,7 +277,7 @@ void install_printf_services(ImportDispatcher& dispatcher) {
 }
 
 void install_console_services(ImportDispatcher& dispatcher, std::uint32_t std_streams, std::uint32_t errno_address,
-                              std::function<void(const std::string&)> sink) {
+                              std::function<void(const std::string&)> sink, std::uint32_t strerror_buffer) {
     // Bionic's FILE is 84 bytes; stdin, stdout and stderr are consecutive. Output to any other stream is not a console write.
     constexpr std::uint32_t file_size = 84;
     const auto console = std::make_shared<std::function<void(const std::string&)>>(std::move(sink));
@@ -333,9 +342,17 @@ void install_console_services(ImportDispatcher& dispatcher, std::uint32_t std_st
         if (*console) (*console)((message.empty() ? std::string() : message + ": ") + guest_strerror(code));
         return std::nullopt;
     });
-    // char* strerror(int): static text for the common Linux/Bionic codes; the buffer lives in the host table.
-    dispatcher.bind("strerror", [](ImportCall& call) -> std::optional<std::string> {
-        return "strerror needs a guest string buffer, which is not provided yet (errno " + std::to_string(call.arg(0)) + ")";
+    // char* strerror(int): the text for the Linux/Bionic code ("Unknown error N" otherwise), written to one static
+    // guest buffer that the next call overwrites, as Bionic's strerror does for unknown codes.
+    dispatcher.bind("strerror", [strerror_buffer](ImportCall& call) -> std::optional<std::string> {
+        if (strerror_buffer == 0)
+            return "strerror needs a guest string buffer, which this session does not provide (errno " + std::to_string(call.arg(0)) + ")";
+        const std::string text = guest_strerror(call.arg(0)).substr(0, strerror_buffer_size - 1);
+        std::vector<std::byte> bytes(text.size() + 1, std::byte{0});
+        for (std::size_t i = 0; i < text.size(); ++i) bytes[i] = static_cast<std::byte>(text[i]);
+        if (!call.runtime().memory.write(strerror_buffer, bytes)) return "strerror buffer is not writable";
+        call.set_result(strerror_buffer);
+        return std::nullopt;
     });
 }
 }

@@ -51,7 +51,7 @@ constexpr std::uint64_t max_library_bytes = 256ull * 1024 * 1024;
 constexpr std::uint32_t stack_base = 0x70000000;
 constexpr std::uint32_t stack_bytes = 1024 * 1024;
 constexpr std::uint32_t return_sentinel = 0xffff0000;
-constexpr std::uint32_t guard_page = 0x6ffff000;  // stack guard word, __sF, virtual file table
+constexpr std::uint32_t guard_page = 0x6ffff000;  // stack guard word, __sF (0x100), errno (0x200), strerror text (0x300), static tm (0x400), GL (0x800)
 
 std::vector<std::byte> read_library(const std::string& path) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
@@ -189,7 +189,7 @@ void GuestSession::run() {
         install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [this, seen = std::set<std::string>()](const std::string& text) mutable {
             if (!seen.insert(text).second) return;  // the guest repeats its polling errors; each text is logged once
             log_("guest stdout " + text);
-        });
+        }, guard_page + 0x300);
         const std::map<std::string, std::string> properties;
         install_system_properties(dispatcher, properties, [this](const std::string& name, bool known) {
             log_("property " + name + (known ? "" : " (unset)"));

@@ -50,7 +50,7 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"mkdir", 0xf000005c}, {"remove", 0xf0000060}, {"rename", 0xf0000064}, {"open", 0xf0000068},
                       {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
                       {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
-                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}, {"qsort", 0xf00000bc}, {"cmp", 0xf00000c0}};
+                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}, {"qsort", 0xf00000bc}, {"cmp", 0xf00000c0}, {"strerror", 0xf00000c4}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -504,9 +504,24 @@ void jni_korean_strings() {
           "input statistics classify CP949, UTF-8, ASCII and malformed input");
 }
 }
+void strerror_text() {
+    Fixture f;
+    atlan::install_console_services(f.dispatcher, 0, 0, [](const std::string&) {}, data + 0x3000);
+    check(f.call("strerror", {9}).stop == atlan::Stop::returned && f.r0() == data + 0x3000, "strerror returns its static buffer");
+    check(text_at(f.runtime.memory, data + 0x3000) == "Bad file descriptor", "strerror(EBADF) text");
+    check(f.call("strerror", {4242}).stop == atlan::Stop::returned && text_at(f.runtime.memory, f.r0()) == "Unknown error 4242", "strerror of an unknown code");
+    atlan::ImportDispatcher bare;
+    atlan::install_console_services(bare, 0, 0, [](const std::string&) {});
+    atlan::elf::Image image;
+    image.trapped_imports.push_back({"strerror", 0xf00000c4, 2});
+    bare.attach(image);
+    const std::vector<std::uint32_t> args{9};
+    check(bare.call(f.runtime, 0xf00000c4, args, stack, sentinel, 1000).stop == atlan::Stop::service_error, "strerror without a buffer stops explicitly");
+}
 int main() {
     try {
         strings();
+        strerror_text();
         printf_family();
         mapping();
         files();

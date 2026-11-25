@@ -113,7 +113,7 @@ int main(int argc, char* argv[]) {
         atlan::install_heap_services(dispatcher, heap);
         atlan::install_string_services(dispatcher);
         atlan::install_printf_services(dispatcher);
-        atlan::install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [&](const std::string& text) { if (log) std::cout << "[guest stdout] " << text << '\n'; });
+        atlan::install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [&](const std::string& text) { if (log) std::cout << "[guest stdout] " << text << '\n'; }, guard_page + 0x300);
         std::optional<atlan::GuestStdio> stdio;
         if (!root.empty()) {
             stdio.emplace(root, guard_page + 0x200, [&](const std::string& path, const std::string& mode, bool ok) {
