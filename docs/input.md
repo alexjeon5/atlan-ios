@@ -9,7 +9,7 @@
 3. 대상 주소는 `RegisterNatives`로 등록된 (클래스, 이름, 시그니처)에서 찾고, 없으면 `Java_<클래스>_<이름>` export에서 찾는다. `this`는 그 클래스의 호스트 객체 하나를 재사용한다.
 4. 바인딩이 없는 이벤트, 등록도 export도 안 된 메서드는 로그에 한 번 남기고 버린다(`input: …`). 호출이 게스트 안에서 멈추면 다른 네이티브 호출처럼 세션이 실패로 끝난다.
 
-`SessionConfig::interactive`가 켜져 있으면 첫 `render_frames` 프레임과 기존 `pump`·오디오 단계가 끝난 뒤(로그 `interactive`), 중지될 때까지 입력 전달 → `renderGLSF` → swap → 게스트 스레드 `pump` → 오디오 콜백을 반복한다. 프레임 간격의 하한은 `frame_interval_ms`(기본 33ms)다. `render_on_demand`가 켜져 있으면(iOS 앱) `renderGLSF`는 게스트가 프레임을 요청했을 때만 부른다. 요청은 게스트 GL 스레드의 `callBackGLThread` 콜백이고, 안드로이드 쪽 Java 코드처럼 `isStateReady` → `isGLInit` → `setState(3)` 순서로 응답한다(`RENDERMODE_WHEN_DIRTY`). 요청이 없어도 `idle_redraw_ms`(기본 1초)마다 한 번은 그린다. 지도 화면에서는 게스트가 프레임이 끝날 때마다 바로 다음 프레임을 요청하므로 그리는 횟수는 줄지 않는다(서버 45초 측정: 요청 376회, 그린 프레임 373개). `ATLAN_INTERACTIVE_SECONDS=N`과 `ATLAN_ON_DEMAND=1`로 헤드리스에서 확인한다.
+`SessionConfig::interactive`가 켜져 있으면 첫 `render_frames` 프레임과 기존 `pump`·오디오 단계가 끝난 뒤(로그 `interactive`), 중지될 때까지 입력 전달 → `renderGLSF` → swap → 게스트 스레드 `pump` → 오디오 콜백을 반복한다. 프레임 간격의 하한은 `frame_interval_ms`(기본 33ms)다. `render_on_demand`가 켜져 있으면(iOS 앱) `renderGLSF`는 게스트가 프레임을 요청했을 때만 부른다. 요청은 게스트 GL 스레드의 `callBackGLThread` 콜백이고, 안드로이드 쪽 Java 코드처럼 `isStateReady` → `isGLInit` → `setState(3)` 순서로 응답한다(`RENDERMODE_WHEN_DIRTY`). 요청이 없으면 `idle_redraw_ms`(기본 1초)마다 같은 질문을 직접 해서 준비된 경우에만 그린다. 준비되지 않은 상태에서 `renderGLSF`를 부르면 화면을 검게 지우기만 하므로 그 경우에는 그리지 않는다. 지도 화면에서는 게스트가 프레임이 끝날 때마다 바로 다음 프레임을 요청하므로 그리는 횟수는 줄지 않는다(서버 45초 측정: 요청 376회, 그린 프레임 373개). `ATLAN_INTERACTIVE_SECONDS=N`과 `ATLAN_ON_DEMAND=1`로 헤드리스에서 확인한다.
 
 ## 바인딩 텍스트
 
