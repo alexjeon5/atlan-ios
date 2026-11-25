@@ -104,9 +104,11 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
         if (std::find(options.skip.begin(), options.skip.end(), set.name) != options.skip.end()) continue;
         std::map<std::string, std::vector<std::uint32_t>> located;  // every distinct address the names resolve to
         std::string missing;
+        bool taken = false;
         for (const auto& member : set.members) {
             std::vector<std::uint32_t> addresses;
             const auto add = [&](std::uint32_t address) {
+                if (dispatcher.replaces(address)) taken = true;  // an earlier set (a variant of this one) has it
                 if (std::find(addresses.begin(), addresses.end(), address) == addresses.end() && !dispatcher.replaces(address) &&
                     runtime.memory.translate(address & ~1U, MemoryAccess::execute) != nullptr) addresses.push_back(address);
             };
@@ -119,7 +121,7 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
             else if (member.required) missing += (missing.empty() ? "" : ", ") + member.name;
         }
         if (!missing.empty()) {
-            absent += " " + set.name;
+            if (!taken) absent += " " + set.name;
             continue;
         }
         if (set.verify) {

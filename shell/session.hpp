@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "shell/http_client.hpp"
 #include "shell/input.hpp"
 #include "shell/surface.hpp"
 
@@ -56,6 +57,10 @@ struct SessionConfig {
     // init, each surface call, render (the first `render_frames` frames), frames (each interactive report
     // interval; repeated phases are numbered). Slows the guest down.
     std::string profile_path;
+    // Network for the guest's Java side (shell/java_services.hpp): HTTP requests (nullptr: plain http:// only) and
+    // whether a network is available (nullptr: always). Called from host threads and the guest thread respectively.
+    HttpFetch http;
+    std::function<bool()> network_available;
     bool perf_log{};         // log instructions, seconds and MIPS per surface/render call, and block cache coverage
 };
 

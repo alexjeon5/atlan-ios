@@ -3,6 +3,7 @@
 #import <CoreLocation/CoreLocation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "apple_audio_sink.hpp"
+#include "apple_network.hpp"
 #include "metal_gl_backend.hpp"
 #import <QuartzCore/CAMetalLayer.h>
 #include "atlan/demo.hpp"
@@ -348,6 +349,8 @@
     config.interactive = true;
     config.render_on_demand = true;
     config.perf_log = true;  // the 10-second frame report also lists block cache coverage and the busiest imports
+    config.http = atlan::apple_http_fetch();
+    config.network_available = atlan::apple_network_available();
     // Optional byte signatures for run-time library functions the guest image does not export.
     config.native_signatures = [self.documentsPath stringByAppendingPathComponent:@"native.sig"].UTF8String;
     {
@@ -370,6 +373,8 @@
     const auto repeats = std::make_shared<atlan::shell::RepeatFilter>();
     const std::string perfPath = [self.documentsPath stringByAppendingPathComponent:@"perf.log"].UTF8String;
     std::remove(perfPath.c_str());  // one run per file
+    const std::string netPath = [self.documentsPath stringByAppendingPathComponent:@"net.log"].UTF8String;
+    std::remove(netPath.c_str());
     // A CAMetalLayer sublayer sized in native pixels; GL output is presented there.
     {
         const auto size = _surface.get();
@@ -405,11 +410,13 @@
     }
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,
-        [weakSelf, repeats, perfPath](const std::string& line) {
+        [weakSelf, repeats, perfPath, netPath](const std::string& line) {
             // Lines the guest repeats every frame are shown a few times only. Performance lines are also kept in
-            // Documents/perf.log, which the Files app can open and share.
-            if (line.starts_with("perf ")) {
-                if (std::FILE* file = std::fopen(perfPath.c_str(), "a")) {
+            // Documents/perf.log and network lines in Documents/net.log, which the Files app can open and share.
+            const bool network = line.starts_with("net ") || line.starts_with("http ") || line.starts_with("java online") ||
+                                 line.starts_with("java MainActivity.IsConnected");
+            if (line.starts_with("perf ") || network) {
+                if (std::FILE* file = std::fopen((network ? netPath : perfPath).c_str(), "a")) {
                     std::fputs(line.c_str(), file);
                     std::fputc('\n', file);
                     std::fclose(file);

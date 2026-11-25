@@ -5,6 +5,7 @@
 #include "atlan/inflate_vectors.hpp"
 #include "atlan/native_functions.hpp"
 #include <array>
+#include <cstdlib>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -286,6 +287,97 @@ void zlib_services() {
     check(result && result->r0 == static_cast<std::uint32_t>(-2), "inflate on a closed stream");
     check(!probe.native(service("inflateSync"), Words{stream}), "unsupported stream calls stop the guest");
 }
+// The image services on guest memory: PNG filters undo a filter applied here, ETC1 blocks with known colours.
+void image_services() {
+    Runtime runtime;
+    ImportDispatcher dispatcher;
+    runtime.memory.map(stack - 0x1000, 0x1000, Permissions::read_write);
+    runtime.memory.map(0x200000, NativeProbe::scratch_bytes, Permissions::read_write);
+    NativeProbe probe(dispatcher, runtime, stack, sentinel, 0x200000, 1000);
+    auto sets = image_library_sets();
+    const auto service = [&](const std::string& set_name) -> const ImportService& {
+        for (const auto& set : sets) if (set.name == set_name) return set.members.front().service;
+        throw std::runtime_error("no such set");
+    };
+    const auto put = [&](std::uint32_t at, std::span<const std::uint8_t> data) { check(runtime.memory.write(at, std::as_bytes(data)), "write guest bytes"); };
+    const auto put32 = [&](std::uint32_t at, std::uint32_t value) {
+        const std::array<std::uint8_t, 4> bytes{static_cast<std::uint8_t>(value), static_cast<std::uint8_t>(value >> 8),
+                                                static_cast<std::uint8_t>(value >> 16), static_cast<std::uint8_t>(value >> 24)};
+        put(at, bytes);
+    };
+    const auto get = [&](std::uint32_t at, std::size_t size) {
+        std::vector<std::uint8_t> out(size);
+        check(runtime.memory.read(at, std::as_writable_bytes(std::span(out))), "read guest bytes");
+        return out;
+    };
+    using Words = std::vector<std::uint32_t>;
+    const std::uint32_t info = 0x201000, row_at = 0x202ffd, prior_at = 0x206001;
+    std::mt19937 random(3);
+    for (const std::uint32_t bpp : {1U, 2U, 3U, 4U, 8U})
+        for (std::uint32_t filter = 0; filter <= 4; ++filter) {
+            const std::uint32_t row_bytes = bpp * 700;  // crosses a page
+            std::vector<std::uint8_t> plain(row_bytes), prior(row_bytes), filtered(row_bytes);
+            for (auto& byte : plain) byte = static_cast<std::uint8_t>(random());
+            for (auto& byte : prior) byte = static_cast<std::uint8_t>(random());
+            for (std::uint32_t i = 0; i < row_bytes; ++i) {  // the encoder's side of the PNG specification
+                const int a = i >= bpp ? plain[i - bpp] : 0, b = prior[i], c = i >= bpp ? prior[i - bpp] : 0;
+                const int p = a + b - c, pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
+                const int predicted = filter == 0 ? 0 : filter == 1 ? a : filter == 2 ? b : filter == 3 ? (a + b) / 2
+                                      : pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+                filtered[i] = static_cast<std::uint8_t>(plain[i] - predicted);
+            }
+            put(row_at, filtered);
+            put(prior_at, prior);
+            put32(info, 700);
+            put32(info + 4, row_bytes);
+            put32(info + 8, (bpp * 8) << 24);
+            check(probe.native(service("png_read_filter_row"), Words{0x200000, info, row_at, prior_at, filter}).has_value(), "filter service runs");
+            check(get(row_at, row_bytes) == plain, "the PNG filter is undone");
+            check(get(prior_at, row_bytes) == prior, "the prior row is untouched");
+        }
+    check(!probe.native(service("png_read_filter_row"), Words{0x200000, info, row_at, prior_at, 5}), "an unknown filter is declined");
+
+    // ETC1: one block per case, 4x4 pixels of R, G, B, 255.
+    const std::uint32_t width_at = 0x210000, height_at = 0x210004, mode_at = 0x210008, source_at = 0x211000, dest_at = 0x218000;
+    const auto decode = [&](std::span<const std::uint8_t> blocks, std::uint32_t width, std::uint32_t height, std::uint32_t mode = 0) {
+        put(source_at, blocks);
+        put32(width_at, width);
+        put32(height_at, height);
+        put32(mode_at, mode);
+        const std::vector<std::uint8_t> blank(4096, std::uint8_t{0x5a});
+        put(dest_at, blank);
+        return probe.native(service("PVRTDecompressETC (RGBA)"), Words{source_at, width_at, height_at, dest_at, mode_at});
+    };
+    const auto pixel = [&](std::uint32_t index) { return get(dest_at + index * 4, 4); };
+    using Pixel = std::vector<std::uint8_t>;
+    // Individual mode, left half (0x10, 0x20, 0x30)*17/16... nibbles 1,2,3 and right half nibbles 15,0,8; tables 0 and 7.
+    // Pixel indices: pixel (0,0) large positive, pixel (3,3) large negative, everything else small positive.
+    const std::array<std::uint8_t, 8> individual{0x1f, 0x20, 0x38, 0x1c, 0x80, 0x00, 0x80, 0x01};
+    auto result = decode(individual, 4, 4);
+    check(result && result->r0 == 8, "one block is eight source bytes");
+    check(pixel(0) == Pixel{17 + 8, 34 + 8, 51 + 8, 255}, "individual mode, large modifier");
+    check(pixel(1) == Pixel{17 + 2, 34 + 2, 51 + 2, 255}, "individual mode, small modifier");
+    check(pixel(2) == Pixel{255, 47, 136 + 47, 255}, "second half, its own table, clamped high");
+    check(pixel(15) == Pixel{255 - 183, 0, 0, 255}, "negative modifier, clamped low");
+    // Differential mode, flipped: base 16 (5 bits) -> 132, second base 16 - 3 = 13 -> 107; table 1 for both.
+    const std::array<std::uint8_t, 8> differential{0x85, 0x85, 0x85, 0x27, 0x00, 0x00, 0x00, 0x00};
+    result = decode(differential, 4, 4);
+    check(result && pixel(0) == Pixel{137, 137, 137, 255} && pixel(4) == Pixel{137, 137, 137, 255}, "differential mode, top half");
+    check(pixel(8) == Pixel{112, 112, 112, 255} && pixel(15) == Pixel{112, 112, 112, 255}, "flipped block, bottom half");
+    result = decode(individual, 2, 2);
+    check(result && result->r0 == 8 && pixel(0) == Pixel{25, 42, 59, 255} && pixel(1) == Pixel{19, 36, 53, 255} &&
+          pixel(2) == Pixel{19, 36, 53, 255} && pixel(4) == Pixel{0x5a, 0x5a, 0x5a, 0x5a}, "a level smaller than a block is cropped");
+    put(source_at, individual);
+    put32(mode_at, 0);
+    put32(width_at, 4);
+    const std::vector<std::uint8_t> blank(64, std::uint8_t{0x5a});
+    put(dest_at, blank);
+    put32(height_at, 4);
+    result = probe.native(service("PVRTDecompressETC (BGRA)"), Words{source_at, width_at, height_at, dest_at, mode_at});
+    check(result && pixel(0) == Pixel{59, 42, 25, 255}, "the other byte order");
+    check(!decode(individual, 4, 4, 1), "another mode is declined");
+    check(!decode(individual, 6, 4), "a size that is not whole blocks is declined");
+}
 }
 
 int main() {
@@ -293,6 +385,7 @@ int main() {
         decoder();
         replacement();
         zlib_services();
+        image_services();
         std::cout << "native function tests passed: " << checks << " checks\n";
         return 0;
     } catch (const std::exception& error) {

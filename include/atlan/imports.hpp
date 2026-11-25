@@ -98,6 +98,16 @@ public:
     // Binds one host-reserved, unmapped, 4-byte aligned trap address to a name.
     // False if the address is misaligned or already bound.
     bool bind_trap(std::uint32_t address, std::string name);
+    // The service bound to `name`, or nullptr; for a service that wraps an earlier one (see rebind).
+    [[nodiscard]] const ImportService* service(const std::string& name) const {
+        const auto found = services_.find(name);
+        return found == services_.end() ? nullptr : &found->second;
+    }
+    // Binds `name`, replacing any service bound before.
+    void rebind(std::string name, ImportService service) {
+        resolved_.clear();
+        services_.insert_or_assign(std::move(name), std::move(service));
+    }
     // Maps an image's trap addresses to symbol names. Function imports only.
     void attach(const elf::Image& image);
     // Replaces the guest function at `address` (bit 0: Thumb) by a host service: its first instruction becomes a

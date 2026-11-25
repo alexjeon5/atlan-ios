@@ -2,6 +2,7 @@
 #include "shell/session.hpp"
 #include "shell/guest_ini.hpp"
 #include "shell/app_package.hpp"
+#include "shell/java_services.hpp"
 #include <iterator>
 #include <chrono>
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include "atlan/string_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
+#include "atlan/sockets.hpp"
 #include "atlan/threads.hpp"
 #include <array>
 #include <chrono>
@@ -191,6 +193,7 @@ void GuestSession::run() {
             log_("property " + name + (known ? "" : " (unset)"));
         });
         std::optional<GuestStdio> stdio;
+        bool use_connection_manager = true;  // system.ini USECONNECTIONMANAGER (the stock value is 1)
         if (!config_.data_root.empty()) {
             // The guest polls some files that never exist; a failed open is logged the first time only.
             stdio.emplace(config_.data_root, guard_page + 0x200, [this, failed = std::set<std::string>()](const std::string& path, const std::string& mode, bool ok) mutable {
@@ -219,6 +222,7 @@ void GuestSession::run() {
             stdio->add_read_filter(settings_file, [](std::string text) {
                 return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
             });
+            use_connection_manager = ini_number(settings, "USECONNECTIONMANAGER").value_or(1) != 0;
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
@@ -235,6 +239,13 @@ void GuestSession::run() {
         VirtualFiles files(guard_page + 0x200);
         if (stdio) files.set_regular_file_size([&](std::uint32_t fd) { return stdio->descriptor_size(fd); });
         files.install(dispatcher);
+        // Host sockets for the guest's own network code; each connection is logged (addresses and sizes only).
+        GuestSockets::Config socket_config;
+        socket_config.errno_address = guard_page + 0x200;
+        socket_config.threads = &threads;
+        socket_config.trace = [this](const std::string& line) { log_(line); };
+        GuestSockets sockets(socket_config);
+        sockets.install(dispatcher);
         SemaphoreTable semaphores(&threads);
         semaphores.install(dispatcher);
         ThreadKeys thread_keys(&threads);
@@ -293,7 +304,9 @@ void GuestSession::run() {
                 if (auto parsed = parse_native_signatures(text, why)) native_options.signatures = std::move(*parsed);
                 else log_("native signatures rejected: " + why);
             }
-            install_native_functions(dispatcher, runtime, image.exports, runtime_library_sets(), native_options);
+            auto sets = runtime_library_sets();
+            for (auto& set : image_library_sets()) sets.push_back(std::move(set));
+            install_native_functions(dispatcher, runtime, image.exports, std::move(sets), native_options);
             dispatcher.reset_import_counts();
             if (profiler) profiler->reset();
         }
@@ -359,8 +372,24 @@ void GuestSession::run() {
             }
             // Other void UI callbacks the guest raises: recorded in the log, no host effect yet.
             struct Callback { const char* cls; const char* name; const char* signature; };
-            for (const Callback& cb : {Callback{"com/atlan/MainActivity", "SendMsgFromAtlan", "(III[B)V"},
-                                       Callback{"com/atlan/MainActivity", "JniArSettingData", "(IIII)V"},
+            // Network-related Java methods (IsConnected, SendMsgFromAtlan, AtlanNetService) and the replies they queue.
+            JavaServices::Config java_services_config;
+            java_services_config.http = config_.http;
+            java_services_config.network_available = config_.network_available;
+            java_services_config.use_connection_manager = use_connection_manager;
+            java_services_config.log = log_;
+            JavaServices java_services(java_services_config);
+            java_services.install(java, [&java, &image](const std::string& cls, const std::string& name, const std::string& signature) -> std::uint32_t {
+                for (const auto& m : java.native_methods())
+                    if (m.class_name == cls && m.name == name && m.signature == signature) return m.address;
+                std::string symbol = "Java_";
+                for (char c : cls) { if (c == '/') symbol += '_'; else if (c == '_') symbol += "_1"; else symbol += c; }
+                symbol += '_';
+                for (char c : name) { if (c == '_') symbol += "_1"; else symbol += c; }
+                const auto* sym = image.find(symbol);
+                return sym && sym->type == 2 ? sym->address : 0;
+            });
+            for (const Callback& cb : {Callback{"com/atlan/MainActivity", "JniArSettingData", "(IIII)V"},
                                        Callback{"com/atlan/MainActivity", "SendMsgFromTPEGD", "(III[B)V"},
                                        Callback{"com/atlan/AtlanGLThread", "callBackGLThread", "()V"}}) {
                 if (on_demand && std::string_view(cb.name) == "callBackGLThread") continue;
@@ -462,7 +491,21 @@ void GuestSession::run() {
                 else note("input: " + b.class_name + "." + b.name + b.signature + " is neither registered nor exported");
                 return bound[&b] = out;
             };
+            // Replies of the Java side (online state, finished HTTP requests), on the guest thread like input.
+            const auto deliver_java = [&]() -> bool {
+                for (const auto& due : java_services.take_due()) {
+                    const auto r = dispatcher.call(runtime, due.address, due.words, stack_base + stack_bytes,
+                                                   return_sentinel, config_.surface_call_budget);
+                    if (r.stop != Stop::returned) {
+                        log_(describe_state(runtime, dispatcher));
+                        fail(describe_stop("java " + due.what, r));
+                        return false;
+                    }
+                }
+                return true;
+            };
             const auto deliver_input = [&]() -> bool {
+                if (!deliver_java()) return false;
                 if (!config_.input) return true;
                 for (const auto& event : config_.input->drain()) {
                     const bool touch = std::holds_alternative<TouchEvent>(event);
