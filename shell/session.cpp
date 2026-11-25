@@ -190,9 +190,6 @@ void GuestSession::run() {
             stdio->add_read_filter(settings_file, [](std::string text) {
                 return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
             });
-            if (config_.on_fixed_screen)
-                config_.on_fixed_screen(ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
-                                        ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0);
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;

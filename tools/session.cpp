@@ -3,6 +3,7 @@
 #include "atlan/gl_context.hpp"
 #include "atlan/gl_recorder.hpp"
 #include "shell/session.hpp"
+#include "preview_sink.hpp"
 #include <chrono>
 #include <cstdio>
 #include <thread>
@@ -15,7 +16,15 @@ int main(int argc, char** argv) {
     std::FILE* trace = argc > 3 ? std::fopen(argv[3], "w") : nullptr;
     atlan::RecordingGlBackend recorder(trace ? trace : stderr, argc > 4);
     atlan::LoggingGlSink sink(trace ? trace : stderr);
-    atlan::GlContext context(sink);
+    // ATLAN_PREVIEW=DIR: also write a rough software picture of every ATLAN_PREVIEW_EVERY-th frame (default 1) as
+    // DIR/frame_NNNNN.ppm, ATLAN_PREVIEW_SIZE=WxH pixels (default 800x480). See preview_sink.hpp for what it shows.
+    unsigned preview_width = 800, preview_height = 480;
+    if (const char* size = std::getenv("ATLAN_PREVIEW_SIZE")) std::sscanf(size, "%ux%u", &preview_width, &preview_height);
+    const char* preview_directory = std::getenv("ATLAN_PREVIEW");
+    const char* preview_every = std::getenv("ATLAN_PREVIEW_EVERY");
+    atlan::tools::PreviewGlSink preview(preview_width, preview_height, preview_directory ? preview_directory : "",
+                                        preview_every ? static_cast<std::uint32_t>(std::atoi(preview_every)) : 1, &sink);
+    atlan::GlContext context(preview_directory ? static_cast<atlan::GlSink&>(preview) : static_cast<atlan::GlSink&>(sink));
     context.set_log([](const std::string& line) { std::cout << "gl: " << line << std::endl; });
     const bool raw = std::getenv("ATLAN_RAW_GL") != nullptr;
     atlan::shell::SessionConfig config;
