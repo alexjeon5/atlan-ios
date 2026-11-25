@@ -4,6 +4,7 @@
 #include <bit>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace atlan {
@@ -239,6 +240,26 @@ std::string guest_strerror(std::uint32_t code) {  // Linux/Bionic errno numberin
     case 22: return "Invalid argument";
     case 24: return "Too many open files";
     case 28: return "No space left on device";
+    case 4: return "Interrupted system call";
+    case 11: return "Try again";
+    case 14: return "Bad address";
+    case 32: return "Broken pipe";
+    case 97: return "Address family not supported by protocol";
+    case 98: return "Address already in use";
+    case 99: return "Cannot assign requested address";
+    case 100: return "Network is down";
+    case 101: return "Network is unreachable";
+    case 103: return "Software caused connection abort";
+    case 104: return "Connection reset by peer";
+    case 105: return "No buffer space available";
+    case 106: return "Transport endpoint is already connected";
+    case 107: return "Transport endpoint is not connected";
+    case 110: return "Connection timed out";
+    case 111: return "Connection refused";
+    case 112: return "Host is down";
+    case 113: return "No route to host";
+    case 114: return "Operation already in progress";
+    case 115: return "Operation now in progress";
     default: return "Unknown error " + std::to_string(code);
     }
 }
@@ -333,9 +354,22 @@ void install_console_services(ImportDispatcher& dispatcher, std::uint32_t std_st
         if (*console) (*console)((message.empty() ? std::string() : message + ": ") + guest_strerror(code));
         return std::nullopt;
     });
-    // char* strerror(int): static text for the common Linux/Bionic codes; the buffer lives in the host table.
+    // char* strerror(int): the message in a read-write guest area mapped on first use, one 64-byte slot per code
+    // (codes past the table share the last slot), so a returned pointer keeps its text as bionic's constants do.
     dispatcher.bind("strerror", [](ImportCall& call) -> std::optional<std::string> {
-        return "strerror needs a guest string buffer, which is not provided yet (errno " + std::to_string(call.arg(0)) + ")";
+        constexpr std::uint32_t area = 0xf7010000, slot_bytes = 64, slots = 136;
+        auto& memory = call.runtime().memory;
+        if (memory.translate(area, MemoryAccess::write) == nullptr)
+            memory.map(area, (slots * slot_bytes + Memory::page_size - 1) / Memory::page_size * Memory::page_size, Permissions::read_write);
+        const std::uint32_t code = call.arg(0);
+        std::string text = guest_strerror(code);
+        if (text.size() > slot_bytes - 1) text.resize(slot_bytes - 1);
+        std::vector<std::byte> bytes(text.size() + 1, std::byte{0});
+        std::memcpy(bytes.data(), text.data(), text.size());
+        const std::uint32_t at = area + std::min<std::uint32_t>(code, slots - 1) * slot_bytes;
+        if (!memory.write(at, bytes)) return "strerror could not write its message";
+        call.set_result(at);
+        return std::nullopt;
     });
 }
 }
