@@ -155,9 +155,6 @@ void GuestSession::run() {
             stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
             stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
-            // CLOUDMAPPATH in system.ini: the guest open(O_CREAT)s mapversion.idx here without a mkdir and reads the
-            // result unchecked, so a missing folder showed up as endless "read error: Bad file descriptor".
-            stdio->add_alias("/map/CLOUD_MAP", "ATLAN/NAND/CLOUD_MAP", true);
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;

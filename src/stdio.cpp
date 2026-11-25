@@ -59,8 +59,7 @@ std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) 
     }
     return current;
 }
-void GuestStdio::add_alias(std::string guest_prefix, std::string host_prefix, bool create_target) {
-    if (create_target) { std::error_code ec; std::filesystem::create_directories(locate(std::filesystem::path(host_prefix)), ec); }
+void GuestStdio::add_alias(std::string guest_prefix, std::string host_prefix) {
     while (guest_prefix.size() > 1 && guest_prefix.back() == '/') guest_prefix.pop_back();
     aliases_.emplace_back(std::move(guest_prefix), std::move(host_prefix));
 }

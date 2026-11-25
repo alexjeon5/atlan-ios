@@ -28,8 +28,7 @@ public:
     void install(ImportDispatcher& dispatcher);
     // Guest paths starting with `guest_prefix` (whole components) are redirected to `host_prefix` beneath the root,
     // e.g. the app's absolute Android paths onto folders the user can reach. First matching alias wins.
-    // create_target makes the host folder (beneath the root) so apps that open(O_CREAT) there without a mkdir work.
-    void add_alias(std::string guest_prefix, std::string host_prefix, bool create_target = false);
+    void add_alias(std::string guest_prefix, std::string host_prefix);
     [[nodiscard]] std::size_t open_files() const noexcept;
     [[nodiscard]] std::size_t open_descriptors() const noexcept;
     // Size of the regular file behind a POSIX descriptor opened through open(), for fstat.
