@@ -45,9 +45,7 @@ void install_printf_services(ImportDispatcher& dispatcher);
 // Console output: printf, vprintf, fprintf, vfprintf, puts, fputs, fputc, putc and perror. `std_streams` is the guest
 // address of Bionic's `__sF` array (stdin, stdout, stderr; 84 bytes each); writes to other streams stop explicitly.
 // `errno_address` is the guest errno word read by perror. Text is delivered to `sink` without the trailing newline
-// (a host log, not a device console). strerror writes its text to `strerror_buffer`, a writable guest buffer of
-// `strerror_buffer_size` bytes; with 0 it stops with a diagnostic instead.
-inline constexpr std::uint32_t strerror_buffer_size = 128;
+// (a host log, not a device console). strerror is not provided: it needs a guest string buffer.
 void install_console_services(ImportDispatcher& dispatcher, std::uint32_t std_streams, std::uint32_t errno_address,
-                              std::function<void(const std::string&)> sink, std::uint32_t strerror_buffer = 0);
+                              std::function<void(const std::string&)> sink);
 }
