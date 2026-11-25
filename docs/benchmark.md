@@ -26,10 +26,13 @@ x86-64 클라우드 VM(4 vCPU), GCC 13.3 Release, 반복 3회 중 최고값, 합
 
 단계별(alu, 같은 기기): `step()` 11 → 명령마다 블록 조회(이전 구현) 80 → 블록이 명령 열 전체를 담고 다음 블록을 연결 107 → 전용 핸들러 465 MIPS. 같은 기기에서 Clang 18은 alu 515, thumb 427 MIPS다.
 
+VM 시간 측정은 ±30% 흔들려서 작은 변경은 callgrind의 명령 수(게스트 명령 하나당 호스트 명령 수, `--mode cached`)로 비교한다. 2026-11-25 핫 패스 정리(플래그 계산, PC를 블록 끝에서만 기록, LSL 즉치 특수화, 루프 정리) 전후: alu 43.5 → 31.6, memory 66.1 → 43.5, callret 51.8 → 47.0, vfp 62.4 → 53.2, thumb 58.3 → 47.6.
+
 ## 구조
 
 `BlockRunner`(`block_cache.hpp`)는 PC 키와 ITSTATE로 블록을 찾고, 없으면 최대 64개 명령을 한 번 디코드한다. 런타임 JIT나 실행 가능 메모리는 쓰지 않는다. 블록은 데이터이고 호출 경로는 정적 핸들러 함수뿐이다.
 
+- 전용 핸들러는 PC와 ITSTATE를 쓰지 않는다. 블록 루프가 연속 실행이 끝나는 곳(블록 끝, 느린 경로 명령 앞)에서 `next_key`/`next_it`로 한 번 기록하고, 제어를 옮기는 핸들러만 직접 쓴다.
 - 명령마다 48바이트 `FastOp` 하나를 둔다(`semantics_fast.cpp`, `prepare_fast`). 데이터 처리(즉치·레지스터·즉치 시프트·레지스터 시프트, PC 읽기와 PC 쓰기 포함), MOVW/MOVT/ADR, 바이트·하프워드·워드 LDR/STR(리터럴·PC 기준·PC로 로드 포함), LDM/STM/PUSH/POP, B/BL/BX/BLX/CBZ/CBNZ, SXT/UXT, MUL/MLA/MLS, IT/NOP은 연산·피연산자 형태별로 특수화한 핸들러가 실행한다. 조건은 16비트 표 한 번으로 판정하고, 분기 대상과 리터럴 주소는 블록을 만들 때 상수로 계산한다.
 - 스칼라 VFP(A32)도 `vfp::prepare_fast`가 같은 `FastOp`로 미리 해석한다: 산술, VMOV/VABS/VNEG/VSQRT, VCMP(E), 정수·정밀도 변환, 코어 레지스터 전송, VMRS/VMSR, VLDR/VSTR/VLDM/VSTM. 산술은 `execute_a32`와 같은 함수를 호출한다(NaN payload가 피연산자 순서에 따라 달라져서 식을 복사하면 컴파일러에 따라 결과가 갈린다).
 - 전용 핸들러는 빠른 경로로 끝낼 수 없으면(폴트, 페이지를 넘는 접근) 상태를 바꾸기 전에 물러나고, 그 명령은 `Runtime::step()`이 실행하거나 이벤트를 보고한다. 폴트 순서와 보고 내용은 기존 경로 그대로다.

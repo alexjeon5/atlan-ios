@@ -26,18 +26,19 @@ struct Block;
 // The successor a block last continued into, so a repeated transfer skips the table lookup. Links die with
 // the blocks: a flush destroys every block at once.
 struct Link {
-    std::uint64_t key{};
+    std::uint64_t key{~std::uint64_t{0}};  // never a canonical key while unused
     Block* block{};
     std::uint8_t itstate{};
 };
 struct Block {
     std::uint64_t key;
     std::uint8_t itstate;
-    // One per instruction, dense for the execution loop. Where `run` is null the instruction has no fast
+    // One per instruction, dense for the execution loop. Where `run` is generic_marker the instruction has no fast
     // handler and `imm` indexes `entries`, which holds the full decode of only those instructions.
     std::vector<a32::FastOp> fast;
     std::vector<Entry> entries;
     std::array<Link, 2> links{};
+    std::size_t length{};  // fast.size(), kept so the loop does not divide by sizeof(FastOp)
 };
 
 class Adapter final : public a32::A32Memory {
@@ -52,6 +53,8 @@ private:
     CpuState& cpu_;
 };
 
+// The handler of an instruction without a fast one: hands it back to the block loop.
+unsigned generic_marker(CpuState&, const a32::FastOp&, Memory&) noexcept { return a32::fast_generic; }
 [[nodiscard]] Event map_event(a32::StepEvent event) noexcept {
     switch (event) {
     case a32::StepEvent::retired: return Event::retired;
@@ -129,7 +132,9 @@ struct BlockRunner::Impl {
             if (route ? !vfp::prepare_fast(word, pc, fast)
                       : !a32::prepare_fast(insn, thumb ? a32::t32_key(pc) : a32::a32_key(pc), fast)) {
                 fast = {};
+                fast.run = generic_marker;
                 fast.next_key = next_key;
+                fast.next_it = insn.next_it.bits();
                 fast.imm = static_cast<std::uint32_t>(block->entries.size());
                 block->entries.push_back({insn, a32::prepare_a32(insn), next_key, pc, word, route});
             }
@@ -148,6 +153,7 @@ struct BlockRunner::Impl {
             pc = next;
         }
         if (block->fast.empty()) return nullptr;
+        block->length = block->fast.size();
         if (entries + block->fast.size() > max_entries) flush();
         entries += block->fast.size();
         Block* raw = block.get();
@@ -170,13 +176,16 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
     }
     std::uint64_t retired = 0;
     Block* previous = nullptr;
+    // Locals, so the handler calls do not force reloads through `d`.
+    CpuState& cpu = d.cpu;
+    Memory& memory = d.memory;
     while (true) {
-        const std::uint64_t key = d.cpu.pc;
-        const std::uint8_t it = d.cpu.a32_itstate;
+        const std::uint64_t key = cpu.pc;
+        const std::uint8_t it = cpu.a32_itstate;
         Block* block = nullptr;
         if (previous != nullptr) {
             for (const Link& link : previous->links)
-                if (link.block != nullptr && link.key == key && link.itstate == it) { block = link.block; break; }
+                if (link.key == key && link.itstate == it) { block = link.block; break; }
         }
         if (block != nullptr) {
             ++stats_.block_entries;
@@ -214,45 +223,66 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
             previous = nullptr;
             continue;
         }
-        const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(block->fast.size(), budget - retired));
-        const a32::FastOp* const fast = block->fast.data();
-        for (std::size_t i = 0; i < count; ++i) {
-            if (fast[i].run != nullptr) [[likely]] {
-                const unsigned done = fast[i].run(d.cpu, fast[i], d.memory);
-                if (done == a32::fast_next) [[likely]] { ++retired; continue; }
-                if (done == a32::fast_jump) { ++retired; break; }
-                // fast_fallback: nothing changed. Runtime::step() executes the instruction or reports its event.
+        // Fast handlers do not store the PC or ITSTATE; they follow from the position in the block. The state
+        // is written back where the run leaves the sequence: at its end, before a slow instruction (which may
+        // read the PC or report it), and by a handler that transfers control.
+        const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(block->length, budget - retired));
+        const a32::FastOp* const begin = block->fast.data();
+        const a32::FastOp* const end = begin + count;
+        const a32::FastOp* op = begin;
+        while (op != end) {
+            const a32::FastOp* const start = op;
+            unsigned done = a32::fast_next;
+            for (; op != end; ++op) {
+                done = op->run(cpu, *op, memory);
+                if (done != a32::fast_next) [[unlikely]] break;
+            }
+            retired += static_cast<std::uint64_t>(op - start);
+            if (op == end) {
+                cpu.pc = end[-1].next_key;
+                cpu.a32_itstate = end[-1].next_it;
+                break;
+            }
+            if (done == a32::fast_jump) { ++retired; break; }
+            if (op != begin) {
+                cpu.pc = op[-1].next_key;
+                cpu.a32_itstate = op[-1].next_it;
+            }
+            if (done == a32::fast_fallback) {
+                // Nothing changed. Runtime::step() executes the instruction or reports its event.
                 ++stats_.fallbacks;
                 auto result = runtime_.step();
                 retired += result.retired;
                 if (result.event != Event::retired) { result.retired = retired; return result; }
-                if (d.cpu.pc != fast[i].next_key) break;
+                if (cpu.pc != op->next_key) break;
+                ++op;
                 continue;
             }
-            const Entry* const e = &block->entries[fast[i].imm];
+            // fast_generic: an instruction without a fast handler.
+            const Entry* const e = &block->entries[op->imm];
             ++stats_.generic;
             ++d.generic_forms[static_cast<std::size_t>(e->insn.form)];
+            bool executed = false;
             if (e->route_vfp) {
-                const auto done = vfp::execute_a32(d.cpu, d.memory, e->word, e->pc);
-                if (done.kind == vfp::Execution::Kind::retired) {
-                    ++retired;
-                    if (d.cpu.pc != e->next_key) break;
-                    continue;
-                }
-                if (done.kind == vfp::Execution::Kind::fault)
-                    return {Event::memory_fault, retired, done.address, 0, done.access, done.alignment};
-                if (done.kind == vfp::Execution::Kind::unsupported)
-                    return {Event::unsupported_instruction, retired, e->pc, e->word, MemoryAccess::execute, false, done.reason};
+                const auto vfp_done = vfp::execute_a32(cpu, memory, e->word, e->pc);
+                if (vfp_done.kind == vfp::Execution::Kind::fault)
+                    return {Event::memory_fault, retired, vfp_done.address, 0, vfp_done.access, vfp_done.alignment};
+                if (vfp_done.kind == vfp::Execution::Kind::unsupported)
+                    return {Event::unsupported_instruction, retired, e->pc, e->word, MemoryAccess::execute, false, vfp_done.reason};
+                executed = vfp_done.kind == vfp::Execution::Kind::retired;
             }
-            const auto result = e->prepared.run ? e->prepared.run(d.cpu, e->insn, d.adapter, e->prepared.info)
-                                                : a32::execute_a32(d.cpu, e->insn, d.adapter);
-            if (result.event != a32::StepEvent::retired) [[unlikely]] {
-                const Event event = map_event(result.event);
-                if (event == Event::supervisor_call) ++retired;
-                return {event, retired, result.fault_address, result.syndrome, result.access, result.alignment};
+            if (!executed) {
+                const auto result = e->prepared.run ? e->prepared.run(cpu, e->insn, d.adapter, e->prepared.info)
+                                                    : a32::execute_a32(cpu, e->insn, d.adapter);
+                if (result.event != a32::StepEvent::retired) [[unlikely]] {
+                    const Event event = map_event(result.event);
+                    if (event == Event::supervisor_call) ++retired;
+                    return {event, retired, result.fault_address, result.syndrome, result.access, result.alignment};
+                }
             }
             ++retired;
-            if (d.cpu.pc != e->next_key) break;
+            if (cpu.pc != e->next_key) break;
+            ++op;
         }
         if (single) return {Event::retired, retired};
         if (retired >= budget) return {Event::budget_exhausted, retired};
