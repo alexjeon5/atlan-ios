@@ -35,6 +35,9 @@ struct SessionConfig {
     InputBindings input_bindings;
     // Keep rendering frames (and delivering input) after the first `render_frames` until stop() or a guest stop.
     bool interactive{};
+    // Called on the guest thread when the guest reports that the user chose to quit (the app's Java side polls
+    // MainActivity.nativeIsProgramExit once a second and then finishes the activity). The interactive loop ends.
+    std::function<void()> on_guest_exit;
     std::uint32_t frame_interval_ms{33};          // lower bound on the time per interactive frame
     // Interactive frames are drawn only when the guest asks for one (its GL thread's callBackGLThread, answered as
     // the app's Java side does: isStateReady -> setState(3) -> request), as a GLSurfaceView in RENDERMODE_WHEN_DIRTY
