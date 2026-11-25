@@ -67,7 +67,7 @@ struct GlesBinder {
         simple("glEnable", GlOp::enable, 1);
         for (const bool on : {false, true}) {
             d.bind(on ? "glEnableVertexAttribArray" : "glDisableVertexAttribArray", [&g, on](ImportCall& c) -> Err {
-                if (c.arg(0) >= g.attribs_.size()) return "vertex attribute index out of range";
+                if (c.arg(0) >= g.attribs_.size()) return std::nullopt;  // an unknown (-1) location: GL_INVALID_VALUE, no effect
                 g.attribs_[c.arg(0)].enabled = on;
                 GlCall call;
                 call.op = on ? GlOp::enable_vertex_attrib_array : GlOp::disable_vertex_attrib_array;
@@ -82,7 +82,15 @@ struct GlesBinder {
         simple("glIsTexture", GlOp::is_texture, 1);
         simple("glLineWidth", GlOp::line_width, 1, 1);
         simple("glLinkProgram", GlOp::link_program, 1);
-        simple("glPixelStorei", GlOp::pixel_store_i, 2);
+        d.bind("glPixelStorei", [&g](ImportCall& c) -> Err {
+            const auto value = c.arg(1);
+            if (c.arg(0) == 0x0CF5 && (value == 1 || value == 2 || value == 4 || value == 8)) g.unpack_alignment_ = value;
+            GlCall call;
+            call.op = GlOp::pixel_store_i;
+            call.a = {c.arg(0), value};
+            g.backend_.execute(call);
+            return std::nullopt;
+        });
         simple("glTexParameterf", GlOp::tex_parameter_f, 3, 4);
         simple("glTexParameteri", GlOp::tex_parameter_i, 3);
         simple("glUniform1f", GlOp::uniform_1f, 2, 2);
@@ -176,7 +184,7 @@ struct GlesBinder {
             if (!load_args(c, 8, v)) return "glCompressedTexImage2D arguments are unreadable";
             GlCall call;
             call.op = GlOp::compressed_tex_image_2d;
-            for (unsigned i = 0; i < 7; ++i) call.a[i] = c.arg(i);  // target level fmt w h border imageSize
+            for (unsigned i = 0; i < 7; ++i) call.a[i] = v[i];  // target level fmt w h border imageSize
             if (v[7] != 0 && !read_bytes(c, v[7], v[6], call.data)) return "glCompressedTexImage2D data is unreadable or too large";
             g.backend_.execute(call);
             return std::nullopt;
@@ -186,17 +194,20 @@ struct GlesBinder {
             if (!load_args(c, 9, v)) return "glTexImage2D arguments are unreadable";
             GlCall call;
             call.op = GlOp::tex_image_2d;
-            for (unsigned i = 0; i < 8; ++i) call.a[i] = c.arg(i);  // target level internal w h border format type
+            for (unsigned i = 0; i < 8; ++i) call.a[i] = v[i];  // target level internal w h border format type
             if (v[8] != 0) {
                 std::uint64_t channels = 0;
                 switch (v[6]) { case 0x1908: channels = 4; break; case 0x1907: channels = 3; break;
                                     case 0x190A: channels = 2; break; case 0x1906: case 0x1909: channels = 1; break; default: break; }
-                std::uint64_t bytes = channels;
-                switch (v[7]) { case ubyte: break; case 0x8363: case 0x8033: case 0x8034: case ushort: bytes = 2; break;
+                std::uint64_t pixel = channels;
+                switch (v[7]) { case ubyte: break; case 0x8363: case 0x8033: case 0x8034: pixel = 2; break;
                                     default: return "glTexImage2D pixel type is not supported"; }
-                if (v[7] == ubyte) bytes = channels;
-                if (bytes == 0) return "glTexImage2D format is not supported";
-                if (!read_bytes(c, v[8], bytes * v[3] * v[4], call.data)) return "glTexImage2D pixels are unreadable or too large";
+                if (pixel == 0) return "glTexImage2D format is not supported";
+                // Rows start on UNPACK_ALIGNMENT boundaries; the last row carries no padding.
+                const std::uint64_t row = pixel * v[3];
+                const std::uint64_t stride = (row + g.unpack_alignment_ - 1) / g.unpack_alignment_ * g.unpack_alignment_;
+                const std::uint64_t bytes = v[4] == 0 ? 0 : stride * (v[4] - 1) + row;
+                if (!read_bytes(c, v[8], bytes, call.data)) return "glTexImage2D pixels are unreadable or too large";
             }
             g.backend_.execute(call);
             return std::nullopt;
@@ -305,7 +316,7 @@ struct GlesBinder {
             if (v[4] != 0x1908 || v[5] != ubyte) return "glReadPixels supports RGBA/UNSIGNED_BYTE only";
             GlCall call;
             call.op = GlOp::read_pixels;
-            for (unsigned i = 0; i < 6; ++i) call.a[i] = c.arg(i);
+            for (unsigned i = 0; i < 6; ++i) call.a[i] = v[i];
             const std::uint64_t size = std::uint64_t{v[2]} * v[3] * 4;
             if (size > max_payload) return "glReadPixels area too large";
             auto r = g.backend_.execute(call);
@@ -316,7 +327,7 @@ struct GlesBinder {
         d.bind("glVertexAttribPointer", [&g](ImportCall& c) -> Err {
             std::array<std::uint32_t, 10> v{};
             if (!load_args(c, 6, v)) return "glVertexAttribPointer arguments are unreadable";
-            if (v[0] >= g.attribs_.size()) return "glVertexAttribPointer index out of range";
+            if (v[0] >= g.attribs_.size()) return std::nullopt;  // an unknown (-1) location: GL_INVALID_VALUE, no effect
             auto& a = g.attribs_[v[0]];
             a.size = v[1]; a.type = v[2]; a.normalized = v[3] != 0; a.stride = v[4];
             a.pointer = v[5]; a.buffer = g.array_buffer_;

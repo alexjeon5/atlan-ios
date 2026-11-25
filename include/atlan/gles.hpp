@@ -82,6 +82,7 @@ private:
     GlBackend& backend_;
     Config config_;
     std::uint32_t next_id_{1};
+    std::uint32_t unpack_alignment_{4};
     std::uint32_t array_buffer_{}, element_buffer_{};
     std::array<Attrib, 16> attribs_{};
     friend struct GlesBinder;

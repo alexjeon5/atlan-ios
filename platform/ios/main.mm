@@ -24,6 +24,7 @@
     atlan::shell::SurfaceState _surface;
     UIView* _metalView;
     std::unique_ptr<atlan::MetalGlBackend> _gl;
+    CAMetalLayer* _layer;
 }
 
 - (NSURL*)libraryURL {
@@ -128,6 +129,8 @@
     [self refresh];
 }
 
+- (CAMetalLayer*)metalLayer { return _layer; }
+
 - (void)importLibrary {
     auto* picker = [[UIDocumentPickerViewController alloc]
         initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
@@ -176,9 +179,22 @@
         CAMetalLayer* layer = [CAMetalLayer layer];
         layer.frame = _metalView.bounds;
         layer.drawableSize = CGSizeMake(size.width, size.height);
+        layer.contentsGravity = kCAGravityResizeAspect;
         [_metalView.layer addSublayer:layer];
+        _layer = layer;
         _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
+        _gl->set_log([weakSelf](const std::string& line) {
+            NSString* text = [NSString stringWithFormat:@"gl %s", line.c_str()];
+            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf append:text]; });
+        });
         config.gl_backend = _gl.get();
+        // The guest sizes its GL surface itself (MainActivity.setSurfaces); render at exactly that size and let the
+        // layer scale it to the view.
+        config.on_set_surfaces = [weakSelf](std::int32_t width, std::int32_t height) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (width > 0 && height > 0) [weakSelf metalLayer].drawableSize = CGSizeMake(width, height);
+            });
+        };
     }
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,

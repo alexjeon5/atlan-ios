@@ -292,8 +292,15 @@ void GuestSession::run() {
                 surfaces_ok = native("Java_com_atlan_AtlanUISurfaceView_createUISF", {surface}) &&
                               native("Java_com_atlan_AtlanGLSurfaceView_createGLSF", {}) &&
                               native("Java_com_atlan_AtlanUISurfaceView_changedUISF", {});
-                for (std::uint32_t i = 0; surfaces_ok && i < config_.render_frames && !stop_.load(); ++i)
+                for (std::uint32_t i = 0; surfaces_ok && i < config_.render_frames && !stop_.load(); ++i) {
                     surfaces_ok = native("Java_com_atlan_AtlanGLSurfaceView_renderGLSF", {});
+                    // GLSurfaceView swaps after onDrawFrame; the guest's renderGLSF never calls eglSwapBuffers itself.
+                    if (surfaces_ok) {
+                        GlCall swap;
+                        swap.op = GlOp::swap_buffers;
+                        (config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl)).execute(swap);
+                    }
+                }
                 if (!surfaces_ok) return;  // fail() already recorded the stop
             }
             // Run guest threads the library started, then deliver finished audio buffers.
