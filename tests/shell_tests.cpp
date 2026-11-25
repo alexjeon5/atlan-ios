@@ -2,6 +2,7 @@
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/guest_ini.hpp"
+#include "shell/log_filter.hpp"
 #include "shell/session.hpp"
 #include "shell/surface.hpp"
 #include <array>
@@ -142,6 +143,18 @@ int main() {
     try {
         scratch = fs::temp_directory_path() / ("atlan-shell-" + std::to_string(::getpid()));
         fs::create_directories(scratch);
+        {
+            atlan::shell::RepeatFilter filter(3);
+            std::string line = "fopen x failed", perf = "perf frames: 1";
+            check(filter.admit(line) && line == "fopen x failed", "first copy passes unchanged");
+            check(filter.admit(line), "second copy passes");
+            check(filter.admit(line) && line != "fopen x failed", "last copy is marked");
+            line = "fopen x failed";
+            check(!filter.admit(line) && !filter.admit(line), "further copies are hidden");
+            for (int i = 0; i < 10; ++i) check(filter.admit(perf) && perf == "perf frames: 1", "perf lines always pass");
+            std::string other = "fopen y failed";
+            check(filter.admit(other), "a different line passes");
+        }
         static_assert(atlan::shell::render_size(852, 393, 3).width == 2556);
         static_assert(atlan::shell::render_size(852, 393, 3, 0.5).height == 590);
         static_assert(atlan::shell::render_size(852, 393, 3, 0.01).width == 639);
