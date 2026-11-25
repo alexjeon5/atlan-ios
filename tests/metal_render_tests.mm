@@ -52,6 +52,14 @@ int main() {
     // clear + present
     gl.clear_color(0, 1, 0, 1);
     gl.op(GlOp::clear, {0x4100});
+    {   // glReadPixels mid-frame: RGBA rows from the bottom, and the frame continues afterwards
+        const auto pixels = gl.op(GlOp::read_pixels, {0, 0, W, H, 0x1908, 0x1401}).bytes;
+        check(pixels.size() == std::size_t{W} * H * 4 && std::to_integer<int>(pixels[0]) == 0 && std::to_integer<int>(pixels[1]) == 255 &&
+              std::to_integer<int>(pixels[2]) == 0 && std::to_integer<int>(pixels[3]) == 255, "glReadPixels returns the cleared color as RGBA");
+        const auto outside = gl.op(GlOp::read_pixels, {W - 1, H - 1, 2, 2, 0x1908, 0x1401}).bytes;
+        check(outside.size() == 16 && std::to_integer<int>(outside[1]) == 255 && std::to_integer<int>(outside[5]) == 0 && std::to_integer<int>(outside[13]) == 0,
+              "glReadPixels leaves pixels outside the framebuffer zero");
+    }
     check(frame() && near(at(img, 32, 32), 0, 255, 0), "clear color reaches the target");
 
     const auto prog = gl.program(flat_vs, flat_fs);
