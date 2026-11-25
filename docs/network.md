@@ -14,12 +14,14 @@
 
 ## 게스트 소켓
 
-게스트 네이티브 코드의 `socket`·`connect`·`send`·`recv`·`setsockopt`·`getsockopt`·`gethostbyname`·`close`는 `src/sockets.cpp`(`GuestSockets`)가 호스트 소켓으로 처리한다. ARM 리눅스 상수와 errno를 호스트 값으로 바꾼다. 소켓 디스크립터는 `0x400`부터라 파일 디스크립터와 겹치지 않고, 그 밖의 `close`는 원래 서비스로 넘긴다.
+게스트 네이티브 코드의 `socket`·`connect`·`send`·`recv`·`setsockopt`·`getsockopt`·`gethostbyname`과 소켓에 대한 `close`·`read`·`write`(게스트는 일부 요청을 `write`로 보낸다)는 `src/sockets.cpp`(`GuestSockets`)가 호스트 소켓으로 처리한다. ARM 리눅스 상수와 errno를 호스트 값으로 바꾼다. 소켓 디스크립터는 `0x400`부터라 파일 디스크립터와 겹치지 않고, 그 밖의 디스크립터는 원래 서비스로 넘긴다. 응답 해석에 쓰는 `sscanf`는 `src/scanf.cpp`에 있다.
 
 호스트 소켓은 항상 논블로킹이다. 연결 중이거나 받을 데이터가 없으면 호출한 게스트 스레드만 막고 5ms마다 다시 시도한다(`SO_RCVTIMEO`·`SO_SNDTIMEO`, connect는 최대 20초). 이름 조회는 호스트 스레드에서 하고 1분 캐시한다. IPv6 전용망(NAT64)에서는 connect 때 IPv4 주소를 시스템이 합성한 IPv6 주소로 바꿔 그 주소족의 소켓으로 다시 만든다.
 
 ## 로그
 
 연결마다 `net connect 주소:포트 ok|failed|timed out`, `net close … sent=N received=N`, 요청마다 `http GET|POST URL id=…`와 결과 줄이 남는다. URL은 쿼리 문자열을 뺀 형태만 남긴다(키·개인 값이 쿼리에 들어간다). iOS 앱은 이 줄들을 Documents의 `net.log`에도 쓴다.
+
+서버 확인(2026-11-26): 이용약관 동의 뒤 지도 화면에서 교통정보 탭을 누르면 날씨·VMS·실시간 교통(`rtti`) HTTP 요청과 클라우드 설정·지도 타일 소켓 연결(수백 KB)이 모두 성공한다.
 
 헤드리스 확인: `ATLAN_INTERACTIVE_SECONDS=60 build/atlan-session "" DATA_ROOT`에서 `java online state connected`와 첫 `http GET … -> HTTP 200` 줄이 나온다. `network-tests`는 루프백 서버로 소켓 서비스와 HTTP 클라이언트를 검사한다.

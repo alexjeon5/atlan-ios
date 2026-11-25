@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Guest sockets (atlan/sockets.hpp) and the plain HTTP client (shell/http_client.hpp) against loopback servers.
+// Guest sockets (atlan/sockets.hpp) and the plain HTTP client (shell/http_client.hpp) against loopback servers, and
+// sscanf (atlan/scanf.hpp), which the guest's online code is the first to use.
+#include "atlan/scanf.hpp"
 #include "atlan/sockets.hpp"
 #include "shell/http_client.hpp"
 #include <arpa/inet.h>
@@ -203,7 +205,7 @@ void socket_tests() {
     write_bytes(runtime, 0x13000, address);
     check(call(dispatcher, runtime, "connect", {fd, 0x13000, 16}) == 0, "connect");
     write_bytes(runtime, 0x14000, "GET / HTTP/1.1\r\n\r\n");
-    check(call(dispatcher, runtime, "send", {fd, 0x14000, 18, 0}) == 18, "send");
+    check(call(dispatcher, runtime, "write", {fd, 0x14000, 18}) == 18, "write on a socket sends");
     std::string received;
     while (true) {
         const auto n = call(dispatcher, runtime, "recv", {fd, 0x15000, 256, 0});
@@ -229,12 +231,42 @@ void socket_tests() {
     for (const auto& line : trace) traced_connect = traced_connect || line.rfind("net connect 127.0.0.1:", 0) == 0;
     check(traced_connect, "connections are traced");
 }
+
+void scanf_tests() {
+    atlan::Runtime runtime;
+    runtime.memory.map(0x10000, 0x30000, atlan::Permissions::read_write);
+    atlan::ImportDispatcher dispatcher;
+    atlan::install_scanf_services(dispatcher);
+    write_bytes(runtime, 0x11000, std::string("HTTP/1.1 200 OK") + '\0');
+    write_bytes(runtime, 0x11100, std::string("HTTP/%d.%d %d") + '\0');
+    check(call(dispatcher, runtime, "sscanf", {0x11000, 0x11100, 0x12000, 0x12004, 0x12008}) == 3 &&
+          read32(runtime, 0x12000) == 1 && read32(runtime, 0x12004) == 1 && read32(runtime, 0x12008) == 200, "sscanf integers");
+    write_bytes(runtime, 0x11000, std::string("  name ff -2.5 abc,def|x") + '\0');
+    write_bytes(runtime, 0x11100, std::string("%s %x %lf %[^,],%*[a-z]|%c%n") + '\0');
+    check(call(dispatcher, runtime, "sscanf", {0x11000, 0x11100, 0x13000, 0x12000, 0x12010, 0x13100, 0x12020, 0x12024}) == 5, "sscanf mixed count");
+    std::array<std::byte, 8> raw{};
+    (void)runtime.memory.read(0x12010, raw);
+    double value = 0;
+    std::memcpy(&value, raw.data(), 8);
+    std::array<std::byte, 5> name{}, set{};
+    (void)runtime.memory.read(0x13000, name);
+    (void)runtime.memory.read(0x13100, set);
+    check(read32(runtime, 0x12000) == 0xff && value == -2.5 && std::memcmp(name.data(), "name", 5) == 0 &&
+          std::memcmp(set.data(), "abc", 4) == 0 && (read32(runtime, 0x12020) & 0xff) == 'x' && read32(runtime, 0x12024) == 24,
+          "sscanf conversions");
+    write_bytes(runtime, 0x11000, std::string("   ") + '\0');
+    write_bytes(runtime, 0x11100, std::string("%d") + '\0');
+    check(call(dispatcher, runtime, "sscanf", {0x11000, 0x11100, 0x12000}) == 0xffffffffU, "sscanf on empty input is EOF");
+    write_bytes(runtime, 0x11000, std::string("x1") + '\0');
+    check(call(dispatcher, runtime, "sscanf", {0x11000, 0x11100, 0x12000}) == 0, "sscanf matching failure");
+}
 }
 
 int main() {
     try {
         http_tests();
         socket_tests();
+        scanf_tests();
     } catch (const std::exception& error) {
         std::cerr << "network tests failed after " << checks << " checks: " << error.what() << '\n';
         return 1;

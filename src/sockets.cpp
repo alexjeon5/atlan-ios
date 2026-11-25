@@ -124,7 +124,7 @@ struct GuestSockets::State {
     };
     std::mutex lookups_mutex;
     std::map<std::string, std::shared_ptr<Lookup>> lookups;
-    ImportService previous_close;
+    ImportService previous_close, previous_read, previous_write;
 
     void trace(const std::string& line) const { if (config.trace) config.trace("net " + line); }
     Socket* socket(std::uint32_t fd) {
@@ -226,6 +226,8 @@ std::size_t GuestSockets::open_sockets() const noexcept {
 void GuestSockets::install(ImportDispatcher& dispatcher) {
     auto state = state_;
     if (const auto* close = dispatcher.service("close")) state->previous_close = *close;
+    if (const auto* read = dispatcher.service("read")) state->previous_read = *read;
+    if (const auto* write = dispatcher.service("write")) state->previous_write = *write;
 
     // int socket(int domain, int type, int protocol)
     dispatcher.rebind("socket", [state](ImportCall& call) -> std::optional<std::string> {
@@ -348,14 +350,14 @@ void GuestSockets::install(ImportDispatcher& dispatcher) {
     });
 
     // ssize_t send(int fd, const void* data, size_t length, int flags)
-    dispatcher.rebind("send", [state](ImportCall& call) -> std::optional<std::string> {
+    const auto send_impl = [state](ImportCall& call, std::uint32_t guest_flags) -> std::optional<std::string> {
         const std::uint32_t fd = call.arg(0);
         auto* s = state->socket(fd);
         if (!s) return state->fail(call, e_badf, "send");
         const std::size_t length = std::min<std::size_t>(call.arg(2), max_io);
         std::vector<std::byte> data(length);
         if (length != 0 && !call.runtime().memory.read(call.arg(1), data)) return state->fail(call, 14, "send");
-        const bool dont_wait = s->guest_nonblocking || (call.arg(3) & linux_msg_dontwait) != 0;
+        const bool dont_wait = s->guest_nonblocking || (guest_flags & linux_msg_dontwait) != 0;
         while (true) {
             const auto n = ::send(s->host, data.data(), data.size(), send_flags);
             if (n >= 0) {
@@ -385,17 +387,17 @@ void GuestSockets::install(ImportDispatcher& dispatcher) {
             if (!State::host_wait(s->host, POLLOUT, s->send_deadline == Clock::time_point::max() ? std::nullopt : s->send_deadline))
                 return state->fail(call, e_again, "send");
         }
-    });
+    };
 
     // ssize_t recv(int fd, void* buffer, size_t length, int flags)
-    dispatcher.rebind("recv", [state](ImportCall& call) -> std::optional<std::string> {
+    const auto receive_impl = [state](ImportCall& call, std::uint32_t guest_flags) -> std::optional<std::string> {
         const std::uint32_t fd = call.arg(0);
         auto* s = state->socket(fd);
         if (!s) return state->fail(call, e_badf, "recv");
         const std::size_t length = std::min<std::size_t>(call.arg(2), max_io);
         int flags = 0;
-        if (call.arg(3) & linux_msg_peek) flags |= MSG_PEEK;
-        const bool dont_wait = s->guest_nonblocking || (call.arg(3) & linux_msg_dontwait) != 0;
+        if (guest_flags & linux_msg_peek) flags |= MSG_PEEK;
+        const bool dont_wait = s->guest_nonblocking || (guest_flags & linux_msg_dontwait) != 0;
         std::vector<std::byte> data(length);
         while (true) {
             const auto n = ::recv(s->host, data.data(), data.size(), flags);
@@ -426,6 +428,22 @@ void GuestSockets::install(ImportDispatcher& dispatcher) {
             if (!State::host_wait(s->host, POLLIN, s->receive_deadline == Clock::time_point::max() ? std::nullopt : s->receive_deadline))
                 return state->fail(call, e_again, "recv");
         }
+    };
+
+    dispatcher.rebind("send", [send_impl](ImportCall& call) { return send_impl(call, call.arg(3)); });
+    dispatcher.rebind("recv", [receive_impl](ImportCall& call) { return receive_impl(call, call.arg(3)); });
+    // write(fd, data, count) and read(fd, buffer, count) on a socket are send and recv without flags (the guest
+    // writes some requests that way); other descriptors go to the services bound before.
+    const auto in_range = [state](std::uint32_t fd) { return fd >= first_descriptor && fd - first_descriptor < state->sockets.size(); };
+    dispatcher.rebind("write", [state, send_impl, in_range](ImportCall& call) -> std::optional<std::string> {
+        if (in_range(call.arg(0))) return send_impl(call, 0);
+        if (state->previous_write) return state->previous_write(call);
+        return state->fail(call, e_badf, "write");
+    });
+    dispatcher.rebind("read", [state, receive_impl, in_range](ImportCall& call) -> std::optional<std::string> {
+        if (in_range(call.arg(0))) return receive_impl(call, 0);
+        if (state->previous_read) return state->previous_read(call);
+        return state->fail(call, e_badf, "read");
     });
 
     // int setsockopt(int fd, int level, int name, const void* value, socklen_t length)

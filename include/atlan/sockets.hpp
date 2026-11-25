@@ -12,8 +12,8 @@ namespace atlan {
 class GuestThreads;
 
 // BSD sockets for the guest, backed by host sockets: socket, connect, send, recv, setsockopt, getsockopt and
-// gethostbyname (IPv4, as bionic's), plus close for socket descriptors (other descriptors go to the close service
-// bound before install()). Constants and errno values are ARM Linux ones and are translated.
+// gethostbyname (IPv4, as bionic's), plus close, read and write for socket descriptors (other descriptors go to the
+// services bound before install()). Constants and errno values are ARM Linux ones and are translated.
 //
 // Host sockets are always non-blocking. A guest call that would block (connect in progress, recv/send without data
 // or room, a name lookup still running) blocks only the calling guest thread: it is retried every few milliseconds
@@ -35,7 +35,7 @@ public:
     ~GuestSockets();
     GuestSockets(const GuestSockets&) = delete;
     GuestSockets& operator=(const GuestSockets&) = delete;
-    // Binds the services (the data page is mapped on first use). Bind file descriptor services (close) first.
+    // Binds the services (the data page is mapped on first use). Bind file descriptor services (close, read, write) first.
     void install(ImportDispatcher& dispatcher);
     [[nodiscard]] std::size_t open_sockets() const noexcept;
 private:
