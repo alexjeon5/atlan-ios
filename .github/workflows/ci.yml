@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 name: Runtime
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]  # work branches are merged straight to main; their own pushes would only repeat the run
+  pull_request:
+# A newer push to the same ref replaces a run that is still queued or running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
