@@ -336,6 +336,11 @@
     _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
                                            self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
     config.surface = &_surface;
+    // The guest's own quit (its exit dialog): leave like the Android app does. The session thread has finished its
+    // work by then; a short delay lets the last log line and sound out.
+    config.on_guest_exit = [] {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ exit(0); });
+    };
     config.frame_interval_ms = 50;  // 20 frames per second at most, for heat
     _guestSurface.store(0);
     (void)_input.drain();

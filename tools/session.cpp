@@ -72,7 +72,8 @@ int main(int argc, char** argv) {
     atlan::shell::GuestSession session(config, [](const std::string& line) { std::cout << line << std::endl; });
     session.start();
     if (interactive) {
-        // ATLAN_TAPS="MS:X,Y;MS:X,Y;...": taps (down, up 80 ms later) at those times after the start, in guest pixels.
+        // ATLAN_TAPS="MS:X,Y;MS:X,Y;...": taps (down, up ATLAN_TAP_HOLD_MS later, default 80) at those times after the start, in guest pixels.
+        const long hold_ms = std::getenv("ATLAN_TAP_HOLD_MS") ? std::atol(std::getenv("ATLAN_TAP_HOLD_MS")) : 80;  // down to up
         struct Tap { long ms; float x, y; };
         std::vector<Tap> taps;
         if (const char* list = std::getenv("ATLAN_TAPS")) {
@@ -92,8 +93,8 @@ int main(int argc, char** argv) {
             if (next_tap < taps.size() && elapsed >= taps[next_tap].ms) {
                 const auto& tap = taps[next_tap++];
                 input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed)});
-                std::this_thread::sleep_for(std::chrono::milliseconds(80));
-                input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed + 80)});
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+                input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed + hold_ms)});
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
