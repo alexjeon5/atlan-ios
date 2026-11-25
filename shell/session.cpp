@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
-#include "shell/guest_ini.hpp"
-#include "shell/app_package.hpp"
-#include "shell/java_services.hpp"
+#include "shell/app_adapter.hpp"
 #include <iterator>
 #include <chrono>
 #include <algorithm>
@@ -84,6 +82,19 @@ std::string describe_stop(const std::string& label, const CallOutcome& outcome) 
                  " access=" + std::to_string(static_cast<int>(outcome.cpu.access));
     return line;
 }
+// The JNI export name of a native method (Java_<class>_<method>, '_' escaped as "_1").
+std::string jni_symbol(std::string_view class_name, std::string_view name) {
+    std::string symbol = "Java_";
+    for (char c : class_name) { if (c == '/') symbol += '_'; else if (c == '_') symbol += "_1"; else symbol += c; }
+    symbol += '_';
+    for (char c : name) { if (c == '_') symbol += "_1"; else symbol += c; }
+    return symbol;
+}
+// The method part of a JNI export name, for log lines.
+std::string method_label(std::string_view symbol, std::string_view fallback) {
+    if (symbol.empty()) return std::string(fallback);
+    return std::string(symbol.substr(symbol.rfind('_') + 1));
+}
 std::string describe_state(Runtime& runtime, const ImportDispatcher& dispatcher) {
     std::string out = "state pc=0x" + hex(runtime.pc()) + " lr=0x" + hex(runtime.cpu.registers[14]) +
                       " sp=0x" + hex(runtime.cpu.registers[13]);
@@ -132,6 +143,8 @@ void GuestSession::join() noexcept {
 
 void GuestSession::run() {
     auto fail = [this](const std::string& why) { log_(why); state_.store(SessionState::failed); };
+    AppAdapter bare_adapter;  // no app: a bare ELF image, its constructors and JNI_OnLoad
+    AppAdapter& adapter = config_.adapter ? *config_.adapter : bare_adapter;
     try {
         elf::Options options;
         options.unresolved = elf::UnresolvedImports::diagnostic_traps;
@@ -142,14 +155,10 @@ void GuestSession::run() {
             if (const auto data = BionicData::symbol(name)) return *data;
             return std::nullopt;
         };
-        const std::string library_path = config_.library_path.empty() ? find_package(config_.data_root) : config_.library_path;
-        if (library_path.empty()) throw std::runtime_error("no guest library or package (ATLAN/APP/atlan.dat, *.apk)");
+        const std::string library_path = config_.library_path.empty() ? adapter.find_library(config_.data_root) : config_.library_path;
+        if (library_path.empty()) throw std::runtime_error(adapter.missing_library());
         auto library = read_library(library_path);
-        if (is_package(library)) {
-            auto package = open_package(library);
-            log_("package " + package.entry + (package.version.empty() ? "" : " version " + package.version));
-            library = std::move(package.library);
-        }
+        adapter.unpack_library(library, log_);
         auto image = elf::load(library, options);
         log_("loaded mapped_bytes=" + std::to_string(image.mapped_bytes) +
              " exports=" + std::to_string(image.exports.size()) +
@@ -197,36 +206,13 @@ void GuestSession::run() {
             log_("property " + name + (known ? "" : " (unset)"));
         });
         std::optional<GuestStdio> stdio;
-        bool use_connection_manager = true;  // system.ini USECONNECTIONMANAGER (the stock value is 1)
         if (!config_.data_root.empty()) {
             // The guest polls some files that never exist; a failed open is logged the first time only.
             stdio.emplace(config_.data_root, guard_page + 0x200, [this, failed = std::set<std::string>()](const std::string& path, const std::string& mode, bool ok) mutable {
                 if (!ok && !failed.insert(path + '\n' + mode).second) return;
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
-            // The guest's settings file names its folders by absolute Android paths, which differ per device and may
-            // be edited by the user. Whatever ROOTPATH says is the ATLAN folder beneath the data root; any other
-            // absolute path through a folder named "atlan" (any case) lands in that same folder.
-            const char* settings_file = "ATLAN/APP/system.ini";
-            std::string settings;
-            if (std::ifstream input(stdio->host_path(settings_file), std::ios::binary); input)
-                settings.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-            if (const auto root = ini_value(settings, "ROOTPATH"); root && root->size() > 1 && root->front() == '/') {
-                stdio->add_alias(*root, "ATLAN");
-                log_("data root " + *root);
-            }
-            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH of the stock settings: the map data folder
-            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // stock NANDPATH/CONFIGPATH/SDIPATH: app-written state
-            stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
-            stdio->add_anchor("atlan", "ATLAN");
-            // The guest reads a copy of the settings file with one entry controlled here.
-            // CLOUDMAPPATH: where downloaded map tiles would be kept. The stock value names a folder that does not
-            // exist, which keeps the downloader off; a missing or writable value turns it on, and its map read thread
-            // is never started here, so the first tile request would stop the guest. Always serve the stock value.
-            stdio->add_read_filter(settings_file, [](std::string text) {
-                return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
-            });
-            use_connection_manager = ini_number(settings, "USECONNECTIONMANAGER").value_or(1) != 0;
+            adapter.configure_files(*stdio, log_);  // the app's folder layout and settings
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
@@ -265,7 +251,8 @@ void GuestSession::run() {
         auto initializers = std::move(image.initializers);
         const auto* on_load = image.find("JNI_OnLoad");
         const std::uint32_t on_load_address = on_load && on_load->type == 2 ? on_load->address : 0;
-        const auto* native_init = image.find("Java_com_atlan_MainActivity_nativeInit");
+        const AppStartup startup = adapter.startup();
+        const auto* native_init = startup.init.empty() ? nullptr : image.find(startup.init);
         const std::uint32_t native_init_address = native_init && native_init->type == 2 ? native_init->address : 0;
         runtime.memory = std::move(image.memory);
         runtime.memory.map(guard_page, Memory::page_size, Permissions::read_write);
@@ -323,89 +310,53 @@ void GuestSession::run() {
         log_("initializers_completed=" + std::to_string(initializers.size()));
         if (on_load_address != 0 && !stop_.load()) {
             JavaBootstrap java(runtime, dispatcher, JavaBootstrap::Config{});
-            // Host side of the Java callbacks the guest invokes. The UI layer does not exist yet, so the call is
-            // logged with its arguments and succeeds without effect (a void method has no result to invent).
-            java.register_method("com/atlan/MainActivity", "setSurfaces", "(II)V",
-                                 [this](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
-                std::string args;
-                for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
-                log_("java MainActivity.setSurfaces(" + args + ")");
-                if (config_.surface) {
-                    const auto size = config_.surface->get();
-                    log_("host surface " + std::to_string(size.width) + "x" + std::to_string(size.height));
+            // What the adapter may use while the guest runs: guest calls with this session's stop reporting.
+            struct Host final : AppHost {
+                GuestSession& session;
+                Runtime& runtime;
+                ImportDispatcher& dispatcher;
+                JavaBootstrap& bootstrap;
+                const elf::Image& image;
+                const std::function<void(const std::string&)>& fail;
+                Host(GuestSession& s, Runtime& r, ImportDispatcher& d, JavaBootstrap& j, const elf::Image& i,
+                     const std::function<void(const std::string&)>& f)
+                    : session(s), runtime(r), dispatcher(d), bootstrap(j), image(i), fail(f) {}
+                JavaBootstrap& java() override { return bootstrap; }
+                std::uint32_t function(std::string_view symbol) const override {
+                    const auto* sym = image.find(symbol);
+                    return sym && sym->type == 2 ? sym->address : 0;
                 }
-                if (config_.on_set_surfaces && m.args.size() >= 2)
-                    config_.on_set_surfaces(static_cast<std::int32_t>(m.args[0]), static_cast<std::int32_t>(m.args[1]));
-                m.result = 0;
-                return std::nullopt;
-            });
-            // AtlanGLThread.callBackGLThread(): the guest's GL thread asks for a frame. The Java side answers
-            //   if (isStateReady()) { if (!isGLInit()) setState(2); else { setState(3); requestRender(); } }
-            // with the three natives below; the request is served by the interactive loop.
-            bool render_requested = false;
-            std::uint64_t render_requests = 0;
-            const auto gl_thread_native = [&](const char* name) -> std::uint32_t {
-                const auto* sym = image.find(std::string("Java_com_atlan_AtlanGLThread_") + name);
-                return sym && sym->type == 2 ? sym->address : 0;
-            };
-            const std::uint32_t is_state_ready = gl_thread_native("isStateReady"), is_gl_init = gl_thread_native("isGLInit"),
-                                set_state = gl_thread_native("setState");
-            const bool on_demand = config_.render_on_demand && is_state_ready != 0 && is_gl_init != 0 && set_state != 0;
-            if (on_demand) {
-                java.register_method("com/atlan/AtlanGLThread", "callBackGLThread", "()V",
-                                     [&](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
-                    const auto cls = java.class_handle("com/atlan/AtlanGLThread");
-                    const auto call_native = [&](std::uint32_t address, std::optional<std::uint32_t> argument, std::uint32_t& result) -> std::optional<std::string> {
-                        std::vector<std::uint32_t> words{java.env(), cls};
-                        if (argument) words.push_back(*argument);
-                        const auto outcome = dispatcher.call_back(runtime, address, words);
-                        if (outcome.stop != Stop::returned) return "callBackGLThread: a GL thread native did not return" + (outcome.message.empty() ? std::string() : ": " + outcome.message);
-                        result = static_cast<std::uint32_t>(runtime.cpu.registers[0]);
+                std::uint32_t native_method(std::string_view cls, std::string_view name, std::string_view signature) const override {
+                    for (const auto& m : bootstrap.native_methods())
+                        if (m.class_name == cls && m.name == name && m.signature == signature) return m.address;
+                    return function(jni_symbol(cls, name));
+                }
+                std::optional<std::uint32_t> call(const std::string& label, std::uint32_t address, std::span<const std::uint32_t> words) override {
+                    const auto r = dispatcher.call(runtime, address, words, stack_base + stack_bytes, return_sentinel,
+                                                   session.config_.surface_call_budget);
+                    if (r.stop != Stop::returned) {
+                        session.log_(describe_state(runtime, dispatcher));
+                        fail(describe_stop(label, r));
                         return std::nullopt;
-                    };
-                    std::uint32_t ready = 0, initialised = 0, ignored = 0;
-                    if (auto error = call_native(is_state_ready, std::nullopt, ready)) return error;
-                    if ((ready & 0xff) != 0) {
-                        if (auto error = call_native(is_gl_init, std::nullopt, initialised)) return error;
-                        if (auto error = call_native(set_state, (initialised & 0xff) != 0 ? 3u : 2u, ignored)) return error;
-                        if ((initialised & 0xff) != 0) { render_requested = true; ++render_requests; }
                     }
-                    m.result = 0;
-                    return std::nullopt;
-                });
-            }
-            // Other void UI callbacks the guest raises: recorded in the log, no host effect yet.
-            struct Callback { const char* cls; const char* name; const char* signature; };
-            // Network-related Java methods (IsConnected, SendMsgFromAtlan, AtlanNetService) and the replies they queue.
-            JavaServices::Config java_services_config;
-            java_services_config.http = config_.http;
-            java_services_config.network_available = config_.network_available;
-            java_services_config.use_connection_manager = use_connection_manager;
-            java_services_config.log = log_;
-            JavaServices java_services(java_services_config);
-            java_services.install(java, [&java, &image](const std::string& cls, const std::string& name, const std::string& signature) -> std::uint32_t {
-                for (const auto& m : java.native_methods())
-                    if (m.class_name == cls && m.name == name && m.signature == signature) return m.address;
-                std::string symbol = "Java_";
-                for (char c : cls) { if (c == '/') symbol += '_'; else if (c == '_') symbol += "_1"; else symbol += c; }
-                symbol += '_';
-                for (char c : name) { if (c == '_') symbol += "_1"; else symbol += c; }
-                const auto* sym = image.find(symbol);
-                return sym && sym->type == 2 ? sym->address : 0;
-            });
-            for (const Callback& cb : {Callback{"com/atlan/MainActivity", "JniArSettingData", "(IIII)V"},
-                                       Callback{"com/atlan/MainActivity", "SendMsgFromTPEGD", "(III[B)V"},
-                                       Callback{"com/atlan/AtlanGLThread", "callBackGLThread", "()V"}}) {
-                if (on_demand && std::string_view(cb.name) == "callBackGLThread") continue;
-                java.register_method(cb.cls, cb.name, cb.signature,
-                                     [this, logged = std::set<std::string>(), label = std::string(cb.cls).substr(std::string(cb.cls).rfind('/') + 1) + "." + cb.name](JavaBootstrap::MethodCall& m) mutable -> std::optional<std::string> {
-                    std::string args;
-                    for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
-                    if (logged.insert(label + "(" + args + ")").second) log_("java " + label + "(" + args + ")");  // periodic; once each
-                    m.result = 0;
-                    return std::nullopt;
-                });
-            }
+                    return static_cast<std::uint32_t>(runtime.cpu.registers[0]);
+                }
+                std::optional<std::uint32_t> call_nested(std::uint32_t address, std::span<const std::uint32_t> words, std::string& message) override {
+                    const auto outcome = dispatcher.call_back(runtime, address, words);
+                    if (outcome.stop != Stop::returned) { message = outcome.message; return std::nullopt; }
+                    return static_cast<std::uint32_t>(runtime.cpu.registers[0]);
+                }
+                const SurfaceState* surface() const override { return session.config_.surface; }
+                const SessionLog& log() const override { return session.log_; }
+            };
+            const std::function<void(const std::string&)> fail_session = fail;
+            Host host(*this, runtime, dispatcher, java, image, fail_session);
+            adapter.install_java(host, config_.render_on_demand);
+            struct Uninstall {
+                AppAdapter& adapter;
+                ~Uninstall() { adapter.uninstall_java(); }
+            } uninstall{adapter};
+            const bool on_demand = adapter.frames_on_request();
             const std::array<std::uint32_t, 2> args{java.vm(), 0};
             const auto outcome = dispatcher.call(runtime, on_load_address, args, stack_base + stack_bytes,
                                                  return_sentinel, config_.initializer_budget);
@@ -414,13 +365,13 @@ void GuestSession::run() {
             if (outcome.stop != Stop::returned) { fail(describe_stop("JNI_OnLoad", outcome)); return; }
             log_("JNI_OnLoad returned 0x" + hex(runtime.cpu.registers[0]));
             if (native_init_address != 0) {
-                const std::array<std::uint32_t, 2> init_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
+                const std::array<std::uint32_t, 2> init_args{java.env(), java.new_object(java.class_handle(startup.receiver_class))};
                 const auto started = dispatcher.call(runtime, native_init_address, init_args, stack_base + stack_bytes,
                                                      return_sentinel, config_.native_init_budget);
-                if (started.stop != Stop::returned) { fail(describe_stop("nativeInit", started)); return; }
-                log_("nativeInit returned 0x" + hex(runtime.cpu.registers[0]));
+                if (started.stop != Stop::returned) { fail(describe_stop(method_label(startup.init, "init"), started)); return; }
+                log_(method_label(startup.init, "init") + " returned 0x" + hex(runtime.cpu.registers[0]));
             } else {
-                log_("nativeInit not exported");
+                log_(method_label(startup.init, "init") + " not exported");
             }
             // Block cache coverage since the start and the busiest imports since the last reset_import_counts().
             const auto perf_details = [&]() -> std::string {
@@ -449,10 +400,10 @@ void GuestSession::run() {
                 return line;
             };
             // Surface and render entry points (plain Java_ exports: (env, this[, surface]) -> int).
-            const auto native = [&](const char* name, std::vector<std::uint32_t> extra) -> bool {
+            const auto native = [&](const std::string& name, std::vector<std::uint32_t> extra) -> bool {
                 const auto* sym = image.find(name);
-                if (!sym || sym->type != 2) { log_(std::string(name) + " not exported"); return false; }
-                std::vector<std::uint32_t> call_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
+                if (!sym || sym->type != 2) { log_(name + " not exported"); return false; }
+                std::vector<std::uint32_t> call_args{java.env(), java.new_object(java.class_handle(startup.receiver_class))};
                 call_args.insert(call_args.end(), extra.begin(), extra.end());
                 dispatcher.reset_import_counts();
                 const auto perf_start = std::chrono::steady_clock::now();
@@ -463,7 +414,7 @@ void GuestSession::run() {
                     log_(std::string("perf ") + name + ": " + std::to_string(r.retired) + " instructions, " + std::to_string(seconds) +
                          " s, " + std::to_string(seconds > 0 ? r.retired / seconds / 1e6 : 0.0) + " MIPS" + perf_details());
                 }
-                if (const std::string_view full(name); !full.ends_with("renderGLSF"))  // the first frames go into one file
+                if (const std::string_view full(name); full != startup.render)  // the first frames go into one file
                     write_profile(std::string(full.substr(full.rfind('_') + 1)));
                 if (r.stop != Stop::returned) {
                     log_(describe_state(runtime, dispatcher));  // where it stopped: pc, lr, sp, r0-r3, busiest imports
@@ -484,32 +435,13 @@ void GuestSession::run() {
                 BoundNative out;
                 for (const auto& m : java.native_methods())
                     if (m.class_name == b.class_name && m.name == b.name && m.signature == b.signature) out.address = m.address;
-                if (out.address == 0) {
-                    std::string symbol = "Java_";
-                    for (char c : b.class_name) { if (c == '/') symbol += '_'; else if (c == '_') symbol += "_1"; else symbol += c; }
-                    symbol += '_';
-                    for (char c : b.name) { if (c == '_') symbol += "_1"; else symbol += c; }
-                    if (const auto* sym = image.find(symbol); sym && sym->type == 2) out.address = sym->address;
-                }
+                if (out.address == 0) out.address = host.function(jni_symbol(b.class_name, b.name));
                 if (out.address != 0) out.receiver = java.new_object(java.class_handle(b.class_name));
                 else note("input: " + b.class_name + "." + b.name + b.signature + " is neither registered nor exported");
                 return bound[&b] = out;
             };
-            // Replies of the Java side (online state, finished HTTP requests), on the guest thread like input.
-            const auto deliver_java = [&]() -> bool {
-                for (const auto& due : java_services.take_due()) {
-                    const auto r = dispatcher.call(runtime, due.address, due.words, stack_base + stack_bytes,
-                                                   return_sentinel, config_.surface_call_budget);
-                    if (r.stop != Stop::returned) {
-                        log_(describe_state(runtime, dispatcher));
-                        fail(describe_stop("java " + due.what, r));
-                        return false;
-                    }
-                }
-                return true;
-            };
             const auto deliver_input = [&]() -> bool {
-                if (!deliver_java()) return false;
+                if (!adapter.deliver(host)) return false;  // what the app's Java side delivers (replies, state)
                 if (!config_.input) return true;
                 for (const auto& event : config_.input->drain()) {
                     const bool touch = std::holds_alternative<TouchEvent>(event);
@@ -543,13 +475,16 @@ void GuestSession::run() {
             bool surfaces_ok = native_init_address != 0;
             if (surfaces_ok) {
                 const auto surface = java.new_object(java.class_handle("android/view/Surface"));
-                surfaces_ok = native("Java_com_atlan_AtlanUISurfaceView_createUISF", {surface}) &&
-                              native("Java_com_atlan_AtlanGLSurfaceView_createGLSF", {}) &&
-                              native("Java_com_atlan_AtlanUISurfaceView_changedUISF", {});
+                for (const auto& call : startup.surface_calls) {
+                    if (!native(call.symbol, call.surface_argument ? std::vector<std::uint32_t>{surface} : std::vector<std::uint32_t>{})) {
+                        surfaces_ok = false;
+                        break;
+                    }
+                }
                 for (std::uint32_t i = 0; surfaces_ok && i < config_.render_frames && !stop_.load(); ++i) {
                     if (!deliver_input()) return;
-                    surfaces_ok = native("Java_com_atlan_AtlanGLSurfaceView_renderGLSF", {});
-                    // GLSurfaceView swaps after onDrawFrame; the guest's renderGLSF never calls eglSwapBuffers itself.
+                    surfaces_ok = native(startup.render, {});
+                    // GLSurfaceView swaps after onDrawFrame; the guest's frame call never calls eglSwapBuffers itself.
                     if (surfaces_ok) {
                         GlCall swap;
                         swap.op = GlOp::swap_buffers;
@@ -573,9 +508,9 @@ void GuestSession::run() {
             // Interactive phase: input, one frame, guest threads and audio, repeated until stopped. Per-frame results
             // are not logged; a guest stop is reported like in the steps above.
             if (config_.interactive && surfaces_ok) {
-                const auto* render = image.find("Java_com_atlan_AtlanGLSurfaceView_renderGLSF");
+                const auto* render = startup.render.empty() ? nullptr : image.find(startup.render);
                 if (!render || render->type != 2) { state_.store(SessionState::finished); return; }
-                const std::array<std::uint32_t, 2> render_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
+                const std::array<std::uint32_t, 2> render_args{java.env(), java.new_object(java.class_handle(startup.receiver_class))};
                 log_("interactive");
                 // Every `report_seconds` one line says where the time of the frames since the last line went.
                 constexpr double report_seconds = 10.0;
@@ -595,7 +530,7 @@ void GuestSession::run() {
                 // request for a frame is served as soon as the interval allows.
                 constexpr auto longest_nap = std::chrono::milliseconds(8);   // bounds the delay of host input
                 constexpr auto shortest_nap = std::chrono::milliseconds(2);  // a guest polling faster does not spin the host
-                const auto* program_exit = image.find("Java_com_atlan_MainActivity_nativeIsProgramExit");
+                const auto* program_exit = startup.exit_poll.empty() ? nullptr : image.find(startup.exit_poll);
                 auto next_exit_check = std::chrono::steady_clock::now() + std::chrono::seconds(1);
                 bool guest_exit = false;
                 while (!stop_.load()) {
@@ -607,41 +542,24 @@ void GuestSession::run() {
                                                            return_sentinel, config_.surface_call_budget);
                         if (asked.stop != Stop::returned) {
                             log_(describe_state(runtime, dispatcher));
-                            fail(describe_stop("nativeIsProgramExit", asked));
+                            fail(describe_stop(method_label(startup.exit_poll, "exit poll"), asked));
                             return;
                         }
                         if ((runtime.cpu.registers[0] & 0xff) == 1) { guest_exit = true; break; }
                     }
                     CallOutcome frame;
-                    bool draw = frame_start >= next_draw && (!on_demand || render_requested);
+                    bool draw = frame_start >= next_draw && (!on_demand || adapter.frame_requested());
                     if (!draw && frame_start >= next_draw &&
                         seconds_since(last_draw) * 1000.0 >= static_cast<double>(config_.idle_redraw_ms)) {
                         // No request for a while: ask the guest the same question its callback would have. A frame
                         // drawn while it is not ready is only the clear colour, so that case draws nothing.
                         last_draw = frame_start;
-                        const auto cls = java.class_handle("com/atlan/AtlanGLThread");
-                        const auto ask = [&](std::uint32_t address, std::optional<std::uint32_t> argument) -> std::optional<std::uint32_t> {
-                            std::vector<std::uint32_t> words{java.env(), cls};
-                            if (argument) words.push_back(*argument);
-                            const auto outcome = dispatcher.call(runtime, address, words, stack_base + stack_bytes,
-                                                                 return_sentinel, config_.surface_call_budget);
-                            if (outcome.stop != Stop::returned) {
-                                log_(describe_state(runtime, dispatcher));
-                                fail(describe_stop("GL thread state", outcome));
-                                return std::nullopt;
-                            }
-                            return static_cast<std::uint32_t>(runtime.cpu.registers[0]);
-                        };
-                        const auto ready = ask(is_state_ready, std::nullopt);
+                        const auto ready = adapter.frame_ready(host);
                         if (!ready) return;
-                        if ((*ready & 0xff) != 0) {
-                            const auto initialised = ask(is_gl_init, std::nullopt);
-                            if (!initialised || !ask(set_state, (*initialised & 0xff) != 0 ? 3u : 2u)) return;
-                            draw = (*initialised & 0xff) != 0;
-                        }
+                        draw = *ready;
                     }
                     if (draw) {
-                        render_requested = false;
+                        adapter.frame_drawn();
                         last_draw = frame_start;
                         next_draw = frame_start + std::chrono::milliseconds(config_.frame_interval_ms);
                         ++drawn;
@@ -649,7 +567,7 @@ void GuestSession::run() {
                                                 return_sentinel, config_.surface_call_budget);
                         if (frame.stop != Stop::returned) {
                             log_(describe_state(runtime, dispatcher));
-                            fail(describe_stop("renderGLSF", frame));
+                            fail(describe_stop(method_label(startup.render, "render"), frame));
                             return;
                         }
                         GlCall swap;
@@ -676,7 +594,7 @@ void GuestSession::run() {
                     if (background.stop != Stop::budget_exhausted) {
                         auto wake = idle_start + longest_nap;
                         if (guest_timer) wake = std::min(wake, std::max(idle_start + shortest_nap, *guest_timer));
-                        if (!on_demand || render_requested) wake = std::min(wake, next_draw);
+                        if (!on_demand || adapter.frame_requested()) wake = std::min(wake, next_draw);
                         std::this_thread::sleep_until(wake);
                     }
                     idle_seconds += seconds_since(idle_start);
@@ -690,7 +608,7 @@ void GuestSession::run() {
                         const double frames_drawn = static_cast<double>(std::max<std::uint64_t>(drawn, 1));
                         const auto share = [&](double total) { return std::to_string(total * 100.0 / elapsed); };
                         std::string line = "perf frames: " + std::to_string(static_cast<double>(drawn) / elapsed) + " fps (" +
-                            std::to_string(drawn) + " drawn, " + std::to_string(render_requests) + " requests, " +
+                            std::to_string(drawn) + " drawn, " + std::to_string(adapter.take_frame_request_count()) + " requests, " +
                             std::to_string(frames) + " wakeups); per drawn frame render " +
                             std::to_string(render_seconds * 1000.0 / frames_drawn) + " ms (worst " +
                             std::to_string(render_worst * 1000.0) + "), " +
@@ -704,7 +622,7 @@ void GuestSession::run() {
                         write_profile("frames");
                         dispatcher.reset_import_counts();
                         report_start = std::chrono::steady_clock::now();
-                        frames = render_instructions = pump_instructions = drawn = render_requests = 0;
+                        frames = render_instructions = pump_instructions = drawn = 0;
                         render_seconds = render_worst = pump_seconds = audio_seconds = idle_seconds = 0;
                     }
                 }

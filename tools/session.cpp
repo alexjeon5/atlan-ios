@@ -4,6 +4,7 @@
 #include "atlan/gl_context.hpp"
 #include "atlan/gl_recorder.hpp"
 #include "shell/session.hpp"
+#include "adapters/atlan/atlan_adapter.hpp"
 #include "preview_sink.hpp"
 #include <chrono>
 #include <cstdio>
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
     context.set_log([](const std::string& line) { std::cout << "gl: " << line << std::endl; });
     const bool raw = std::getenv("ATLAN_RAW_GL") != nullptr;
     atlan::shell::SessionConfig config;
+    config.adapter = std::make_shared<atlan::shell::AtlanAdapter>();
     config.library_path = argv[1];
     config.data_root = argv[2];
     if (raw) config.gl_backend = &recorder;

@@ -6,6 +6,7 @@
 #include "shell/log_filter.hpp"
 #include "shell/session.hpp"
 #include "shell/surface.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <filesystem>
@@ -78,6 +79,39 @@ std::vector<std::byte> fixture() {
     return data;
 }
 
+// A synthetic app for the adapter path: exports JNI_OnLoad and four entry points (init, surf, draw, quit) that only
+// return a constant. quit returns 1, so an interactive session ends at its first exit poll.
+std::vector<std::byte> app_fixture() {
+    std::vector<std::byte> data(0x1200);
+    put32(data,0,0x464c457f); data[4]=std::byte{1};data[5]=std::byte{1};data[6]=std::byte{1};
+    put16(data,16,3);put16(data,18,40);put32(data,20,1);put32(data,28,52);
+    put32(data,36,0x05000000);put16(data,40,52);put16(data,42,32);put16(data,44,3);
+    const auto ph = [&](unsigned i, std::uint32_t type, std::uint32_t offset, std::uint32_t address,
+                        std::uint32_t size, std::uint32_t flags, std::uint32_t align) {
+        const auto at = 52 + i * 32;
+        put32(data,at,type);put32(data,at+4,offset);put32(data,at+8,address);
+        put32(data,at+16,size);put32(data,at+20,size);put32(data,at+24,flags);put32(data,at+28,align);
+    };
+    ph(0,1,0,0,0x800,5,4096);
+    ph(1,1,0x1100,0x2100,0x100,6,4096);
+    ph(2,2,0x1100,0x2100,0x30,6,4);
+    const std::array<std::pair<std::uint32_t,std::uint32_t>,6> tags{{{5,0x200},{10,0x40},{6,0x280},{11,16},{4,0x300},{0,0}}};
+    for (std::size_t i=0;i<tags.size();++i) { put32(data,0x1100+i*8,tags[i].first);put32(data,0x1104+i*8,tags[i].second); }
+    constexpr char names[]="\0JNI_OnLoad\0init\0surf\0draw\0quit\0";
+    for (std::size_t i=0;i<sizeof(names);++i) data[0x200+i]=std::byte(names[i]);
+    const std::array<std::pair<unsigned, std::uint32_t>, 5> functions{{{1,6},{12,0},{17,0},{22,1},{27,1}}};  // name, r0
+    for (std::size_t i=0;i<functions.size();++i) {
+        const auto code = static_cast<std::uint32_t>(0x400 + i * 8);
+        put32(data,code,0xe3a00000 | functions[i].second);  // mov r0,#value
+        put32(data,code+4,0xe12fff1e);                     // bx lr
+        const auto at = 0x280 + (i + 1) * 16;
+        put32(data,at,functions[i].first);put32(data,at+4,code);put32(data,at+8,8);
+        data[at+12]=std::byte{0x12};put16(data,at+14,1);
+    }
+    put32(data,0x300,1);put32(data,0x304,6); // nbucket, nchain
+    return data;
+}
+
 namespace fs = std::filesystem;
 fs::path scratch;
 std::string write(const char* name, std::span<const std::byte> bytes) {
@@ -138,6 +172,57 @@ void sessions() {
     check(run(write("ok.so", image), good) == SessionState::finished, "synthetic library completes");
     check(good.lines.size() == 2 && good.lines.back().starts_with("initializers_completed="),
           "completion is logged");
+}
+// The session drives an app only through its adapter: entry points, Java phase and deliveries.
+struct TestAdapter final : atlan::shell::AppAdapter {
+    std::string library;
+    unsigned installs{}, uninstalls{}, deliveries{}, unpacks{};
+    bool asked_for_requests{};
+    std::string find_library(const std::string&) const override { return library; }
+    void unpack_library(std::vector<std::byte>&, const atlan::shell::SessionLog&) override { ++unpacks; }
+    void install_java(atlan::shell::AppHost& host, bool frame_requests) override {
+        ++installs;
+        asked_for_requests = frame_requests;
+        check(host.function("draw") != 0 && host.function("missing") == 0, "host finds exported functions");
+    }
+    void uninstall_java() override { ++uninstalls; }
+    atlan::shell::AppStartup startup() const override {
+        atlan::shell::AppStartup startup;
+        startup.receiver_class = "test/App";
+        startup.init = "init";
+        startup.surface_calls = {{"surf", true}};
+        startup.render = "draw";
+        startup.exit_poll = "quit";
+        return startup;
+    }
+    bool deliver(atlan::shell::AppHost&) override { ++deliveries; return true; }
+};
+void adapter_sessions() {
+    Collector collector;
+    auto adapter = std::make_shared<TestAdapter>();
+    adapter->library = write("app.so", app_fixture());
+    atlan::shell::SessionConfig config;
+    config.adapter = adapter;  // no library_path: the adapter finds it
+    config.render_frames = 2;
+    config.interactive = true;
+    config.render_on_demand = true;
+    config.frame_interval_ms = 5;
+    bool exited = false;
+    config.on_guest_exit = [&exited] { exited = true; };
+    atlan::shell::GuestSession session(config, collector.log());
+    check(session.start(), "adapter session starts");
+    session.join();
+    check(session.state() == atlan::shell::SessionState::finished, "adapter session finishes");
+    const auto has = [&](const std::string& line) {
+        return std::find(collector.lines.begin(), collector.lines.end(), line) != collector.lines.end();
+    };
+    check(has("JNI_OnLoad returned 0x6") && has("init returned 0x0") && has("surf returned 0x0"), "startup runs the adapter's entry points");
+    check(std::count(collector.lines.begin(), collector.lines.end(), std::string("draw returned 0x1")) == 2, "first frames use the adapter's frame call");
+    check(has("frames every interval"), "an adapter without frame requests draws every interval");
+    check(has("guest exit") && exited, "the adapter's exit poll ends the session");
+    check(adapter->unpacks == 1 && adapter->installs == 1 && adapter->uninstalls == 1 && adapter->asked_for_requests,
+          "the Java phase is installed once and torn down");
+    check(adapter->deliveries >= 3, "deliveries run before every frame");
 }
 }
 int main() {
@@ -200,6 +285,7 @@ int main() {
         }
         data_files();
         sessions();
+        adapter_sessions();
         fs::remove_all(scratch);
         std::cout << "shell tests passed: " << checks << " checks\n";
     } catch (const std::exception& error) {
