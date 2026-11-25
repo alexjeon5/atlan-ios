@@ -25,7 +25,8 @@ CI 가 만든 서명 없는 IPA 를 iPhone/iPad 에 설치해서 앱 셸이 어�
 
 - 파일 앱 → **내 iPhone > (앱 이름)** 폴더 = 앱의 Documents 폴더야. 여기에 `ATLAN` 폴더를 통째로 복사해 넣어. 안에 `APP`, `MAP`, `UI`, `Sys` 같은 폴더가 있어야 해.
 - 앱은 `system.ini` 에 적힌 안드로이드 경로를 Documents 의 `ATLAN` 폴더로 연결해 줘. `ROOTPATH` 에 적힌 경로가 무엇이든 그게 `ATLAN` 폴더고, `/storage/emulated/0/ATLAN/…`, `/storage/sdcard1/Atlan/…` 처럼 `atlan` 이라는 폴더(대소문자 무관)를 지나는 다른 절대 경로도 같은 폴더로 가. 기본 ini 의 `/data/app_storage/Atlan/…` 만 `ATLAN/NAND/…` 로 가. 그래서 ini 의 경로 값은 기기에 맞게 고칠 필요가 없어.
-- 화면 크기는 `SCREENWIDTH`·`SCREENHEIGHT` 의 짧은 변을 그대로 쓰고 긴 변을 기기 화면 비율에 맞춰서(8의 배수) 앱에 알려 줘. 800×480 이면 아이폰에서 1040×480 정도로 돌고 화면을 꽉 채워. 더 선명하게 보려면 `SCREENHEIGHT` 를 키우면 되는데 그만큼 느려져. `FIXEDSCREENWIDTH`·`FIXEDSCREENHEIGHT` 를 둘 다 0 이 아닌 값으로 두면 ini 의 크기 그대로 돌고 비율을 유지한 채 가운데에 표시돼. 원본 파일은 바뀌지 않아.
+- 화면은 ini 의 `SCREENWIDTH`×`SCREENHEIGHT` 크기로 그려서 기기 화면 전체에 늘려 보여 줘(안드로이드 앱과 같은 동작). 앱 UI 가 800×480 배치로 고정돼 있어서 가로만 넓히면 UI 가 왼쪽에 몰려. `FIXEDSCREENWIDTH`·`FIXEDSCREENHEIGHT` 를 둘 다 0 이 아닌 값으로 두면 늘리지 않고 비율을 유지한 채 가운데에 표시해. 화면은 초당 최대 20프레임으로 그려.
+- 같은 내용이 반복되는 로그(없는 파일을 계속 여는 줄, 앱의 반복 콜백)는 처음 한 번만 남겨.
 - 지도 파일 용량이 크니까(수 GB) 복사 시간과 기기 저장 공간을 확인해줘.
 - 데이터가 없어도 실행은 끝까지 가고, 없는 파일은 `fopen … failed` 로그로 남아.
 - 데이터를 바꾸려면 같은 폴더의 파일을 바꿔 넣으면 돼.

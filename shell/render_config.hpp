@@ -18,17 +18,6 @@ struct PixelSize { std::uint32_t width{}, height{}; };
     return {px(width_points), px(height_points)};
 }
 
-// Guest screen size that fills a host surface without distortion: the configured short side is kept and the long
-// side follows the host's aspect ratio, rounded to a multiple of 8. Unknown sizes return `configured` unchanged.
-[[nodiscard]] constexpr PixelSize fill_screen(PixelSize configured, PixelSize host) noexcept {
-    if (configured.width == 0 || configured.height == 0 || host.width == 0 || host.height == 0) return configured;
-    const std::uint32_t short_side = std::min(configured.width, configured.height);
-    const bool landscape = host.width >= host.height;
-    const double aspect = landscape ? static_cast<double>(host.width) / host.height : static_cast<double>(host.height) / host.width;
-    const auto long_side = std::clamp<std::uint32_t>(static_cast<std::uint32_t>(short_side * aspect / 8.0 + 0.5) * 8, short_side, 8192);
-    return landscape ? PixelSize{long_side, short_side} : PixelSize{short_side, long_side};
-}
-
 // Where a surface is shown inside a view (any unit, origin top-left): centred, as large as fits with its aspect
 // ratio kept. An aspect mismatch under 1% is absorbed by filling the view. An unknown surface covers the view.
 struct ViewRect { double x{}, y{}, width{}, height{}; };

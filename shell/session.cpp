@@ -152,14 +152,19 @@ void GuestSession::run() {
         install_heap_services(dispatcher, heap);
         install_string_services(dispatcher);
         install_printf_services(dispatcher);
-        install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [this](const std::string& text) { log_("guest stdout " + text); });
+        install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [this, seen = std::set<std::string>()](const std::string& text) mutable {
+            if (!seen.insert(text).second) return;  // the guest repeats its polling errors; each text is logged once
+            log_("guest stdout " + text);
+        });
         const std::map<std::string, std::string> properties;
         install_system_properties(dispatcher, properties, [this](const std::string& name, bool known) {
             log_("property " + name + (known ? "" : " (unset)"));
         });
         std::optional<GuestStdio> stdio;
         if (!config_.data_root.empty()) {
-            stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
+            // The guest polls some files that never exist; a failed open is logged the first time only.
+            stdio.emplace(config_.data_root, guard_page + 0x200, [this, failed = std::set<std::string>()](const std::string& path, const std::string& mode, bool ok) mutable {
+                if (!ok && !failed.insert(path + '\n' + mode).second) return;
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
             // The guest's settings file names its folders by absolute Android paths, which differ per device and may
@@ -177,28 +182,16 @@ void GuestSession::run() {
             stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // stock NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
             stdio->add_anchor("atlan", "ATLAN");
-            // The guest reads a copy of the settings file with two entries controlled here.
+            // The guest reads a copy of the settings file with one entry controlled here.
             // CLOUDMAPPATH: where downloaded map tiles would be kept. The stock value names a folder that does not
             // exist, which keeps the downloader off; a missing or writable value turns it on, and its map read thread
             // is never started here, so the first tile request would stop the guest. Always serve the stock value.
-            // SCREENWIDTH/SCREENHEIGHT: the guest takes its screen size from these and reports it back through
-            // setSurfaces. To fill the host surface the long side is adjusted.
-            PixelSize configured{ini_number(settings, "SCREENWIDTH").value_or(0), ini_number(settings, "SCREENHEIGHT").value_or(0)};
-            auto screen = configured;
-            if (config_.fill_surface && config_.surface) {
-                const bool fixed = ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
-                                   ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0;
-                if (!fixed) screen = fill_screen(configured, config_.surface->get());
-                log_("screen " + std::to_string(configured.width) + "x" + std::to_string(configured.height) +
-                     (fixed ? " fixed" : " -> " + std::to_string(screen.width) + "x" + std::to_string(screen.height)));
-            }
-            const bool resize = screen.width != configured.width || screen.height != configured.height;
-            stdio->add_read_filter(settings_file, [screen, resize](std::string text) {
-                text = ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
-                if (!resize) return text;
-                return ini_set(ini_set(std::move(text), "SCREENWIDTH", std::to_string(screen.width)),
-                               "SCREENHEIGHT", std::to_string(screen.height));
+            stdio->add_read_filter(settings_file, [](std::string text) {
+                return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
             });
+            if (config_.on_fixed_screen)
+                config_.on_fixed_screen(ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
+                                        ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0);
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
@@ -327,10 +320,10 @@ void GuestSession::run() {
                                        Callback{"com/atlan/AtlanGLThread", "callBackGLThread", "()V"}}) {
                 if (on_demand && std::string_view(cb.name) == "callBackGLThread") continue;
                 java.register_method(cb.cls, cb.name, cb.signature,
-                                     [this, label = std::string(cb.cls).substr(std::string(cb.cls).rfind('/') + 1) + "." + cb.name](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+                                     [this, logged = std::set<std::string>(), label = std::string(cb.cls).substr(std::string(cb.cls).rfind('/') + 1) + "." + cb.name](JavaBootstrap::MethodCall& m) mutable -> std::optional<std::string> {
                     std::string args;
                     for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
-                    log_("java " + label + "(" + args + ")");
+                    if (logged.insert(label + "(" + args + ")").second) log_("java " + label + "(" + args + ")");  // periodic; once each
                     m.result = 0;
                     return std::nullopt;
                 });

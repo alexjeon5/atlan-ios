@@ -25,14 +25,6 @@ int main(int argc, char** argv) {
     config.block_cache = std::getenv("ATLAN_NO_BLOCK_CACHE") == nullptr;
     config.perf_log = std::getenv("ATLAN_PERF") != nullptr;
     if (const char* frames = std::getenv("ATLAN_FRAMES")) config.render_frames = static_cast<std::uint32_t>(std::atoi(frames));
-    // ATLAN_SURFACE=WIDTHxHEIGHT: host surface size in pixels; the guest screen is sized to fill it (fill_surface).
-    atlan::shell::SurfaceState surface;
-    unsigned surface_width = 0, surface_height = 0;
-    if (const char* size = std::getenv("ATLAN_SURFACE"); size && std::sscanf(size, "%ux%u", &surface_width, &surface_height) == 2) {
-        surface.set({surface_width, surface_height});
-        config.surface = &surface;
-        config.fill_surface = true;
-    }
     // ATLAN_TAP=X,Y: where the test tap lands in guest screen pixels (default 400,240).
     float tap_x = 400, tap_y = 240;
     if (const char* tap = std::getenv("ATLAN_TAP")) std::sscanf(tap, "%f,%f", &tap_x, &tap_y);

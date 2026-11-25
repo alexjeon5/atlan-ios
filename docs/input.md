@@ -48,11 +48,11 @@ CoreLocation은 위성 정보를 주지 않는다. 그래서 `gga`는 fix qualit
 
 - 바인딩 파일은 앱 Documents 폴더의 `input.cfg`다. 실행 시 읽고 로그에 `input bindings ok`, `input bindings missing`, `input bindings rejected: …` 중 하나를 남긴다.
 - 위치: 실행할 때 사용 중 권한을 요청하고(`NSLocationWhenInUseUsageDescription`) `kCLLocationAccuracyBestForNavigation`으로 갱신을 받는다. 수평 정확도가 음수인 값은 버린다. 거부되면 로그에 `location denied`가 남는다. 백그라운드 위치는 아직 없다.
-- 터치: 로그 영역이 화면을 덮고 있어서 상단의 로그 버튼으로 숨긴 뒤에 표면이 터치를 받는다. 좌표는 게스트 표면(`setSurfaces`로 보고된 크기)이 실제로 표시되는 사각형(`fit_rect`: 비율을 유지해 가운데에 맞춘 영역, 차이가 1% 미만이면 뷰 전체) 기준 픽셀로 바꾼다. 사각형 밖의 점은 가장자리로 붙는다. 멀티터치는 손가락마다 0부터 빈 번호를 준다.
+- 터치: 로그 영역이 화면을 덮고 있어서 상단의 로그 버튼으로 숨긴 뒤에 표면이 터치를 받는다. 좌표는 게스트 표면(`setSurfaces`로 보고된 크기)이 실제로 표시되는 사각형 기준 픽셀로 바꾼다. 보통은 뷰 전체이고, 설정이 화면 크기를 고정하면 `fit_rect`(비율을 유지해 가운데에 맞춘 영역)다. 사각형 밖의 점은 가장자리로 붙는다. 멀티터치는 손가락마다 0부터 빈 번호를 준다.
 
 ## 헤드리스 확인
 
-`ATLAN_INPUT_CFG=파일 atlan-session LIBRARY DATA_ROOT`는 바인딩을 읽고 첫 프레임 전에 위치 값 하나와 탭(down, up) 하나를 넣는다. 탭 위치는 `ATLAN_TAP=X,Y`(게스트 화면 픽셀, 기본 400,240)다. `ATLAN_SURFACE=가로x세로`를 주면 그 크기의 호스트 표면을 채우도록 게스트 화면 크기를 맞춘다(로그 `screen 800x480 -> 1040x480`). 로그의 `input: first … event -> …` 줄과 그 뒤 게스트 동작으로 바인딩을 확인한다.
+`ATLAN_INPUT_CFG=파일 atlan-session LIBRARY DATA_ROOT`는 바인딩을 읽고 첫 프레임 전에 위치 값 하나와 탭(down, up) 하나를 넣는다. 탭 위치는 `ATLAN_TAP=X,Y`(게스트 화면 픽셀, 기본 400,240)다. 로그의 `input: first … event -> …` 줄과 그 뒤 게스트 동작으로 바인딩을 확인한다.
 
 ## 검증 상태
 
