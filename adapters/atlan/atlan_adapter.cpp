@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "adapters/atlan/atlan_adapter.hpp"
+#include "shell/app_package.hpp"
+#include "shell/guest_ini.hpp"
+#include "shell/java_services.hpp"
+#include "shell/surface.hpp"
+#include "atlan/jni.hpp"
+#include "atlan/stdio.hpp"
+#include <fstream>
+#include <iterator>
+#include <set>
+#include <string_view>
+
+namespace atlan::shell {
+namespace {
+constexpr char activity_class[] = "com/atlan/MainActivity";
+constexpr char gl_thread_class[] = "com/atlan/AtlanGLThread";
+constexpr char settings_file[] = "ATLAN/APP/system.ini";
+}
+
+AtlanAdapter::AtlanAdapter() = default;
+AtlanAdapter::AtlanAdapter(Config config) : config_(std::move(config)) {}
+AtlanAdapter::~AtlanAdapter() = default;
+
+std::string AtlanAdapter::find_library(const std::string& data_root) const { return find_package(data_root); }
+
+std::string AtlanAdapter::missing_library() const { return "no guest library or package (ATLAN/APP/atlan.dat, *.apk)"; }
+
+void AtlanAdapter::unpack_library(std::vector<std::byte>& bytes, const SessionLog& log) {
+    if (!is_package(bytes)) return;
+    auto package = open_package(bytes);
+    log("package " + package.entry + (package.version.empty() ? "" : " version " + package.version));
+    bytes = std::move(package.library);
+}
+
+void AtlanAdapter::configure_files(GuestStdio& stdio, const SessionLog& log) {
+    // The guest's settings file names its folders by absolute Android paths, which differ per device and may be
+    // edited by the user. Whatever ROOTPATH says is the ATLAN folder beneath the data root; any other absolute path
+    // through a folder named "atlan" (any case) lands in that same folder.
+    std::string settings;
+    if (std::ifstream input(stdio.host_path(settings_file), std::ios::binary); input)
+        settings.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    if (const auto root = ini_value(settings, "ROOTPATH"); root && root->size() > 1 && root->front() == '/') {
+        stdio.add_alias(*root, "ATLAN");
+        log("data root " + *root);
+    }
+    stdio.add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH of the stock settings: the map data folder
+    stdio.add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // stock NANDPATH/CONFIGPATH/SDIPATH: app-written state
+    stdio.add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
+    stdio.add_anchor("atlan", "ATLAN");
+    // The guest reads a copy of the settings file with one entry controlled here.
+    // CLOUDMAPPATH: where downloaded map tiles would be kept. The stock value names a folder that does not exist,
+    // which keeps the downloader off; a missing or writable value turns it on, and its map read thread is never
+    // started here, so the first tile request would stop the guest. Always serve the stock value.
+    stdio.add_read_filter(settings_file, [](std::string text) {
+        return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
+    });
+    use_connection_manager_ = ini_number(settings, "USECONNECTIONMANAGER").value_or(1) != 0;
+}
+
+void AtlanAdapter::install_java(AppHost& host, bool frame_requests) {
+    JavaBootstrap& java = host.java();
+    const SessionLog log = host.log();
+    // Host side of the Java callbacks the guest invokes. The surface size is handed to the embedder; the call
+    // succeeds without other effect (a void method has no result to invent).
+    java.register_method(activity_class, "setSurfaces", "(II)V",
+                         [this, &host, log](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+        std::string args;
+        for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
+        log("java MainActivity.setSurfaces(" + args + ")");
+        if (const auto* surface = host.surface()) {
+            const auto size = surface->get();
+            log("host surface " + std::to_string(size.width) + "x" + std::to_string(size.height));
+        }
+        if (config_.on_set_surfaces && m.args.size() >= 2)
+            config_.on_set_surfaces(static_cast<std::int32_t>(m.args[0]), static_cast<std::int32_t>(m.args[1]));
+        m.result = 0;
+        return std::nullopt;
+    });
+    // AtlanGLThread.callBackGLThread(): the guest's GL thread asks for a frame. The Java side answers
+    //   if (isStateReady()) { if (!isGLInit()) setState(2); else { setState(3); requestRender(); } }
+    // with the three natives below; the request is served by the session's interactive loop.
+    is_state_ready_ = host.function("Java_com_atlan_AtlanGLThread_isStateReady");
+    is_gl_init_ = host.function("Java_com_atlan_AtlanGLThread_isGLInit");
+    set_state_ = host.function("Java_com_atlan_AtlanGLThread_setState");
+    on_demand_ = frame_requests && is_state_ready_ != 0 && is_gl_init_ != 0 && set_state_ != 0;
+    if (on_demand_) {
+        java.register_method(gl_thread_class, "callBackGLThread", "()V",
+                             [this, &host](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+            JavaBootstrap& java = host.java();
+            const auto cls = java.class_handle(gl_thread_class);
+            const auto call_native = [&](std::uint32_t address, std::optional<std::uint32_t> argument, std::uint32_t& result) -> std::optional<std::string> {
+                std::vector<std::uint32_t> words{java.env(), cls};
+                if (argument) words.push_back(*argument);
+                std::string message;
+                const auto r0 = host.call_nested(address, words, message);
+                if (!r0) return "callBackGLThread: a GL thread native did not return" + (message.empty() ? std::string() : ": " + message);
+                result = *r0;
+                return std::nullopt;
+            };
+            std::uint32_t ready = 0, initialised = 0, ignored = 0;
+            if (auto error = call_native(is_state_ready_, std::nullopt, ready)) return error;
+            if ((ready & 0xff) != 0) {
+                if (auto error = call_native(is_gl_init_, std::nullopt, initialised)) return error;
+                if (auto error = call_native(set_state_, (initialised & 0xff) != 0 ? 3u : 2u, ignored)) return error;
+                if ((initialised & 0xff) != 0) { render_requested_ = true; ++render_requests_; }
+            }
+            m.result = 0;
+            return std::nullopt;
+        });
+    }
+    // Network-related Java methods (IsConnected, SendMsgFromAtlan, AtlanNetService) and the replies they queue.
+    JavaServices::Config services;
+    services.http = config_.http;
+    services.network_available = config_.network_available;
+    services.use_connection_manager = use_connection_manager_;
+    services.log = log;
+    java_services_ = std::make_unique<JavaServices>(services);
+    java_services_->install(java, [&host](const std::string& cls, const std::string& name, const std::string& signature) {
+        return host.native_method(cls, name, signature);
+    });
+    // Other void UI callbacks the guest raises: recorded in the log, no host effect yet.
+    struct Callback { const char* cls; const char* name; const char* signature; };
+    for (const Callback& cb : {Callback{activity_class, "JniArSettingData", "(IIII)V"},
+                               Callback{activity_class, "SendMsgFromTPEGD", "(III[B)V"},
+                               Callback{gl_thread_class, "callBackGLThread", "()V"}}) {
+        if (on_demand_ && std::string_view(cb.name) == "callBackGLThread") continue;
+        java.register_method(cb.cls, cb.name, cb.signature,
+                             [log, logged = std::set<std::string>(), label = std::string(cb.cls).substr(std::string(cb.cls).rfind('/') + 1) + "." + cb.name](JavaBootstrap::MethodCall& m) mutable -> std::optional<std::string> {
+            std::string args;
+            for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
+            if (logged.insert(label + "(" + args + ")").second) log("java " + label + "(" + args + ")");  // periodic; once each
+            m.result = 0;
+            return std::nullopt;
+        });
+    }
+}
+
+void AtlanAdapter::uninstall_java() { java_services_.reset(); }
+
+AppStartup AtlanAdapter::startup() const {
+    AppStartup startup;
+    startup.receiver_class = activity_class;
+    startup.init = "Java_com_atlan_MainActivity_nativeInit";
+    startup.surface_calls = {{"Java_com_atlan_AtlanUISurfaceView_createUISF", true},
+                             {"Java_com_atlan_AtlanGLSurfaceView_createGLSF", false},
+                             {"Java_com_atlan_AtlanUISurfaceView_changedUISF", false}};
+    startup.render = "Java_com_atlan_AtlanGLSurfaceView_renderGLSF";
+    // The Java side polls this once a second and finishes the activity when the user chose to quit.
+    startup.exit_poll = "Java_com_atlan_MainActivity_nativeIsProgramExit";
+    return startup;
+}
+
+bool AtlanAdapter::deliver(AppHost& host) {
+    if (!java_services_) return true;
+    // Replies of the Java side (online state, finished HTTP requests), on the guest thread like input.
+    for (const auto& due : java_services_->take_due())
+        if (!host.call("java " + due.what, due.address, due.words)) return false;
+    return true;
+}
+
+std::uint64_t AtlanAdapter::take_frame_request_count() {
+    const auto count = render_requests_;
+    render_requests_ = 0;
+    return count;
+}
+
+std::optional<bool> AtlanAdapter::frame_ready(AppHost& host) {
+    if (!on_demand_) return true;
+    // The same question callBackGLThread answers. A frame drawn while the guest is not ready shows only the clear
+    // colour, so that case draws nothing.
+    JavaBootstrap& java = host.java();
+    const auto cls = java.class_handle(gl_thread_class);
+    const auto ask = [&](std::uint32_t address, std::optional<std::uint32_t> argument) {
+        std::vector<std::uint32_t> words{java.env(), cls};
+        if (argument) words.push_back(*argument);
+        return host.call("GL thread state", address, words);
+    };
+    const auto ready = ask(is_state_ready_, std::nullopt);
+    if (!ready) return std::nullopt;
+    if ((*ready & 0xff) == 0) return false;
+    const auto initialised = ask(is_gl_init_, std::nullopt);
+    if (!initialised || !ask(set_state_, (*initialised & 0xff) != 0 ? 3u : 2u)) return std::nullopt;
+    return (*initialised & 0xff) != 0;
+}
+}

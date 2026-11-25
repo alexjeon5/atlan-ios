@@ -6,6 +6,7 @@
 #include "apple_network.hpp"
 #include "metal_gl_backend.hpp"
 #import <QuartzCore/CAMetalLayer.h>
+#include "adapters/atlan/atlan_adapter.hpp"
 #include "atlan/demo.hpp"
 #include "shell/app_package.hpp"
 #include "shell/data_file.hpp"
@@ -344,6 +345,7 @@ static constexpr bool kWriteSessionLog = true;
     }
     __weak ShellViewController* weakSelf = self;
     atlan::shell::SessionConfig config;
+    atlan::shell::AtlanAdapter::Config app;  // the app's Java side: network and the guest's surface size
     config.library_path = library.UTF8String;
     config.audio_sink = &_audio;
     config.data_root = self.documentsPath.UTF8String;
@@ -362,8 +364,8 @@ static constexpr bool kWriteSessionLog = true;
     config.interactive = true;
     config.render_on_demand = true;
     config.perf_log = true;  // the 10-second frame report also lists block cache coverage and the busiest imports
-    config.http = atlan::apple_http_fetch();
-    config.network_available = atlan::apple_network_available();
+    app.http = atlan::apple_http_fetch();
+    app.network_available = atlan::apple_network_available();
     // Optional byte signatures for run-time library functions the guest image does not export.
     config.native_signatures = [self.documentsPath stringByAppendingPathComponent:@"native.sig"].UTF8String;
     {
@@ -412,7 +414,7 @@ static constexpr bool kWriteSessionLog = true;
         // The guest sizes its GL surface itself (MainActivity.setSurfaces); render at exactly that size and show
         // it in the aspect-fitting rectangle of the view.
         std::atomic<std::uint64_t>* guestSurface = &_guestSurface;  // outlives the session (joined in dealloc)
-        config.on_set_surfaces = [weakSelf, guestSurface](std::int32_t width, std::int32_t height) {
+        app.on_set_surfaces = [weakSelf, guestSurface](std::int32_t width, std::int32_t height) {
             if (width > 0 && height > 0)
                 guestSurface->store((std::uint64_t{static_cast<std::uint32_t>(width)} << 32) | static_cast<std::uint32_t>(height));
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -423,6 +425,7 @@ static constexpr bool kWriteSessionLog = true;
             });
         };
     }
+    config.adapter = std::make_shared<atlan::shell::AtlanAdapter>(std::move(app));
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,
         [weakSelf, repeats, perfPath, netPath, logFile = &_logFile](const std::string& line) {
