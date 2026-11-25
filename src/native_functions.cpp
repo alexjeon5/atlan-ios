@@ -151,7 +151,9 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
             if (it == located.end()) continue;
             bool any = false;
             for (const std::uint32_t address : it->second)
-                any |= dispatcher.replace_function(runtime, address, "native:" + member.name, member.service);
+                any |= member.inline_run != nullptr
+                           ? dispatcher.replace_function_inline(runtime, address, "native:" + member.name, member.service, member.inline_run)
+                           : dispatcher.replace_function(runtime, address, "native:" + member.name, member.service);
             if (any) {
                 ++installed;
                 replaced += " " + member.name;

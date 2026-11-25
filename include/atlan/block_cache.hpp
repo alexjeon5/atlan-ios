@@ -18,6 +18,14 @@ namespace atlan {
 // covers every map(), unmap() and protect() that involves an executable page;
 // guest stores cannot reach executable pages because the permission model has
 // no writable-and-executable state.
+// A replaced guest function (ImportDispatcher::replace_function_inline) that only reads and writes core registers,
+// called straight from the block loop instead of through the import trap. `run` returns false to decline: the
+// loop then reports the trap, and the dispatcher's service for the same function handles the call.
+struct InlineFunction {
+    bool (*run)(CpuState& cpu) noexcept{};
+    std::uint64_t calls{};  // calls `run` completed; the dispatcher folds them into its import counts
+};
+
 class BlockRunner {
 public:
     struct Stats {
@@ -43,6 +51,9 @@ public:
     // a PC change.
     [[nodiscard]] Result step_block(std::uint64_t budget) noexcept;
     void flush() noexcept;
+    // Calls `function` (which must outlive the runner) where a block starts with the replaced-function trap at
+    // `key`; null removes it. Drops the cached blocks.
+    void set_inline(std::uint64_t key, InlineFunction* function);
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
     // Diagnostics: how often each instruction form ran without a fast handler, most frequent first.
     [[nodiscard]] std::vector<std::pair<std::string, std::uint64_t>> generic_forms() const;

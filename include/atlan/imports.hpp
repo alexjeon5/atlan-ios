@@ -116,6 +116,11 @@ public:
     // code. Calls are counted under `name` with the imports. False if the address is not executable guest code
     // or already replaced.
     bool replace_function(Runtime& runtime, std::uint32_t address, std::string name, ImportService service);
+    // replace_function(), and the block cache runs `inline_run` in place of the trap: for a function that only
+    // works on core registers, so a call costs about as much as a branch. When `inline_run` declines, `service`
+    // gets the call. Calls made inline are counted under `name` like the service's.
+    bool replace_function_inline(Runtime& runtime, std::uint32_t address, std::string name, ImportService service,
+                                 bool (*inline_run)(CpuState& cpu) noexcept);
     [[nodiscard]] bool replaces(std::uint32_t address) const noexcept { return hooks_.count(address & ~1U) != 0; }
 
     // Scalar AAPCS32 call with import dispatch. `budget` bounds every instruction
@@ -133,8 +138,16 @@ public:
     void set_callback_budget(std::uint64_t budget) noexcept { callback_budget_ = budget; }
     [[nodiscard]] std::uint64_t callback_budget() const noexcept { return callback_budget_; }
     // Diagnostics: how often each import ran since the last reset (for telling a spin/wait loop from long work).
-    [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_counts() const noexcept { return counts_; }
+    [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_counts() const {
+        for (const auto& entry : inlines_) {
+            if (entry->function.calls == 0) continue;
+            counts_[entry->name] += entry->function.calls;
+            entry->function.calls = 0;
+        }
+        return counts_;
+    }
     void reset_import_counts() {
+        for (const auto& entry : inlines_) entry->function.calls = 0;
         counts_.clear();
         times_.clear();
         resolved_.clear();
@@ -172,7 +185,13 @@ private:
     Runtime* runner_runtime_{};
     bool block_cache_{true};
     std::unordered_map<std::string, ImportService> services_;
-    std::unordered_map<std::string, std::uint64_t> counts_;
+    mutable std::unordered_map<std::string, std::uint64_t> counts_;  // import_counts() folds the inline calls in
+    struct Inline {
+        std::uint64_t key{};
+        std::string name;
+        InlineFunction function;
+    };
+    std::vector<std::unique_ptr<Inline>> inlines_;  // stable addresses: the block cache holds the InlineFunctions
     std::unordered_map<std::string, std::uint64_t> times_;  // nanoseconds per import while timing_
     bool timing_{};
     std::unordered_map<std::uint32_t, std::string> traps_;  // trap base address -> name

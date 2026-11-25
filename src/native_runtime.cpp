@@ -41,6 +41,25 @@ using Error = std::optional<std::string>;
 
 // --- Integer division (ARM run-time ABI: quotient in r0, remainder in r1). Division by zero is left to the
 // guest's own code, whose behaviour is its platform's choice.
+// The same division on the CPU registers, for the block cache. Division by zero declines to the service, which
+// declines in turn so the guest's own helper raises its error.
+template <bool Signed, bool Remainder>
+bool divide_inline(CpuState& cpu) noexcept {
+    const auto a = static_cast<std::uint32_t>(cpu.registers[0]), b = static_cast<std::uint32_t>(cpu.registers[1]);
+    if (b == 0) return false;
+    std::uint32_t quotient, rest;
+    if constexpr (Signed) {
+        const std::int64_t x = static_cast<std::int32_t>(a), y = static_cast<std::int32_t>(b);
+        quotient = static_cast<std::uint32_t>(x / y);
+        rest = static_cast<std::uint32_t>(x % y);
+    } else {
+        quotient = a / b;
+        rest = a % b;
+    }
+    cpu.registers[0] = quotient;
+    if constexpr (Remainder) cpu.registers[1] = rest;
+    return true;
+}
 NativeSet division(const char* name, std::vector<std::string> symbols, bool is_signed, bool remainder) {
     NativeSet set;
     set.name = name;
@@ -61,7 +80,9 @@ NativeSet division(const char* name, std::vector<std::string> symbols, bool is_s
         if (remainder) call.runtime().cpu.registers[1] = rest;
         return std::nullopt;
     };
-    set.members.push_back({name, std::move(symbols), std::move(service), true});
+    set.members.push_back({name, std::move(symbols), std::move(service), true,
+                           is_signed ? (remainder ? &divide_inline<true, true> : &divide_inline<true, false>)
+                                     : (remainder ? &divide_inline<false, true> : &divide_inline<false, false>)});
     set.verify = [name = std::string(name), remainder](NativeProbe&, const NativeSet::Call& guest, const NativeSet::Call& native) {
         static constexpr std::uint32_t values[] = {0, 1, 2, 3, 7, 10, 100, 255, 256, 65521, 0x7fffffff, 0x80000000, 0x80000001,
                                                    0xfffffff9, 0xffffffff, 123456789, 0xdeadbeef};

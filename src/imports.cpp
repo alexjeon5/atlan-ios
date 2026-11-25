@@ -3,6 +3,7 @@
 #include "atlan/imports.hpp"
 #include "atlan/profiler.hpp"
 #include "atlan/threads.hpp"
+#include "cpu/arm64/aarch32/guest_key.hpp"
 #include <array>
 #include <stdexcept>
 
@@ -47,6 +48,17 @@ bool ImportDispatcher::replace_function(Runtime& runtime, std::uint32_t address,
     for (unsigned i = 0; i < size; ++i) hook.original |= std::to_integer<std::uint32_t>(host[i]) << (8 * i);
     if (!patch(runtime, address, thumb ? undefined_thumb : undefined_arm, size)) return false;
     hooks_.emplace(address, std::move(hook));
+    return true;
+}
+bool ImportDispatcher::replace_function_inline(Runtime& runtime, std::uint32_t address, std::string name,
+                                               ImportService service, bool (*inline_run)(CpuState& cpu) noexcept) {
+    if (inline_run == nullptr || !replace_function(runtime, address, name, std::move(service))) return false;
+    auto entry = std::make_unique<Inline>();
+    entry->key = (address & 1U) != 0 ? uml::cpu::arm64::aarch32::t32_key(address & ~1U) : uml::cpu::arm64::aarch32::a32_key(address);
+    entry->name = std::move(name);
+    entry->function.run = inline_run;
+    if (runner_) runner_->set_inline(entry->key, &entry->function);
+    inlines_.push_back(std::move(entry));
     return true;
 }
 CallOutcome ImportDispatcher::call(Runtime& runtime, std::uint32_t target,
@@ -114,6 +126,7 @@ BlockRunner& ImportDispatcher::runner_for(Runtime& runtime) {
     if (!runner_ || runner_runtime_ != &runtime) {
         runner_ = std::make_unique<BlockRunner>(runtime);
         runner_runtime_ = &runtime;
+        for (const auto& entry : inlines_) runner_->set_inline(entry->key, &entry->function);
     }
     return *runner_;
 }

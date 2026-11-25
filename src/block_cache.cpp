@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <unordered_map>
 
 namespace atlan {
 namespace a32 = uml::cpu::arm64::aarch32;
@@ -55,6 +56,23 @@ private:
 
 // The handler of an instruction without a fast one: hands it back to the block loop.
 unsigned generic_marker(CpuState&, const a32::FastOp&, Memory&) noexcept { return a32::fast_generic; }
+// UDF #0, the instruction the import dispatcher writes over the start of a replaced guest function. It is reported
+// straight from the block loop instead of through the generic decoder, because replaced functions are called often.
+constexpr unsigned fast_undefined_trap = 4;
+// An inline function returned to its caller. Like the import dispatcher's call of a replaced function, it retires
+// no guest instruction.
+constexpr unsigned fast_inline_return = 5;
+constexpr std::uint32_t udf_arm = 0xe7f000f0, udf_thumb = 0xde00;
+unsigned undefined_trap(CpuState&, const a32::FastOp&, Memory&) noexcept { return fast_undefined_trap; }
+// An inline function at the trap; `key` holds its InlineFunction. Returns to LR as BX LR does.
+unsigned inline_call(CpuState& cpu, const a32::FastOp& op, Memory&) noexcept {
+    auto* function = reinterpret_cast<InlineFunction*>(static_cast<std::uintptr_t>(op.key));
+    if (!function->run(cpu)) return fast_undefined_trap;
+    ++function->calls;
+    cpu.pc = a32::key_from_target(static_cast<std::uint32_t>(cpu.registers[14]));
+    cpu.a32_itstate = 0;
+    return fast_inline_return;
+}
 [[nodiscard]] Event map_event(a32::StepEvent event) noexcept {
     switch (event) {
     case a32::StepEvent::retired: return Event::retired;
@@ -72,6 +90,11 @@ unsigned generic_marker(CpuState&, const a32::FastOp&, Memory&) noexcept { retur
 }
 }
 
+[[nodiscard]] std::uint32_t insn_halfword(const std::byte* host) noexcept {
+    std::uint16_t value{};
+    std::memcpy(&value, host, 2);
+    return value;
+}
 struct BlockRunner::Impl {
     Impl(Runtime& runtime) : memory(runtime.memory), cpu(runtime.cpu), adapter(memory, cpu),
                              profile(a32::FeatureSet{}), slots(slot_count, nullptr) {}
@@ -84,6 +107,7 @@ struct BlockRunner::Impl {
     std::vector<Block*> slots;
     std::size_t entries{};  // instructions held by `store`
     std::vector<std::uint64_t> generic_forms = std::vector<std::uint64_t>(a32::kFormCount);
+    std::unordered_map<std::uint64_t, InlineFunction*> inlines;  // by the key of the function's first instruction
 
     void flush() noexcept {
         store.clear();
@@ -128,6 +152,19 @@ struct BlockRunner::Impl {
             const std::uint32_t next = pc + length;
             const std::uint64_t next_key = thumb ? a32::t32_key(next) : a32::a32_key(next);
             a32::FastOp fast{};
+            if (thumb ? (it == 0 && length == 2 && insn_halfword(host) == udf_thumb) : word == udf_arm) {
+                fast.run = undefined_trap;
+                fast.next_key = next_key;
+                fast.imm = thumb ? udf_thumb : udf_arm;
+                if (i == 0) {
+                    if (const auto found = inlines.find(key); found != inlines.end()) {
+                        fast.run = inline_call;
+                        fast.key = reinterpret_cast<std::uintptr_t>(found->second);
+                    }
+                }
+                block->fast.push_back(fast);
+                break;
+            }
             // A routed word is offered to the VFP executor first, so only its handlers may take it.
             if (route ? !vfp::prepare_fast(word, pc, fast)
                       : !a32::prepare_fast(insn, thumb ? a32::t32_key(pc) : a32::a32_key(pc), fast)) {
@@ -165,6 +202,11 @@ struct BlockRunner::Impl {
 BlockRunner::BlockRunner(Runtime& runtime) : impl_(std::make_unique<Impl>(runtime)), runtime_(runtime) {}
 BlockRunner::~BlockRunner() = default;
 void BlockRunner::flush() noexcept { impl_->flush(); ++stats_.flushes; }
+void BlockRunner::set_inline(std::uint64_t key, InlineFunction* function) {
+    if (function != nullptr) impl_->inlines[key] = function;
+    else impl_->inlines.erase(key);
+    flush();
+}
 
 // Runs blocks until an event, the budget, or (when `single`) the end of the first block.
 Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
@@ -257,6 +299,12 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
                 if (cpu.pc != op->next_key) break;
                 ++op;
                 continue;
+            }
+            if (done != a32::fast_generic) [[unlikely]] {
+                // An inline function returned (the write-back above did not apply: it is the first op of its
+                // block), or UDF #0, reported as Runtime::step() does with the PC at the instruction.
+                if (done == fast_inline_return) break;
+                return {Event::undefined_instruction, retired};
             }
             // fast_generic: an instruction without a fast handler.
             const Entry* const e = &block->entries[op->imm];

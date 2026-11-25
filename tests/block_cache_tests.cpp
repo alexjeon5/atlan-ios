@@ -347,6 +347,11 @@ int main() {
         random_single(8000 / scale, true, 36, true, false, 0xfe400000U, 0xe8400000U);
         random_single(8000 / scale, true, 37, false, false, 0xff800000U, 0xfb800000U);   // T32 long multiplies
         random_single(8000 / scale, true, 38, false, false, 0xfff00000U, 0xfb100000U);   // T32 SMLA<x><y>/SMUL<x><y>
+        // UDF #0, the replaced-function trap, which the block loop reports without the generic decoder.
+        random_single(200, false, 39, false, false, 0xffffffffU, 0xe7f000f0U);
+        random_single(200, false, 40, true, false, 0xffffffffU, 0xe7f000f0U);
+        random_single(200, true, 41, false, false, 0xffffffffU, 0x0000de00U);
+        random_single(200, true, 42, true, false, 0xffffffffU, 0x0000de00U);
         random_programs(1500 / scale, false, 21);
         random_programs(1500 / scale, true, 22);
         dispatcher_paths();

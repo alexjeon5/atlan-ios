@@ -91,6 +91,12 @@ bool Memory::translates(std::uint32_t address, std::uint64_t count, MemoryAccess
 }
 
 bool Memory::read(std::uint32_t address, std::span<std::byte> out) noexcept {
+    if (!out.empty() && (address & (page_size - 1U)) + out.size() <= page_size) {  // the common case: one page
+        const std::byte* host = translate(address, MemoryAccess::read);
+        if (host == nullptr) return false;
+        std::memcpy(out.data(), host, out.size());
+        return true;
+    }
     // Check every page before exposing any partial result.
     if (!translates(address, out.size(), MemoryAccess::read)) return false;
     for (std::size_t i = 0; i < out.size();) {
@@ -137,6 +143,12 @@ bool Memory::move(std::uint32_t destination, std::uint32_t source, std::uint64_t
 }
 
 bool Memory::write(std::uint32_t address, std::span<const std::byte> data) noexcept {
+    if (!data.empty() && (address & (page_size - 1U)) + data.size() <= page_size) {
+        std::byte* host = translate(address, MemoryAccess::write);
+        if (host == nullptr) return false;
+        std::memcpy(host, data.data(), data.size());
+        return true;
+    }
     if (data.size() > (std::uint64_t{1} << 32) - address) return false;
     for (std::size_t i = 0; i < data.size();) {
         const auto at = std::uint64_t{address} + i;
