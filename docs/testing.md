@@ -65,7 +65,7 @@ audio callbacks=0 players=1
 - 정상 종료 지점은 `audio callbacks=… players=1` 줄이야. 이 줄까지 나오면 이번 단계는 성공이고, 그 뒤에 아무것도 안 뜨는 게 **현재 예상 결과**야. (지도 데이터가 없으면 `createGLSF` 가 빨리 끝나고 `players=0` 이야.)
 - 핵심 확인 줄은 `JNI_OnLoad returned 0x10004`, `nativeInit returned 0x0`, 그리고 `createGLSF returned 0x0`(지도 데이터가 있을 때) 이야.
 - `createGLSF` 는 지도 파일을 읽느라 폰에서 몇 분 걸릴 수 있어. 서버(arm64 리눅스)에서는 약 3분이야. 그동안 앱이 멈춘 것처럼 보여도 로그가 늘어나면 정상이야.
-- 예전에 반복되던 `guest stdout read error: Bad file descriptor` 는 원인을 고쳤어 (system.ini 의 `CLOUDMAPPATH=/map/CLOUD_MAP` 폴더가 없어서 앱이 `open(O_CREAT)` 실패 값 -1 을 그대로 `read` 했던 거야). 이제 `ATLAN/NAND/CLOUD_MAP` 으로 연결돼. 지도 데이터가 있으면 그 뒤 세 번째 `renderGLSF` 에서 `CMapReadThread::enqueue` 가 널 객체로 불려 `memory_fault address=0x15c` 로 멈춰. 원인 조사 결과: `InitializeMapDownload`(0x3b5f30)는 성공하지만(스레드 둘 다 생성됨) 전역 포인터(0x10eec71c)를 맨 끝, `usleep(50ms)` 뒤에야 채워. 그 50ms 동안 앱의 `MainProc` 스레드(GPS → `CMgrMap::GetAddressCode` → `CMneCloudMapFile::LoadTile`)가 먼저 `enqueue` 를 불러서 널을 읽어. 런타임 스텁 문제가 아니라 스레드 실행 순서 문제야: 실험으로 그 `usleep(50ms)` 한 번만 건너뛰게 하면 같은 스모크가 `audio callbacks=… players=1` 까지 끝나. 클라우드 경로로 가는 게이트(`CLOUDDOWNUSE=1`)는 system.ini 값이라 정상이야. 일부러 sleep 을 줄이는 우회는 안 넣었어 (아직 해결 못 함).
+- 예전에 반복되던 `guest stdout read error: Bad file descriptor` 는 클라우드 지도 폴더(`CLOUDMAPPATH`)가 없어서 앱이 실패한 `open` 값을 그대로 `read` 하는 앱 자신의 동작이야. 그 폴더를 만들어 주면 앱 안의 스레드 경합으로 세 번째 `renderGLSF` 부근에서 멈추니까 만들어 주지 않아.
 - 지도·데이터를 안 넣었으면 `fopen ATLAN/MAP/WAVE/….idx … failed` 가 찍혀. 그래도 `nativeInit returned 0x0` 까지는 가. 데이터를 넣으면 `ok` 로 바뀌는지, 그 뒤에 새로 멈추는 곳이 있는지 보는 게 이번 테스트의 목적이야.
 - `setSurfaces` 는 화면 연결이 아직 없어서 호출만 기록하고 아무 일도 안 해. 화면에는 아직 아무것도 그려지지 않아.
 - 화면에는 아직 아무것도 그려지지 않아 (그래픽 백엔드 연결 전). 시작음 같은 소리가 날 수 있어.
