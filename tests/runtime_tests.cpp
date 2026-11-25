@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/demo.hpp"
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <iostream>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace atlan;
 namespace {
@@ -178,8 +180,41 @@ void exits() {
           "unimported VFP instruction fails explicitly");
 }
 }
+// fill() and move() against a flat model, with ranges that overlap and cross pages, and all-or-nothing faults.
+void bulk_memory() {
+    Memory memory;
+    const std::uint32_t base = 0x40000, size = 0x3000;
+    memory.map(base, size, Permissions::read_write);
+    memory.map(base + size, 0x1000, Permissions::read);
+    std::vector<std::byte> model(size);
+    std::mt19937 random{5};
+    for (auto& b : model) b = std::byte(random());
+    check(memory.write(base, model), "seed bulk memory");
+    for (unsigned n = 0; n < 4000; ++n) {
+        const std::uint32_t count = random() % 3 == 0 ? random() % 0x1800 : random() % 64;
+        const std::uint32_t to = random() % (size - count + 1), from = random() % (size - count + 1);
+        if (random() % 2) {
+            const auto value = std::byte(random());
+            check(memory.fill(base + to, value, count), "fill");
+            std::fill_n(model.begin() + to, count, value);
+        } else {
+            check(memory.move(base + to, base + from, count), "move");
+            std::memmove(model.data() + to, model.data() + from, count);
+        }
+        std::vector<std::byte> now(size);
+        check(memory.read(base, now) && now == model, "bulk memory matches the model");
+    }
+    check(!memory.fill(base + size - 8, std::byte{1}, 16) && !memory.move(base + size - 8, base, 16), "write into a read-only page");
+    check(!memory.move(base, base + size + 0xff8, 16) && !memory.fill(0xfffffff0U, std::byte{0}, 32), "unmapped and wrapping ranges");
+    check(memory.move(base, base + size, 16) && memory.fill(base, std::byte{0}, 0), "read-only source and empty range");
+    std::vector<std::byte> now(size);
+    std::fill_n(model.begin(), 16, std::byte{0});
+    check(memory.read(base, now) && now == model, "failed calls changed nothing");
+}
+
 int main() {
     try {
+        bulk_memory();
         arithmetic(); predication(); interworking(); memory_faults();
         multiple_transfers_and_exclusives(); exits();
         std::cout << checks << " correctness checks passed\n";

@@ -33,6 +33,17 @@ public:
     }
     [[nodiscard]] bool read(std::uint32_t address, std::span<std::byte> out) noexcept;
     [[nodiscard]] bool write(std::uint32_t address, std::span<const std::byte> data) noexcept;
+    // memset and memmove on guest memory without a host-side copy. Like write(), nothing changes unless every
+    // page of the range translates (for move(): the source for reading and the destination for writing).
+    [[nodiscard]] bool fill(std::uint32_t address, std::byte value, std::uint64_t count) noexcept;
+    [[nodiscard]] bool move(std::uint32_t destination, std::uint32_t source, std::uint64_t count) noexcept;
+    // The host bytes from `address` to the end of its guest page, or an empty span when the page does not
+    // translate for `access`. For bounded scans (strlen, memcmp) that would otherwise translate per byte.
+    [[nodiscard]] std::span<std::byte> page_span(std::uint32_t address, MemoryAccess access) noexcept {
+        std::byte* host = translate(address, access);
+        if (host == nullptr) return {};
+        return {host, page_size - (address & (page_size - 1U))};
+    }
     // Removes whole pages; unmapped pages inside the range are ignored.
     void unmap(std::uint32_t base, std::uint64_t size);
     void protect(std::uint32_t base, std::uint64_t size, Permissions permissions);
@@ -43,6 +54,7 @@ public:
     [[nodiscard]] std::uint64_t code_generation() const noexcept { return code_generation_; }
 
 private:
+    [[nodiscard]] bool translates(std::uint32_t address, std::uint64_t count, MemoryAccess access) noexcept;
     // A guest page: `data` points at its 4096 bytes, owned here or aliased from external host memory.
     struct Page {
         std::byte* data{};
