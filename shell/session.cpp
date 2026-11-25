@@ -17,7 +17,9 @@
 #include "atlan/libc_services.hpp"
 #include "atlan/libc_extra.hpp"
 #include "atlan/mmap.hpp"
+#include "atlan/native_functions.hpp"
 #include "atlan/opensles.hpp"
+#include "atlan/profiler.hpp"
 #include "atlan/string_services.hpp"
 #include "atlan/lifetime.hpp"
 #include "atlan/runtime.hpp"
@@ -152,6 +154,24 @@ void GuestSession::run() {
         Runtime runtime;
         ImportDispatcher dispatcher;
         dispatcher.set_block_cache(config_.block_cache);
+        // Per-function profile, written per phase; a phase ends where write_profile() is called.
+        std::optional<GuestProfiler> profiler;
+        std::map<std::string, unsigned> profile_phases;
+        if (!config_.profile_path.empty()) {
+            profiler.emplace();
+            for (const auto& symbol : image.exports)
+                if (symbol.type == 2) profiler->add_function(symbol.address, symbol.name);
+            for (const auto& import : image.trapped_imports) profiler->add_function(import.address, "import:" + import.name);
+            dispatcher.set_profiler(&*profiler);
+        }
+        const auto write_profile = [&](const std::string& phase) {
+            if (!profiler) return;
+            const unsigned n = profile_phases[phase]++;
+            const std::string path = config_.profile_path + "." + phase + (n ? "-" + std::to_string(n) : "") + ".tsv";
+            if (std::ofstream out(path); out) profiler->write(out);
+            log_("profile " + path + ": " + profiler->summary(12));
+            profiler->reset();
+        };
         dispatcher.set_import_timing(config_.perf_log);
         ObjectLifetime lifetime;
         lifetime.install(dispatcher);
@@ -259,6 +279,24 @@ void GuestSession::run() {
             if (delivered.callbacks != 0) return MutexTable::Idle::progressed;
             return delivered.pending != 0 ? MutexTable::Idle::waiting : MutexTable::Idle::none;
         });
+        if (config_.native_functions) {
+            NativeOptions native_options;
+            native_options.stack_top = stack_base + stack_bytes;
+            native_options.return_target = return_sentinel;
+            native_options.code_base = image.load_bias;
+            native_options.code_bytes = image.mapped_bytes;
+            native_options.log = log_;
+            native_options.skip = config_.native_skip;
+            if (std::ifstream file(config_.native_signatures); file) {
+                std::string why;
+                const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                if (auto parsed = parse_native_signatures(text, why)) native_options.signatures = std::move(*parsed);
+                else log_("native signatures rejected: " + why);
+            }
+            install_native_functions(dispatcher, runtime, image.exports, runtime_library_sets(), native_options);
+            dispatcher.reset_import_counts();
+            if (profiler) profiler->reset();
+        }
         for (std::size_t i = 0; i < initializers.size(); ++i) {
             if (stop_.load()) { log_("stopped before initializer " + std::to_string(i)); state_.store(SessionState::finished); return; }
             const auto outcome = dispatcher.call(runtime, initializers[i], {}, stack_base + stack_bytes,
@@ -391,6 +429,8 @@ void GuestSession::run() {
                     log_(std::string("perf ") + name + ": " + std::to_string(r.retired) + " instructions, " + std::to_string(seconds) +
                          " s, " + std::to_string(seconds > 0 ? r.retired / seconds / 1e6 : 0.0) + " MIPS" + perf_details());
                 }
+                if (const std::string_view full(name); !full.ends_with("renderGLSF"))  // the first frames go into one file
+                    write_profile(std::string(full.substr(full.rfind('_') + 1)));
                 if (r.stop != Stop::returned) {
                     log_(describe_state(runtime, dispatcher));  // where it stopped: pc, lr, sp, r0-r3, busiest imports
                     fail(describe_stop(name, r));
@@ -451,6 +491,7 @@ void GuestSession::run() {
                 }
                 return true;
             };
+            write_profile("init");  // constructors, JNI_OnLoad, nativeInit
             bool surfaces_ok = native_init_address != 0;
             if (surfaces_ok) {
                 const auto surface = java.new_object(java.class_handle("android/view/Surface"));
@@ -470,6 +511,7 @@ void GuestSession::run() {
                 if (!surfaces_ok) return;  // fail() already recorded the stop
             }
             // Run guest threads the library started, then deliver finished audio buffers.
+            write_profile("render");  // the first `render_frames` frames and their input delivery
             const auto pumped = dispatcher.pump(runtime, config_.initializer_budget);
             log_("pump stop=" + std::to_string(static_cast<int>(pumped.stop)) + " retired=" + std::to_string(pumped.retired) +
                  " live_threads=" + std::to_string(threads.live_threads()) +
@@ -596,6 +638,7 @@ void GuestSession::run() {
                             " MIPS), audio " + share(audio_seconds) + "%, idle " + share(idle_seconds) + "%";
                         if (config_.perf_log) line += perf_details();
                         log_(line);
+                        write_profile("frames");
                         dispatcher.reset_import_counts();
                         report_start = std::chrono::steady_clock::now();
                         frames = render_instructions = pump_instructions = drawn = render_requests = 0;

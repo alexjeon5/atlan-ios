@@ -35,6 +35,18 @@ int main(int argc, char** argv) {
     else config.gl_backend = &context;
     config.block_cache = std::getenv("ATLAN_NO_BLOCK_CACHE") == nullptr;
     config.perf_log = std::getenv("ATLAN_PERF") != nullptr;
+    // ATLAN_NO_NATIVE=1: run every guest function interpreted; ATLAN_NATIVE_SKIP=a,b: only those sets;
+    // ATLAN_NATIVE_SIGNATURES: byte signature file.
+    config.native_functions = std::getenv("ATLAN_NO_NATIVE") == nullptr;
+    if (const char* signatures = std::getenv("ATLAN_NATIVE_SIGNATURES")) config.native_signatures = signatures;
+    if (const char* skip = std::getenv("ATLAN_NATIVE_SKIP")) {  // comma-separated set names
+        std::string name;
+        for (const char* c = skip;; ++c) {
+            if (*c == ',' || *c == 0) { if (!name.empty()) config.native_skip.push_back(name); name.clear(); if (*c == 0) break; }
+            else name += *c;
+        }
+    }
+    if (const char* profile = std::getenv("ATLAN_PROFILE")) config.profile_path = profile;  // per-function profile files
     if (const char* frames = std::getenv("ATLAN_FRAMES")) config.render_frames = static_cast<std::uint32_t>(std::atoi(frames));
     // ATLAN_TAP=X,Y: where the test tap lands in guest screen pixels (default 400,240).
     float tap_x = 400, tap_y = 240;
