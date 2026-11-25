@@ -87,6 +87,7 @@ struct MetalGlBackend::Impl final : GlSink {
     id<MTLTexture> offscreen{};
     id<MTLTexture> depth{};
     id<MTLTexture> black{};
+    id<MTLTexture> readback{};  // CPU-readable copy of the layer's drawable, for glReadPixels
     MTLPixelFormat color_format{MTLPixelFormatBGRA8Unorm};
     // frame
     id<CAMetalDrawable> drawable{};
@@ -177,6 +178,63 @@ struct MetalGlBackend::Impl final : GlSink {
         end_encoder();  // a clear starts a new pass so its load action can do the work
         if (c.color) { pending_color = true; pending.rgba = c.rgba; }
         if (c.depth) { pending_depth = true; pending.depth_value = c.depth_value; }
+    }
+    // glReadPixels on the default framebuffer: RGBA8 rows from the bottom up. What has been drawn so far in this
+    // frame is committed and copied out; the frame then continues in a new command buffer on the same target.
+    bool read_pixels(std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height, std::vector<std::byte>& out) override {
+        begin_frame();
+        if (frame_skipped || !target || width == 0 || height == 0) return false;
+        if (pending_color || pending_depth || !color_valid) ensure_encoder();
+        end_encoder();
+        const auto target_width = static_cast<std::uint32_t>(target.width), target_height = static_cast<std::uint32_t>(target.height);
+        id<MTLTexture> source = target;
+        if (source != offscreen) {  // a drawable's texture cannot be read directly: copy it to a shared one
+            if (!readback || readback.width != target.width || readback.height != target.height || readback.pixelFormat != target.pixelFormat) {
+                MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:target.pixelFormat
+                                                                                              width:target.width height:target.height mipmapped:NO];
+                d.usage = MTLTextureUsageShaderRead;
+#if TARGET_OS_OSX
+                d.storageMode = device.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+#else
+                d.storageMode = MTLStorageModeShared;
+#endif
+                readback = [device newTextureWithDescriptor:d];
+            }
+            if (!readback) return false;
+            source = readback;
+        }
+        id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+        if (source != target)
+            [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(target_width, target_height, 1)
+                        toTexture:source destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+#if TARGET_OS_OSX
+        if (!device.hasUnifiedMemory) [blit synchronizeResource:source];
+#endif
+        [blit endEncoding];
+        [commands commit];
+        [commands waitUntilCompleted];
+        commands = [queue commandBuffer];
+        std::vector<std::uint8_t> pixels(std::size_t{target_width} * target_height * 4);
+        [source getBytes:pixels.data() bytesPerRow:target_width * 4 fromRegion:MTLRegionMake2D(0, 0, target_width, target_height) mipmapLevel:0];
+        const bool bgra = source.pixelFormat == MTLPixelFormatBGRA8Unorm || source.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+        out.assign(std::size_t{width} * height * 4, std::byte{0});
+        for (std::uint32_t row = 0; row < height; ++row) {
+            const std::int64_t gl_row = std::int64_t{y} + row;  // from the bottom
+            if (gl_row < 0 || gl_row >= target_height) continue;
+            const auto* from = pixels.data() + (std::size_t{target_height} - 1 - static_cast<std::size_t>(gl_row)) * target_width * 4;
+            auto* to = out.data() + std::size_t{row} * width * 4;
+            for (std::uint32_t column = 0; column < width; ++column) {
+                const std::int64_t gl_column = std::int64_t{x} + column;
+                if (gl_column < 0 || gl_column >= target_width) continue;
+                const auto* p = from + static_cast<std::size_t>(gl_column) * 4;
+                to[column * 4 + 0] = std::byte{p[bgra ? 2 : 0]};
+                to[column * 4 + 1] = std::byte{p[1]};
+                to[column * 4 + 2] = std::byte{p[bgra ? 0 : 2]};
+                to[column * 4 + 3] = std::byte{p[3]};
+            }
+        }
+        return true;
     }
     void present() override {
         if (!frame_open) return;
@@ -361,7 +419,7 @@ MetalGlBackend::MetalGlBackend(void* layer) : impl_(std::make_unique<Impl>()) {
     if (!impl_->device) return;
     impl_->layer.device = impl_->device;
     impl_->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    impl_->layer.framebufferOnly = YES;
+    impl_->layer.framebufferOnly = NO;  // glReadPixels copies the drawable out
     impl_->layer.opaque = YES;  // GL's default framebuffer has no alpha to composite with
 }
 MetalGlBackend::MetalGlBackend(std::uint32_t width, std::uint32_t height) : impl_(std::make_unique<Impl>()) {

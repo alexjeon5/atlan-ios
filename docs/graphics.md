@@ -32,11 +32,13 @@
 - MSL은 실행 시 `newLibraryWithSource`로 컴파일한다. iOS에서 허용되는 경로다(컴파일은 시스템 컴파일러 서비스가 하고 앱 프로세스에 쓰기+실행 메모리를 만들지 않으므로 JIT 금지와 무관하다). 프로그램당 한 번 컴파일하고 프로그램·블렌드 조합별 파이프라인을 캐시한다.
 - 프레임 하나는 command buffer 하나다. `glClear`는 새 render pass의 load action이 되고, 프레임 끝(`present`)에서 commit한다.
 - GL 좌표 규약은 Metal과 일치한다. 감김(`glFrontFace`)은 그대로 쓰고, viewport의 y만 하단 원점에서 상단 원점으로 바꾼다. macOS CI의 렌더 테스트가 이를 픽셀로 검증한다.
-- iOS 셸은 게스트가 `setSurfaces(w, h)`로 알려 준 크기로 레이어의 `drawableSize`를 맞추고, 화면에는 비율을 유지해 늘린다.
+- iOS 셸은 게스트가 `setSurfaces(w, h)`로 알려 준 크기로 레이어의 `drawableSize`를 맞추고, 화면에는 뷰 전체로 늘려 보여 준다(설정이 화면 크기를 고정하면 비율 유지).
 
 ## 아직 없는 것
 
-`glLineWidth`(Metal에 선 굵기가 없다), 스텐실, scissor, FBO, `glReadPixels`(드로어블은 읽기 불가), ETC1/PVRTC 압축 텍스처, `glGetActiveUniform` 계열. 게스트가 쓰는 import 57개 중 위 항목에 해당하는 것은 `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`뿐이다.
+`glLineWidth`(Metal에 선 굵기가 없다), 스텐실, scissor, FBO, ETC1/PVRTC 압축 텍스처, `glGetActiveUniform` 계열. 게스트가 쓰는 import 57개 중 위 항목에 해당하는 것은 `glLineWidth`, `glCompressedTexImage2D`뿐이다.
+
+`glReadPixels`는 기본 프레임버퍼를 RGBA8로 읽는다. 그 시점까지 그린 내용을 커밋해 읽을 수 있는 텍스처로 복사하고 프레임은 새 커맨드 버퍼로 이어 간다(그래서 레이어는 `framebufferOnly`가 아니다). 게스트는 화면 전환 애니메이션에서 이전·다음 화면을 이렇게 읽어 텍스처로 올린 뒤 밀어서 그리므로, 읽기가 비어 있으면 전환 동안 검은 화면이 나온다.
 
 ## 호출 실측 (게스트가 실제로 부르는 GL)
 
