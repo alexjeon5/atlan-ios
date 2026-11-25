@@ -152,14 +152,19 @@ void GuestSession::run() {
         install_heap_services(dispatcher, heap);
         install_string_services(dispatcher);
         install_printf_services(dispatcher);
-        install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [this](const std::string& text) { log_("guest stdout " + text); });
+        install_console_services(dispatcher, guard_page + 0x100, guard_page + 0x200, [this, seen = std::set<std::string>()](const std::string& text) mutable {
+            if (!seen.insert(text).second) return;  // the guest repeats its polling errors; each text is logged once
+            log_("guest stdout " + text);
+        });
         const std::map<std::string, std::string> properties;
         install_system_properties(dispatcher, properties, [this](const std::string& name, bool known) {
             log_("property " + name + (known ? "" : " (unset)"));
         });
         std::optional<GuestStdio> stdio;
         if (!config_.data_root.empty()) {
-            stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
+            // The guest polls some files that never exist; a failed open is logged the first time only.
+            stdio.emplace(config_.data_root, guard_page + 0x200, [this, failed = std::set<std::string>()](const std::string& path, const std::string& mode, bool ok) mutable {
+                if (!ok && !failed.insert(path + '\n' + mode).second) return;
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
             // The guest's settings file names its folders by absolute Android paths, which differ per device and may
@@ -177,28 +182,16 @@ void GuestSession::run() {
             stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // stock NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
             stdio->add_anchor("atlan", "ATLAN");
-            // The guest reads a copy of the settings file with two entries controlled here.
+            // The guest reads a copy of the settings file with one entry controlled here.
             // CLOUDMAPPATH: where downloaded map tiles would be kept. The stock value names a folder that does not
             // exist, which keeps the downloader off; a missing or writable value turns it on, and its map read thread
             // is never started here, so the first tile request would stop the guest. Always serve the stock value.
-            // SCREENWIDTH/SCREENHEIGHT: the guest takes its screen size from these and reports it back through
-            // setSurfaces. To fill the host surface the long side is adjusted.
-            PixelSize configured{ini_number(settings, "SCREENWIDTH").value_or(0), ini_number(settings, "SCREENHEIGHT").value_or(0)};
-            auto screen = configured;
-            if (config_.fill_surface && config_.surface) {
-                const bool fixed = ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
-                                   ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0;
-                if (!fixed) screen = fill_screen(configured, config_.surface->get());
-                log_("screen " + std::to_string(configured.width) + "x" + std::to_string(configured.height) +
-                     (fixed ? " fixed" : " -> " + std::to_string(screen.width) + "x" + std::to_string(screen.height)));
-            }
-            const bool resize = screen.width != configured.width || screen.height != configured.height;
-            stdio->add_read_filter(settings_file, [screen, resize](std::string text) {
-                text = ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
-                if (!resize) return text;
-                return ini_set(ini_set(std::move(text), "SCREENWIDTH", std::to_string(screen.width)),
-                               "SCREENHEIGHT", std::to_string(screen.height));
+            stdio->add_read_filter(settings_file, [](std::string text) {
+                return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
             });
+            if (config_.on_fixed_screen)
+                config_.on_fixed_screen(ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
+                                        ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0);
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
@@ -284,17 +277,53 @@ void GuestSession::run() {
                 m.result = 0;
                 return std::nullopt;
             });
+            // AtlanGLThread.callBackGLThread(): the guest's GL thread asks for a frame. The Java side answers
+            //   if (isStateReady()) { if (!isGLInit()) setState(2); else { setState(3); requestRender(); } }
+            // with the three natives below; the request is served by the interactive loop.
+            bool render_requested = false;
+            std::uint64_t render_requests = 0;
+            const auto gl_thread_native = [&](const char* name) -> std::uint32_t {
+                const auto* sym = image.find(std::string("Java_com_atlan_AtlanGLThread_") + name);
+                return sym && sym->type == 2 ? sym->address : 0;
+            };
+            const std::uint32_t is_state_ready = gl_thread_native("isStateReady"), is_gl_init = gl_thread_native("isGLInit"),
+                                set_state = gl_thread_native("setState");
+            const bool on_demand = config_.render_on_demand && is_state_ready != 0 && is_gl_init != 0 && set_state != 0;
+            if (on_demand) {
+                java.register_method("com/atlan/AtlanGLThread", "callBackGLThread", "()V",
+                                     [&](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+                    const auto cls = java.class_handle("com/atlan/AtlanGLThread");
+                    const auto call_native = [&](std::uint32_t address, std::optional<std::uint32_t> argument, std::uint32_t& result) -> std::optional<std::string> {
+                        std::vector<std::uint32_t> words{java.env(), cls};
+                        if (argument) words.push_back(*argument);
+                        const auto outcome = dispatcher.call_back(runtime, address, words);
+                        if (outcome.stop != Stop::returned) return "callBackGLThread: a GL thread native did not return" + (outcome.message.empty() ? std::string() : ": " + outcome.message);
+                        result = static_cast<std::uint32_t>(runtime.cpu.registers[0]);
+                        return std::nullopt;
+                    };
+                    std::uint32_t ready = 0, initialised = 0, ignored = 0;
+                    if (auto error = call_native(is_state_ready, std::nullopt, ready)) return error;
+                    if ((ready & 0xff) != 0) {
+                        if (auto error = call_native(is_gl_init, std::nullopt, initialised)) return error;
+                        if (auto error = call_native(set_state, (initialised & 0xff) != 0 ? 3u : 2u, ignored)) return error;
+                        if ((initialised & 0xff) != 0) { render_requested = true; ++render_requests; }
+                    }
+                    m.result = 0;
+                    return std::nullopt;
+                });
+            }
             // Other void UI callbacks the guest raises: recorded in the log, no host effect yet.
             struct Callback { const char* cls; const char* name; const char* signature; };
             for (const Callback& cb : {Callback{"com/atlan/MainActivity", "SendMsgFromAtlan", "(III[B)V"},
                                        Callback{"com/atlan/MainActivity", "JniArSettingData", "(IIII)V"},
                                        Callback{"com/atlan/MainActivity", "SendMsgFromTPEGD", "(III[B)V"},
                                        Callback{"com/atlan/AtlanGLThread", "callBackGLThread", "()V"}}) {
+                if (on_demand && std::string_view(cb.name) == "callBackGLThread") continue;
                 java.register_method(cb.cls, cb.name, cb.signature,
-                                     [this, label = std::string(cb.cls).substr(std::string(cb.cls).rfind('/') + 1) + "." + cb.name](JavaBootstrap::MethodCall& m) -> std::optional<std::string> {
+                                     [this, logged = std::set<std::string>(), label = std::string(cb.cls).substr(std::string(cb.cls).rfind('/') + 1) + "." + cb.name](JavaBootstrap::MethodCall& m) mutable -> std::optional<std::string> {
                     std::string args;
                     for (auto a : m.args) args += (args.empty() ? "" : ",") + std::to_string(a);
-                    log_("java " + label + "(" + args + ")");
+                    if (logged.insert(label + "(" + args + ")").second) log_("java " + label + "(" + args + ")");  // periodic; once each
                     m.result = 0;
                     return std::nullopt;
                 });
@@ -451,19 +480,30 @@ void GuestSession::run() {
                 std::uint64_t frames = 0, render_instructions = 0, pump_instructions = 0;
                 double render_seconds = 0, render_worst = 0, pump_seconds = 0, audio_seconds = 0, idle_seconds = 0;
                 dispatcher.reset_import_counts();
+                log_(on_demand ? "frames on request" : "frames every interval");
+                auto last_draw = std::chrono::steady_clock::now();
+                std::uint64_t drawn = 0;
                 while (!stop_.load()) {
                     const auto frame_start = std::chrono::steady_clock::now();
                     if (!deliver_input()) return;
-                    const auto frame = dispatcher.call(runtime, render->address, render_args, stack_base + stack_bytes,
-                                                       return_sentinel, config_.surface_call_budget);
-                    if (frame.stop != Stop::returned) {
-                        log_(describe_state(runtime, dispatcher));
-                        fail(describe_stop("renderGLSF", frame));
-                        return;
+                    CallOutcome frame;
+                    const bool draw = !on_demand || render_requested ||
+                                      seconds_since(last_draw) * 1000.0 >= static_cast<double>(config_.idle_redraw_ms);
+                    if (draw) {
+                        render_requested = false;
+                        last_draw = frame_start;
+                        ++drawn;
+                        frame = dispatcher.call(runtime, render->address, render_args, stack_base + stack_bytes,
+                                                return_sentinel, config_.surface_call_budget);
+                        if (frame.stop != Stop::returned) {
+                            log_(describe_state(runtime, dispatcher));
+                            fail(describe_stop("renderGLSF", frame));
+                            return;
+                        }
+                        GlCall swap;
+                        swap.op = GlOp::swap_buffers;
+                        (config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl)).execute(swap);
                     }
-                    GlCall swap;
-                    swap.op = GlOp::swap_buffers;
-                    (config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl)).execute(swap);
                     const double rendered = seconds_since(frame_start);
                     const auto pump_start = std::chrono::steady_clock::now();
                     const auto background = dispatcher.pump(runtime, config_.initializer_budget);
@@ -485,7 +525,9 @@ void GuestSession::run() {
                     pump_seconds += pumped_seconds;
                     if (const double elapsed = seconds_since(report_start); elapsed >= report_seconds) {
                         const auto ms = [&](double total) { return std::to_string(total * 1000.0 / static_cast<double>(frames)); };
-                        std::string line = "perf frames: " + std::to_string(static_cast<double>(frames) / elapsed) + " fps; per frame render " +
+                        std::string line = "perf frames: " + std::to_string(static_cast<double>(drawn) / elapsed) + " fps (" +
+                            std::to_string(drawn) + " drawn in " + std::to_string(frames) + " intervals, " + std::to_string(render_requests) +
+                            " requests); per interval render " +
                             ms(render_seconds) + " ms (worst " + std::to_string(render_worst * 1000.0) + "), threads " + ms(pump_seconds) +
                             " ms, audio " + ms(audio_seconds) + " ms, idle " + ms(idle_seconds) + " ms; render " +
                             std::to_string(render_instructions / frames) + " instructions/frame at " +
@@ -495,7 +537,7 @@ void GuestSession::run() {
                         log_(line);
                         dispatcher.reset_import_counts();
                         report_start = std::chrono::steady_clock::now();
-                        frames = render_instructions = pump_instructions = 0;
+                        frames = render_instructions = pump_instructions = drawn = render_requests = 0;
                         render_seconds = render_worst = pump_seconds = audio_seconds = idle_seconds = 0;
                     }
                 }
