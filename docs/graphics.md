@@ -38,6 +38,10 @@
 
 `glLineWidth`(Metal에 선 굵기가 없다), 스텐실, scissor, FBO, `glReadPixels`(드로어블은 읽기 불가), ETC1/PVRTC 압축 텍스처, 밉맵, `glGetActiveUniform` 계열. 게스트가 쓰는 import 57개 중 위 항목에 해당하는 것은 `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`뿐이다.
 
+## 호출 실측 (게스트가 실제로 부르는 GL)
+
+헤드리스 세션(`atlan-session`, `ATLAN_RAW_GL=1`)으로 createGLSF와 renderGLSF 2회까지(세 번째 renderGLSF는 `CMapReadThread::enqueue` NULL 접근으로 중단) 집계한 결과, `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`는 한 번도 불리지 않았다. 스텐실·scissor·FBO·`glBlendEquation` 계열은 게스트의 import 57개에 아예 없어 직접 호출할 수 없고, `eglGetProcAddress`는 명시적으로 멈추게 되어 있다. 따라서 이 기능들은 지도 3D draw가 실제로 나오기 전까지 구현하지 않고 미룬다. 지도 렌더링이 시작되어 호출이 관측되면 그 순서로 구현한다(넓은 선은 쿼드 확장 방식으로 할 계획).
+
 ## 검증
 
 - `glsl-tests`, `gl-context-tests`: 번역 결과와 GL 상태 처리(Linux, 모든 CI 러너).
