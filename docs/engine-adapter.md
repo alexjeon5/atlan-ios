@@ -18,6 +18,7 @@
 | `src/elf.cpp` | 엔진 | ELF32 ARM 로더 |
 | `src/imports.cpp`, `lifetime.cpp` | 엔진 | import 디스패치, atexit·생성자 |
 | `src/libc_services.cpp`, `heap.cpp`, `threads.cpp` | 엔진 | libc·힙·스레드 서비스 |
+| `src/native_functions.cpp`, `native_runtime.cpp`, `inflate.cpp`, `profiler.cpp` | 엔진 | 게스트 함수의 네이티브 대체(표준 런타임 라이브러리 이름만)와 프로파일러. 앱 고유 대체 집합은 어댑터가 넘김. [네이티브 대체](native.md) |
 | `src/files.cpp` | 엔진 | 가상 파일 디스크립터. 파일 이름·배치는 어댑터가 정함 |
 | `src/abi.cpp`, `src/android_log.cpp` | 엔진 | 인자 읽기·printf 전개·로그 |
 | `src/jni.cpp` (`JavaBootstrap`) | **경계** | 테이블·트랩·핸들 구조는 엔진, 어떤 클래스·메서드에 어떻게 답하는지는 어댑터 |

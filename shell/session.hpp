@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 #include "shell/input.hpp"
 #include "shell/surface.hpp"
 
@@ -46,6 +47,16 @@ struct SessionConfig {
     bool render_on_demand{};
     std::uint32_t idle_redraw_ms{1000};
     bool block_cache{true};  // false: single-step interpreter (comparison and diagnosis)
+    // Replace run-time library functions inside the guest image by host implementations where the guest's own code
+    // is found and agrees with them (atlan/native_functions.hpp). `native_signatures` optionally names a file of
+    // byte signatures for functions the image does not export; a missing file is not an error.
+    bool native_functions{true};
+    std::string native_signatures;
+    std::vector<std::string> native_skip;  // names of replacement sets to leave interpreted (diagnosis)
+    // Non-empty: profile guest functions (atlan/profiler.hpp) and write `<profile_path>.<phase>.tsv` per phase:
+    // init, each surface call, render (the first `render_frames` frames), frames (each interactive report
+    // interval; repeated phases are numbered). Slows the guest down.
+    std::string profile_path;
     bool perf_log{};         // log instructions, seconds and MIPS per surface/render call, and block cache coverage
 };
 
