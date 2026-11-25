@@ -91,6 +91,8 @@ struct CallOutcome {
 class ImportDispatcher {
 public:
     static constexpr unsigned max_depth = 16;
+    // Instructions one guest callback may retire, independent of the budget left to its caller.
+    static constexpr std::uint64_t callback_budget = 1ULL << 32;
     // Registers a service for one symbol name; false if the name is already bound.
     bool bind(std::string name, ImportService service);
     // Binds one host-reserved, unmapped, 4-byte aligned trap address to a name.

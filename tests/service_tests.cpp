@@ -338,6 +338,24 @@ void libc_extras() {
     bool ordered = true;
     for (unsigned i = 0; i < 7; ++i) ordered &= static_cast<std::int32_t>(get32(f.runtime.memory, data + 0x400 + 4 * i)) == expected[i];
     check(ordered, "qsort orders the array through the comparator");
+    // A guest comparator keeps running when the caller's budget runs out during the sort: a callback cannot be
+    // suspended, so it has its own bound and its instructions are charged to the caller afterwards.
+    {
+        constexpr std::uint32_t code = 0x40000;
+        const std::uint32_t words[] = {0xe5900000, 0xe5911000, 0xe0400001, 0xe12fff1e};  // ldr r0,[r0]; ldr r1,[r1]; sub r0,r0,r1; bx lr
+        std::array<std::byte, 16> bytes{};
+        std::memcpy(bytes.data(), words, sizeof words);
+        f.runtime.memory.map(code, 0x1000, atlan::Permissions::read_execute, bytes);
+        for (unsigned i = 0; i < 7; ++i) put32(f.runtime.memory, data + 0x400 + 4 * i, static_cast<std::uint32_t>(unsorted[i]));
+        f.runtime.cpu.registers[13] = stack;
+        const std::vector<std::uint32_t> args{data + 0x400, 7, 4, code};
+        const auto sorted = f.dispatcher.call(f.runtime, trap("qsort"), args, stack, sentinel, 20);
+        check(sorted.stop == atlan::Stop::budget_exhausted || sorted.stop == atlan::Stop::returned, "qsort with a guest comparator outlasts a small budget");
+        bool guest_ordered = true;
+        for (unsigned i = 0; i < 7; ++i) guest_ordered &= static_cast<std::int32_t>(get32(f.runtime.memory, data + 0x400 + 4 * i)) == expected[i];
+        check(guest_ordered, "qsort orders the array through a guest comparator past the caller's budget");
+        check(f.dispatcher.remaining_budget() == 0, "the comparator's instructions are charged to the caller");
+    }
     // setjmp saves callee-saved state; longjmp resumes at the setjmp return address with the given value.
     f.runtime.cpu.registers[4] = 0x1234; f.runtime.cpu.registers[14] = 0xffff0000; f.runtime.cpu.registers[13] = stack;
     check(f.call("setjmp", {data + 0x300}).stop == atlan::Stop::returned && f.r0() == 0, "setjmp returns 0");
