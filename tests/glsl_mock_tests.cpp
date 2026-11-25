@@ -21,6 +21,9 @@ namespace scene {
 namespace flat {
 #include "flat.metal"
 }
+namespace blend {
+#include "blend.metal"
+}
 
 namespace {
 int checks = 0;
@@ -115,6 +118,40 @@ int main() {
     flat::VIn fin{};
     fin.a_xy = float2{-1, 1};
     check(near4(flat::vs_main(fin, flu).gl_Position, -1, 1, 0.5f, 1), "2-component attribute widened to vec4 position");
+
+    // ---- blend program: two samplers, mix with a scalar factor, a blur loop-free tap sum, read-modify-write of gl_FragColor
+    blend::Uniforms bu{};
+    blend::VOut bv{};
+    bv.v_uv0 = float2{0.5f, 0.5f};
+    bv.v_uv1 = float2{0.25f, 0.75f};
+    texture2d<float> ta, tb;
+    ta.fetch = [](float2 uv) { return float4{1, 0, 0, 1} * (1.0f + uv.x - uv.x); };
+    tb.fetch = [](float2) { return float4{0, 1, 0, 1}; };
+    bu.u_mixAmount = 0.25f;
+    auto bf = blend::fs_main(bv, bu, ta, smp, tb, smp);
+    check(near4(bf.gl_FragColor, 0.75f, 0.25f, 0, 1), "mix() of two samplers with a scalar factor");
+    bu.u_swap = 1;
+    bf = blend::fs_main(bv, bu, ta, smp, tb, smp);
+    check(near4(bf.gl_FragColor, 0, 0.25f, 0.75f, 1), "reading gl_FragColor back and swizzle-swapping it");
+    bu.u_swap = 0;
+    bu.u_mode = 1;
+    bu.u_blurDir = float2{0.1f, 0};
+    int taps = 0;
+    ta.fetch = [&](float2) { ++taps; return float4{0.5f, 0.5f, 0.5f, 1}; };
+    bf = blend::fs_main(bv, bu, ta, smp, tb, smp);
+    check(taps == 4 + 0 && near4(bf.gl_FragColor, 0.5f, 0.5f, 0.5f, 1), "else-if branch sums weighted taps");
+    bu.u_mode = 2;
+    bf = blend::fs_main(bv, bu, ta, smp, tb, smp);
+    check(near4(bf.gl_FragColor, 0, 0, 0, 1), "final else branch");
+    {
+        blend::VIn bin{};
+        bin.a_pos = float4{0, 0, 0, 1};
+        bin.a_uv0 = float2{0.1f, 0.2f};
+        bin.a_uv1 = float2{0.3f, 0.4f};
+        bu.u_mvp = blend::float4x4(float4{1, 0, 0, 0}, float4{0, 1, 0, 0}, float4{0, 0, 1, 0}, float4{0, 0, 0, 1});
+        const auto bo = blend::vs_main(bin, bu);
+        check(near(bo.v_uv0.y, 0.2f) && near(bo.v_uv1.x, 0.3f), "comma-declared attributes and varyings");
+    }
 
     // ---- layout of the compiled struct matches the reflection the GL layer uses
     const auto program = link_sources("uniform mat4 u_mvp;uniform mat4 u_view;uniform mat4 u_normal;uniform vec4 u_tint;uniform vec4 u_eye;attribute vec4 a_pos;attribute vec3 a_normal;attribute vec2 a_uv;attribute vec4 a_extra;void main(){gl_Position=u_mvp*a_pos+u_view*a_pos+u_normal*a_pos+u_tint+u_eye+vec4(a_normal,0.0)+vec4(a_uv,0.0,0.0)+a_extra;}",

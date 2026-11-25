@@ -111,15 +111,15 @@ if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Compile the MSL the translator emits for the synthetic shaders as C++ against a mock <metal_stdlib> and run it.
     set(GLSL_MOCK_DIR ${CMAKE_CURRENT_BINARY_DIR}/glsl-mock)
-    foreach(prog scene flat)
+    foreach(prog scene flat blend)
       add_custom_command(OUTPUT ${GLSL_MOCK_DIR}/${prog}.metal
         COMMAND ${CMAKE_COMMAND} -E make_directory ${GLSL_MOCK_DIR}
         COMMAND atlan-glsl ${CMAKE_CURRENT_SOURCE_DIR}/tests/glsl/${prog}.vert ${CMAKE_CURRENT_SOURCE_DIR}/tests/glsl/${prog}.frag > ${GLSL_MOCK_DIR}/${prog}.metal
         DEPENDS atlan-glsl ${CMAKE_CURRENT_SOURCE_DIR}/tests/glsl/${prog}.vert ${CMAKE_CURRENT_SOURCE_DIR}/tests/glsl/${prog}.frag
         VERBATIM)
     endforeach()
-    add_executable(glsl-mock-tests tests/glsl_mock_tests.cpp ${GLSL_MOCK_DIR}/scene.metal ${GLSL_MOCK_DIR}/flat.metal)
-    set_source_files_properties(${GLSL_MOCK_DIR}/scene.metal ${GLSL_MOCK_DIR}/flat.metal PROPERTIES HEADER_FILE_ONLY TRUE)
+    add_executable(glsl-mock-tests tests/glsl_mock_tests.cpp ${GLSL_MOCK_DIR}/scene.metal ${GLSL_MOCK_DIR}/flat.metal ${GLSL_MOCK_DIR}/blend.metal)
+    set_source_files_properties(${GLSL_MOCK_DIR}/scene.metal ${GLSL_MOCK_DIR}/flat.metal ${GLSL_MOCK_DIR}/blend.metal PROPERTIES HEADER_FILE_ONLY TRUE)
     target_include_directories(glsl-mock-tests PRIVATE tests/mock_metal ${GLSL_MOCK_DIR})
     target_link_libraries(glsl-mock-tests PRIVATE atlan_runtime)
     target_compile_options(glsl-mock-tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function)
@@ -133,6 +133,7 @@ if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     enable_language(OBJCXX)
     add_executable(metal-render-tests tests/metal_render_tests.mm platform/apple/metal_gl_backend.mm)
     target_include_directories(metal-render-tests PRIVATE platform/apple tests)
+    target_compile_definitions(metal-render-tests PRIVATE ATLAN_TEST_GLSL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/glsl")
     target_link_libraries(metal-render-tests PRIVATE atlan_runtime "-framework Metal" "-framework QuartzCore" "-framework Foundation")
     target_compile_options(metal-render-tests PRIVATE -fobjc-arc -Wall -Wextra -Werror)
     set_target_properties(metal-render-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)

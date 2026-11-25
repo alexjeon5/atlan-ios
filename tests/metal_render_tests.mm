@@ -149,6 +149,62 @@ int main() {
         check(near(at(img, 16, 16), 0, 0, 255) && near(at(img, 48, 16), 255, 255, 255), "second texture row is at the top: " + show(at(img, 16, 16)) + show(at(img, 48, 16)));
     }
 
+    // the synthetic scene/blend programs exercise the same constructs as real content: they must build and render
+    {
+        const std::string dir = ATLAN_TEST_GLSL_DIR;
+        const auto scene = gl.program(slurp(dir + "/scene.vert"), slurp(dir + "/scene.frag"));
+        check(gl.linked(scene), "scene program links");
+        gl.op(GlOp::use_program, {scene});
+        gl.matrix4(gl.uniform(scene, "u_mvp"), identity());
+        gl.matrix4(gl.uniform(scene, "u_view"), identity());
+        gl.matrix4(gl.uniform(scene, "u_normal"), identity());
+        gl.uniform1i(gl.uniform(scene, "u_lightCount"), 1);
+        gl.uniform4(gl.uniform(scene, "u_lightPos[0]"), 0, 0, 1, 0);
+        gl.uniform4(gl.uniform(scene, "u_diffuse[0]"), 0.5F, 0.5F, 0.5F, 1);
+        gl.uniform4(gl.uniform(scene, "u_ambient"), 0.1F, 0.1F, 0.1F, 0);
+        { GlCall one; one.op = GlOp::uniform_2fv; one.a = {gl.uniform(scene, "u_scale"), 1}; one.data = bytes_of<float>({1, 1}); backend.execute(one); }
+        const auto white = gl.gen(GlOp::gen_texture);
+        gl.op(GlOp::bind_texture, {0x0DE1, white});
+        GlCall px; px.op = GlOp::tex_image_2d; px.a = {0x0DE1, 0, 0x1908, 1, 1, 0, 0x1908, 0x1401};
+        for (int i = 0; i < 4; ++i) px.data.push_back(std::byte(255));
+        backend.execute(px);
+        gl.uniform1i(gl.uniform(scene, "u_tex"), 0);
+        begin(0, 0, 0);
+        // a_extra defaults to (0,0,0,1): vertex color rgb is 1, so the result is the lit white texel: (0.5 + 0.1) * 255
+        gl.draw(4, {{gl.attrib(scene, "a_pos"), {3, cover_ccw}}, {gl.attrib(scene, "a_normal"), {3, {0, 0, 1, 0, 0, 1, 0, 0, 1}}}}, 3);
+        check(frame() && near(at(img, 32, 32), 153, 153, 153, 3), "scene program: texture * (diffuse N.L + ambient): got " + show(at(img, 32, 32)));
+
+        const auto mixer = gl.program(slurp(dir + "/blend.vert"), slurp(dir + "/blend.frag"));
+        check(gl.linked(mixer), "blend program links");
+        gl.op(GlOp::use_program, {mixer});
+        const auto red = gl.gen(GlOp::gen_texture), green = gl.gen(GlOp::gen_texture);
+        const auto upload = [&](std::uint32_t unit, std::uint32_t tex, unsigned char r, unsigned char g, unsigned char b) {
+            gl.op(GlOp::active_texture, {0x84C0 + unit});
+            gl.op(GlOp::bind_texture, {0x0DE1, tex});
+            GlCall c; c.op = GlOp::tex_image_2d; c.a = {0x0DE1, 0, 0x1908, 1, 1, 0, 0x1908, 0x1401};
+            for (unsigned char v : {r, g, b, (unsigned char)255}) c.data.push_back(std::byte(v));
+            backend.execute(c);
+            GlCall f; f.op = GlOp::tex_parameter_i; f.a = {0x0DE1, 0x2801, 0x2600}; backend.execute(f);
+        };
+        upload(0, red, 255, 0, 0);
+        upload(1, green, 0, 255, 0);
+        gl.uniform1i(gl.uniform(mixer, "u_a"), 0);
+        gl.uniform1i(gl.uniform(mixer, "u_b"), 1);
+        gl.matrix4(gl.uniform(mixer, "u_mvp"), identity());
+        { GlCall f; f.op = GlOp::uniform_1f; f.a[0] = gl.uniform(mixer, "u_mixAmount"); f.f[0] = 0.25F; backend.execute(f); }
+        gl.uniform1i(gl.uniform(mixer, "u_mode"), 0);
+        const std::vector<float> uvs = {0, 0, 1, 0, 0, 1};
+        const auto mix_draw = [&]() {
+            begin(0, 0, 0);
+            gl.draw(4, {{gl.attrib(mixer, "a_pos"), {3, cover_ccw}}, {gl.attrib(mixer, "a_uv0"), {2, uvs}}, {gl.attrib(mixer, "a_uv1"), {2, uvs}}}, 3);
+            return frame();
+        };
+        check(mix_draw() && near(at(img, 8, 56), 191, 64, 0, 2), "blend program: mix(red, green, 0.25), two samplers: got " + show(at(img, 8, 56)));
+        gl.uniform1i(gl.uniform(mixer, "u_swap"), 1);
+        check(mix_draw() && near(at(img, 8, 56), 0, 64, 191, 2), "blend program: gl_FragColor read back and swapped: got " + show(at(img, 8, 56)));
+        check(backend.stats().library_failures == 0 && backend.stats().pipeline_failures == 0, "no Metal library or pipeline failures so far");
+    }
+
     // every program in a shader container builds a Metal pipeline
     if (const char* dat = std::getenv("ATLAN_SHADER_DAT")) {
         const auto blob = slurp(dat);
