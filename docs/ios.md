@@ -32,3 +32,9 @@ CI는 `Release-iphoneos` 앱을 `Payload/`로 압축한 서명 없는 IPA(`atlan
 ## 화면
 
 가로 모드 전용(`LandscapeLeft/Right`)이며 iPhone·iPad 모두 지원한다(`TARGETED_DEVICE_FAMILY` 1,2, iPad는 가로 전용을 위해 `UIRequiresFullScreen`). 렌더링 해상도의 기본값은 기기 실제 픽셀(points × `nativeScale`)이고, 발열 대비 내부 해상도 배율은 `shell/render_config.hpp`의 `render_size`에서 0.25~1.0으로 줄일 수 있게 자리만 두었다(UI 옵션은 아직 없다). 그래픽 서비스(M4) 전까지 이 값은 쓰이지 않는다.
+
+## 실행 중 동작
+
+- 게스트 화면은 설정의 화면 크기와 상관없이 기기 화면 전체에 늘려 표시한다.
+- 게스트가 실행 중이면 화면 자동 잠금을 끈다(`idleTimerDisabled`).
+- 게스트의 종료 대화상자에서 종료를 고르면 앱도 끝난다. 안드로이드 쪽 Java 코드처럼 `MainActivity.nativeIsProgramExit`를 1초마다 확인하고(`SessionConfig::on_guest_exit`), 참이면 세션을 끝낸 뒤 프로세스를 종료한다.
