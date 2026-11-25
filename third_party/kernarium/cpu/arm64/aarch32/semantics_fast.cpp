@@ -106,11 +106,13 @@ constexpr bool is_compare(Op op) noexcept
 }
 
 /* The second operand's shape: an immediate, a register, a register shifted by
- * an immediate. */
-enum : int { shape_immediate, shape_register, shape_shifted };
+ * an immediate, a register shifted by a register (`shift_n` names it). */
+enum : int { shape_immediate, shape_register, shape_shifted, shape_by_register };
 
-/* exec_data_processing() for one operation, shape and flag setting. */
-template <Op Operation, int Shape, bool SetFlags>
+/* exec_data_processing() for one operation, shape and flag setting. With
+ * FirstConstant the first operand is the PC, whose value is `imm2`; with ToPc
+ * the destination is the PC (ALUWritePC, `index` set in T32). */
+template <Op Operation, int Shape, bool SetFlags, bool FirstConstant, bool ToPc>
 unsigned data_processing(CpuState &cpu, const FastOp &op, Memory &) noexcept
 {
 	if (!passes(cpu, op)) [[unlikely]]
@@ -124,12 +126,15 @@ unsigned data_processing(CpuState &cpu, const FastOp &op, Memory &) noexcept
 		b = reg(cpu, op.m);
 		shifter_carry = flag_c(cpu);
 	} else {
+		const unsigned amount = Shape == shape_by_register ? reg(cpu, op.shift_n) & 0xffU
+								   : op.shift_n;
 		const auto shifted = shift_c(reg(cpu, op.m), static_cast<SRType>(op.shift_t),
-			op.shift_n, flag_c(cpu));
+			amount, flag_c(cpu));
 		b = shifted.value;
 		shifter_carry = shifted.carry;
 	}
-	const std::uint32_t a = Operation != Op::mov && Operation != Op::mvn ? reg(cpu, op.n) : 0U;
+	const std::uint32_t a = Operation == Op::mov || Operation == Op::mvn ? 0U
+		: FirstConstant ? op.imm2 : reg(cpu, op.n);
 	std::uint32_t result;
 	bool carry = shifter_carry;
 	bool overflow = false;
@@ -152,6 +157,8 @@ unsigned data_processing(CpuState &cpu, const FastOp &op, Memory &) noexcept
 	case Op::mov: result = b; break;
 	default: result = ~b; break;
 	}
+	if (ToPc && !is_compare(Operation))
+		return jump(cpu, op, op.index ? t32_key(result & ~1U) : key_from_target(result));
 	if (!is_compare(Operation))
 		cpu.registers[op.d] = result;
 	if (SetFlags) {
@@ -163,11 +170,12 @@ unsigned data_processing(CpuState &cpu, const FastOp &op, Memory &) noexcept
 	return advance(cpu, op);
 }
 
-template <int Shape, bool SetFlags>
-[[nodiscard]] FastOp::Run data_processing_for(Op op) noexcept
+template <int Shape, bool SetFlags, bool FirstConstant, bool ToPc>
+[[nodiscard]] FastOp::Run data_processing_as(Op op) noexcept
 {
 	switch (op) {
-#define UML_A32_FAST_DP(name) case Op::name: return data_processing<Op::name, Shape, SetFlags>;
+#define UML_A32_FAST_DP(name) \
+	case Op::name: return data_processing<Op::name, Shape, SetFlags, FirstConstant, ToPc>;
 	UML_A32_FAST_DP(add) UML_A32_FAST_DP(addw) UML_A32_FAST_DP(cmn) UML_A32_FAST_DP(adc)
 	UML_A32_FAST_DP(sub) UML_A32_FAST_DP(subw) UML_A32_FAST_DP(cmp) UML_A32_FAST_DP(sbc)
 	UML_A32_FAST_DP(rsb) UML_A32_FAST_DP(rsc) UML_A32_FAST_DP(and_) UML_A32_FAST_DP(tst)
@@ -176,6 +184,20 @@ template <int Shape, bool SetFlags>
 #undef UML_A32_FAST_DP
 	default: return nullptr;
 	}
+}
+
+template <int Shape>
+[[nodiscard]] FastOp::Run data_processing_for(Op op, bool flags, bool first_constant,
+	bool to_pc) noexcept
+{
+	if (to_pc)
+		return first_constant ? data_processing_as<Shape, false, true, true>(op)
+				      : data_processing_as<Shape, false, false, true>(op);
+	if (flags)
+		return first_constant ? data_processing_as<Shape, true, true, false>(op)
+				      : data_processing_as<Shape, true, false, false>(op);
+	return first_constant ? data_processing_as<Shape, false, true, false>(op)
+			      : data_processing_as<Shape, false, false, false>(op);
 }
 
 /* MOVW, and ADR to a register other than the PC: a constant. */
@@ -229,14 +251,30 @@ unsigned multiply(CpuState &cpu, const FastOp &op, Memory &) noexcept
 	return advance(cpu, op);
 }
 
+/* MLA and MLS: `shift_n` names the addend. */
+template <bool Subtract, bool SetFlags>
+unsigned multiply_accumulate(CpuState &cpu, const FastOp &op, Memory &) noexcept
+{
+	if (passes(cpu, op)) [[likely]] {
+		const std::uint32_t product = reg(cpu, op.n) * reg(cpu, op.m);
+		const std::uint32_t result = Subtract ? reg(cpu, op.shift_n) - product
+						      : product + reg(cpu, op.shift_n);
+		cpu.registers[op.d] = result;
+		if (SetFlags)
+			set_nzc(cpu, result, flag_c(cpu));
+	}
+	return advance(cpu, op);
+}
+
 /* How a single transfer forms its address: a constant (the literal pool), the
  * base and an immediate, the base and a register, the base and a shifted
  * register. */
 enum : int { address_constant, address_immediate, address_register, address_shifted };
 
 /* exec_single_transfer() for the byte, halfword and word loads and stores of
- * one access inside a page. */
-template <unsigned Size, bool Sign, bool Load, int Address>
+ * one access inside a page. With BaseConstant the base is the PC, whose value
+ * is `imm2`; with ToPc a word load writes the PC (LoadWritePC). */
+template <unsigned Size, bool Sign, bool Load, int Address, bool BaseConstant, bool ToPc>
 unsigned single_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noexcept
 {
 	if (!passes(cpu, op)) [[unlikely]]
@@ -246,7 +284,7 @@ unsigned single_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noexce
 	if (Address == address_constant) {
 		address = op.imm;
 	} else {
-		const std::uint32_t base = reg(cpu, op.n);
+		const std::uint32_t base = BaseConstant ? op.imm2 : reg(cpu, op.n);
 		std::uint32_t offset;
 		if (Address == address_immediate)
 			offset = op.imm;
@@ -277,34 +315,46 @@ unsigned single_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noexce
 		} else {
 			std::memcpy(&data, host, 4);
 		}
-		if (Address != address_constant && op.wback)
+		if (Address != address_constant && !BaseConstant && op.wback)
 			cpu.registers[op.n] = offset_address;
+		if (ToPc)
+			return jump(cpu, op, key_from_target(data));
 		cpu.registers[op.d] = data;
 	} else {
 		const std::uint32_t value = reg(cpu, op.d);
 		std::memcpy(host, &value, Size);
 		/* What the runtime's A32Memory::stored() does after every store. */
 		cpu.clear_exclusive_monitor();
-		if (Address != address_constant && op.wback)
+		if (Address != address_constant && !BaseConstant && op.wback)
 			cpu.registers[op.n] = offset_address;
 	}
 	return advance(cpu, op);
 }
 
-template <int Address>
-[[nodiscard]] FastOp::Run single_transfer_for(Op op) noexcept
+template <int Address, bool BaseConstant>
+[[nodiscard]] FastOp::Run single_transfer_as(Op op, bool to_pc) noexcept
 {
+	if (to_pc)
+		return op == Op::ldr ? single_transfer<4, false, true, Address, BaseConstant, true>
+				     : nullptr;
 	switch (op) {
-	case Op::ldr: return single_transfer<4, false, true, Address>;
-	case Op::ldrb: return single_transfer<1, false, true, Address>;
-	case Op::ldrh: return single_transfer<2, false, true, Address>;
-	case Op::ldrsb: return single_transfer<1, true, true, Address>;
-	case Op::ldrsh: return single_transfer<2, true, true, Address>;
-	case Op::str: return single_transfer<4, false, false, Address>;
-	case Op::strb: return single_transfer<1, false, false, Address>;
-	case Op::strh: return single_transfer<2, false, false, Address>;
+	case Op::ldr: return single_transfer<4, false, true, Address, BaseConstant, false>;
+	case Op::ldrb: return single_transfer<1, false, true, Address, BaseConstant, false>;
+	case Op::ldrh: return single_transfer<2, false, true, Address, BaseConstant, false>;
+	case Op::ldrsb: return single_transfer<1, true, true, Address, BaseConstant, false>;
+	case Op::ldrsh: return single_transfer<2, true, true, Address, BaseConstant, false>;
+	case Op::str: return single_transfer<4, false, false, Address, BaseConstant, false>;
+	case Op::strb: return single_transfer<1, false, false, Address, BaseConstant, false>;
+	case Op::strh: return single_transfer<2, false, false, Address, BaseConstant, false>;
 	default: return nullptr;
 	}
+}
+
+template <int Address>
+[[nodiscard]] FastOp::Run single_transfer_for(Op op, bool base_constant, bool to_pc) noexcept
+{
+	return base_constant ? single_transfer_as<Address, true>(op, to_pc)
+			     : single_transfer_as<Address, false>(op, to_pc);
 }
 
 /* exec_multiple_transfer() when the block of words is aligned and inside one
@@ -463,11 +513,16 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 		const bool compare = is_compare(info.op);
 		const bool wants_n = info.op != Op::mov && info.op != Op::mvn;
 		const std::int32_t n = info.sp_base ? static_cast<std::int32_t>(reg_sp) : o.n;
-		if ((!compare && !is_core(o.d)) || (wants_n && !is_core(n)))
-			return false;
-		op.d = compare ? std::uint8_t{0} : static_cast<std::uint8_t>(o.d);
-		op.n = wants_n ? static_cast<std::uint8_t>(n) : std::uint8_t{0};
 		const bool flags = compare || o.setflags;
+		const bool to_pc = !compare && o.d == static_cast<std::int32_t>(reg_pc);
+		const bool first_constant = wants_n && n == static_cast<std::int32_t>(reg_pc);
+		if ((!compare && !to_pc && !is_core(o.d)) || (to_pc && flags)
+			|| (wants_n && !first_constant && !is_core(n)))
+			return false;
+		op.d = compare || to_pc ? std::uint8_t{0} : static_cast<std::uint8_t>(o.d);
+		op.n = wants_n && !first_constant ? static_cast<std::uint8_t>(n) : std::uint8_t{0};
+		op.imm2 = pc_value;
+		op.index = thumb;
 		if (info.shape == Shape::immediate) {
 			if (is_logical(info.op) && info.op != Op::mov) {
 				const auto expanded = o.a32 ? a32_expand_imm_c(o.imm)
@@ -478,20 +533,35 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 				op.imm = static_cast<std::uint32_t>(o.imm32);
 				op.carry = o.carry_flags ? 0U : o.carry != 0U ? 2U : 1U;
 			}
-			op.run = flags ? data_processing_for<shape_immediate, true>(info.op)
-				       : data_processing_for<shape_immediate, false>(info.op);
+			op.run = data_processing_for<shape_immediate>(info.op, flags, first_constant, to_pc);
 		} else if (info.shape == Shape::reg) {
-			if (!is_core(o.m) || o.shift_n < 0 || o.shift_n > 32)
+			if (o.shift_n < 0 || o.shift_n > 32)
+				return false;
+			if (o.m == static_cast<std::int32_t>(reg_pc)) {
+				/* The PC as the second operand is a constant; its shifter
+				 * carry would need the flags, so only without them. */
+				if (flags || o.shift_t == SRType::RRX)
+					return false;
+				op.imm = shift_c(pc_value, o.shift_t, static_cast<unsigned>(o.shift_n), false).value;
+				op.run = data_processing_for<shape_immediate>(info.op, false, first_constant, to_pc);
+				break;
+			}
+			if (!is_core(o.m))
 				return false;
 			op.m = static_cast<std::uint8_t>(o.m);
 			op.shift_t = static_cast<std::uint8_t>(o.shift_t);
 			op.shift_n = static_cast<std::uint8_t>(o.shift_n);
 			if (o.shift_n == 0 && o.shift_t != SRType::RRX)
-				op.run = flags ? data_processing_for<shape_register, true>(info.op)
-					       : data_processing_for<shape_register, false>(info.op);
+				op.run = data_processing_for<shape_register>(info.op, flags, first_constant, to_pc);
 			else
-				op.run = flags ? data_processing_for<shape_shifted, true>(info.op)
-					       : data_processing_for<shape_shifted, false>(info.op);
+				op.run = data_processing_for<shape_shifted>(info.op, flags, first_constant, to_pc);
+		} else if (info.shape == Shape::reg_shifted) {
+			if (!is_core(o.m) || !is_core(o.s))
+				return false;
+			op.m = static_cast<std::uint8_t>(o.m);
+			op.shift_t = static_cast<std::uint8_t>(o.shift_t);
+			op.shift_n = static_cast<std::uint8_t>(o.s);
+			op.run = data_processing_for<shape_by_register>(info.op, flags, first_constant, to_pc);
 		} else {
 			return false;
 		}
@@ -514,24 +584,38 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 		op.m = static_cast<std::uint8_t>(o.m);
 		op.run = o.setflags ? multiply<true> : multiply<false>;
 		break;
+	case Op::mla: case Op::mls:
+		if (!is_core(o.d) || !is_core(o.n) || !is_core(o.m) || !is_core(o.a))
+			return false;
+		op.d = static_cast<std::uint8_t>(o.d);
+		op.n = static_cast<std::uint8_t>(o.n);
+		op.m = static_cast<std::uint8_t>(o.m);
+		op.shift_n = static_cast<std::uint8_t>(o.a);
+		op.run = info.op == Op::mls
+			? (o.setflags ? multiply_accumulate<true, true> : multiply_accumulate<true, false>)
+			: (o.setflags ? multiply_accumulate<false, true> : multiply_accumulate<false, false>);
+		break;
 	case Op::it: case Op::nop:
 		op.run = nothing;
 		break;
 	case Op::ldr: case Op::ldrb: case Op::ldrh: case Op::ldrsb: case Op::ldrsh:
 	case Op::str: case Op::strb: case Op::strh: {
-		if (!is_core(o.t))
+		const bool to_pc = o.t == static_cast<std::int32_t>(reg_pc);
+		if (!to_pc && !is_core(o.t))
 			return false;
-		op.d = static_cast<std::uint8_t>(o.t);
+		op.d = to_pc ? std::uint8_t{0} : static_cast<std::uint8_t>(o.t);
 		if (info.shape == Shape::literal) {
 			const std::uint32_t base = pc_value & ~3U;
 			const auto offset = static_cast<std::uint32_t>(o.imm32);
 			op.imm = o.add ? base + offset : base - offset;
-			op.run = single_transfer_for<address_constant>(info.op);
+			op.run = single_transfer_for<address_constant>(info.op, false, to_pc);
 			break;
 		}
-		if (!is_core(o.n))
+		const bool base_constant = o.n == static_cast<std::int32_t>(reg_pc);
+		if ((!base_constant && !is_core(o.n)) || (base_constant && o.wback))
 			return false;
-		op.n = static_cast<std::uint8_t>(o.n);
+		op.n = base_constant ? std::uint8_t{0} : static_cast<std::uint8_t>(o.n);
+		op.imm2 = pc_value;
 		op.add = o.add;
 		op.index = o.index;
 		op.wback = o.wback;
@@ -542,11 +626,11 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 			op.shift_t = static_cast<std::uint8_t>(o.shift_t);
 			op.shift_n = static_cast<std::uint8_t>(o.shift_n);
 			op.run = o.shift_n == 0 && o.shift_t != SRType::RRX
-				? single_transfer_for<address_register>(info.op)
-				: single_transfer_for<address_shifted>(info.op);
+				? single_transfer_for<address_register>(info.op, base_constant, to_pc)
+				: single_transfer_for<address_shifted>(info.op, base_constant, to_pc);
 		} else {
 			op.imm = static_cast<std::uint32_t>(o.imm32);
-			op.run = single_transfer_for<address_immediate>(info.op);
+			op.run = single_transfer_for<address_immediate>(info.op, base_constant, to_pc);
 		}
 		break;
 	}
@@ -588,13 +672,24 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 		break;
 	}
 	case Op::blx:
+		op.imm = thumb ? (pc + 2U) | 1U : pc + 4U;
+		if (o.m == static_cast<std::int32_t>(reg_pc)) {
+			op.key = key_from_target(pc_value);
+			op.run = branch_link;
+			break;
+		}
 		if (!is_core(o.m))
 			return false;
 		op.m = static_cast<std::uint8_t>(o.m);
-		op.imm = thumb ? (pc + 2U) | 1U : pc + 4U;
 		op.run = branch_link_exchange;
 		break;
 	case Op::bx:
+		/* BX PC: the Thumb-to-ARM veneer. */
+		if (o.m == static_cast<std::int32_t>(reg_pc)) {
+			op.key = key_from_target(pc_value);
+			op.run = branch;
+			break;
+		}
 		if (!is_core(o.m))
 			return false;
 		op.m = static_cast<std::uint8_t>(o.m);

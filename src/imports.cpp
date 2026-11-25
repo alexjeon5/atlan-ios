@@ -5,13 +5,16 @@
 
 namespace atlan {
 bool ImportDispatcher::bind(std::string name, ImportService service) {
+    resolved_.clear();
     return services_.emplace(std::move(name), std::move(service)).second;
 }
 bool ImportDispatcher::bind_trap(std::uint32_t address, std::string name) {
     if (address % 4 != 0) return false;
+    resolved_.clear();
     return traps_.emplace(address, std::move(name)).second;
 }
 void ImportDispatcher::attach(const elf::Image& image) {
+    resolved_.clear();
     for (const auto& import : image.trapped_imports)
         if (import.type != 1) traps_[import.address] = import.name;  // not STT_OBJECT
 }
@@ -151,33 +154,42 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
         slice += result.retired;
         if (result.event == Event::retired) continue;
         result.retired = outcome.retired;
-        const auto trap = result.event == Event::memory_fault && result.access == MemoryAccess::execute
-                              ? traps_.find(runtime.pc() & ~1U) : traps_.end();
-        if (trap == traps_.end()) return finish(Stop::cpu_event, result);
-        const auto service = services_.find(trap->second);
-        if (service == services_.end()) {
-            outcome.import = trap->second;
-            return finish(Stop::unresolved_import, result);
+        if (result.event != Event::memory_fault || result.access != MemoryAccess::execute) return finish(Stop::cpu_event, result);
+        const std::uint32_t trap_address = runtime.pc() & ~1U;
+        Resolved target;
+        if (const auto known = resolved_.find(trap_address); known != resolved_.end()) {
+            target = known->second;
+        } else {
+            const auto trap = traps_.find(trap_address);
+            if (trap == traps_.end()) return finish(Stop::cpu_event, result);
+            const auto service = services_.find(trap->second);
+            if (service == services_.end()) {
+                outcome.import = trap->second;
+                return finish(Stop::unresolved_import, result);
+            }
+            target = {&trap->second, &service->second, &counts_[trap->second]};
+            resolved_.emplace(trap_address, target);
         }
+        const std::string& name = *target.name;
         const auto link = static_cast<std::uint32_t>(runtime.cpu.registers[14]);
-        ++counts_[trap->second];
-        ImportCall call(*this, runtime, trap->second);
-        if (auto error = service->second(call)) {
-            outcome.import = trap->second;
+        ++*target.count;
+        ImportCall call(*this, runtime, name);
+        if (auto error = (*target.service)(call)) {
+            outcome.import = name;
             outcome.message = std::move(*error);
             return finish(Stop::service_error, result);
         }
         if (call.blocked()) {
             if (!threaded) {
-                outcome.import = trap->second;
-                outcome.message = trap->second + " would block, which needs an attached guest thread scheduler and no host callback in between";
+                outcome.import = name;
+                outcome.message = name + " would block, which needs an attached guest thread scheduler and no host callback in between";
                 return finish(Stop::service_error, result);
             }
-            const auto picked = threads_->block_current(runtime, call.block_key(), call.block_deadline(), trap->second, !pump);
+            const auto picked = threads_->block_current(runtime, call.block_key(), call.block_deadline(), name, !pump);
             slice = 0;
             if (picked == GuestThreads::Pick::idle) return finish(Stop::returned, {Event::function_return, outcome.retired});
             if (picked == GuestThreads::Pick::deadlock) {
-                outcome.import = trap->second;
+                outcome.import = name;
                 outcome.message = threads_->deadlock_message();
                 return finish(Stop::deadlock, result);
             }

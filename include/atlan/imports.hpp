@@ -106,7 +106,7 @@ public:
     [[nodiscard]] std::uint64_t remaining_budget() const noexcept { return remaining_; }
     // Diagnostics: how often each import ran since the last reset (for telling a spin/wait loop from long work).
     [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_counts() const noexcept { return counts_; }
-    void reset_import_counts() { counts_.clear(); }
+    void reset_import_counts() { counts_.clear(); resolved_.clear(); }
 
     // Attaches the guest thread scheduler (optional). Without one the dispatcher runs a
     // single guest thread and blocking services report a deadlock diagnostic instead.
@@ -133,6 +133,14 @@ private:
     std::unordered_map<std::string, ImportService> services_;
     std::unordered_map<std::string, std::uint64_t> counts_;
     std::unordered_map<std::uint32_t, std::string> traps_;  // trap base address -> name
+    // Per trap address: the service and counter its name resolves to, so a call costs one integer lookup.
+    // Cleared whenever a binding or the counters change; elements of the maps above never move.
+    struct Resolved {
+        const std::string* name{};
+        const ImportService* service{};
+        std::uint64_t* count{};
+    };
+    std::unordered_map<std::uint32_t, Resolved> resolved_;
     std::uint32_t return_target_{};
     std::uint64_t remaining_{};
     unsigned depth_{};
