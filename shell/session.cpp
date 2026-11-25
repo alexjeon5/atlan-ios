@@ -223,9 +223,6 @@ void GuestSession::run() {
                 return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
             });
             use_connection_manager = ini_number(settings, "USECONNECTIONMANAGER").value_or(1) != 0;
-            if (config_.on_fixed_screen)
-                config_.on_fixed_screen(ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
-                                        ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0);
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;
