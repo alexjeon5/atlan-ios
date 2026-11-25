@@ -91,12 +91,12 @@ CallOutcome ImportDispatcher::call_back(Runtime& runtime, std::uint32_t target,
     // caller's budget (a qsort in a background thread would otherwise fail once the pump's slice ran out).
     // It has its own large bound against a runaway guest loop; what it ran is then taken from the caller's.
     const std::uint64_t outer = remaining_;
-    remaining_ = callback_budget;
+    remaining_ = callback_budget_;
     auto outcome = run_to_return(runtime, return_target_);
-    const std::uint64_t used = callback_budget - remaining_;
+    const std::uint64_t used = callback_budget_ - remaining_;
     remaining_ = outer - (used < outer ? used : outer);
     if (outcome.stop == Stop::budget_exhausted && outcome.message.empty())
-        outcome.message = "guest callback ran past " + std::to_string(callback_budget) + " instructions";
+        outcome.message = "guest callback ran past " + std::to_string(callback_budget_) + " instructions";
     const auto result = runtime.cpu.registers[0];
     runtime.cpu = saved;
     runtime.cpu.registers[0] = result;

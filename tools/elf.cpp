@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/scanf.hpp"
 #include "atlan/sockets.hpp"
+#include "atlan/system_services.hpp"
 #include "atlan/abi.hpp"
 #include "atlan/android_log.hpp"
 #include "atlan/data_symbols.hpp"
@@ -109,6 +110,7 @@ int main(int argc, char* argv[]) {
         atlan::install_time_services(dispatcher, guard_page + 0x400);
         atlan::install_libc_extra(dispatcher);
         atlan::install_scanf_services(dispatcher);
+        atlan::install_system_services(dispatcher, guard_page + 0x200);
         atlan::GuestHeap heap;
         atlan::install_heap_services(dispatcher, heap);
         atlan::install_string_services(dispatcher);

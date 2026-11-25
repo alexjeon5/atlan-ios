@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Guest sockets (atlan/sockets.hpp) and the plain HTTP client (shell/http_client.hpp) against loopback servers, and
 // sscanf (atlan/scanf.hpp), which the guest's online code is the first to use.
+#include "atlan/abi.hpp"
 #include "atlan/scanf.hpp"
 #include "atlan/sockets.hpp"
+#include "atlan/system_services.hpp"
 #include "shell/http_client.hpp"
 #include <arpa/inet.h>
 #include <atomic>
@@ -259,6 +261,16 @@ void scanf_tests() {
     check(call(dispatcher, runtime, "sscanf", {0x11000, 0x11100, 0x12000}) == 0xffffffffU, "sscanf on empty input is EOF");
     write_bytes(runtime, 0x11000, std::string("x1") + '\0');
     check(call(dispatcher, runtime, "sscanf", {0x11000, 0x11100, 0x12000}) == 0, "sscanf matching failure");
+    // strerror after a failed close of an already closed socket (the guest logs it and goes on).
+    atlan::install_console_services(dispatcher, 0, 0x10000, {});
+    const auto text = call(dispatcher, runtime, "strerror", {9});
+    std::array<std::byte, 20> message{};
+    check(runtime.memory.read(text, message) && std::memcmp(message.data(), "Bad file descriptor", 20) == 0, "strerror text in guest memory");
+    check(call(dispatcher, runtime, "strerror", {111}) != text, "strerror codes have their own text");
+    atlan::install_system_services(dispatcher, 0x10000);
+    check(call(dispatcher, runtime, "sysinfo", {0x14000}) == 0 && read32(runtime, 0x14000 + 16) != 0 && read32(runtime, 0x14000 + 52) == 1, "sysinfo");
+    check(call(dispatcher, runtime, "statfs", {0x11000, 0x14100}) == 0 && read32(runtime, 0x14100 + 4) == 4096, "statfs");
+    check(call(dispatcher, runtime, "settimeofday", {0x14000, 0}) == 0xffffffffU && read32(runtime, 0x10000) == 1, "settimeofday is refused");
 }
 }
 

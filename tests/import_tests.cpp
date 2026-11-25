@@ -77,6 +77,9 @@ struct Fixture {
         mutexes.install(dispatcher);
         keys.install(dispatcher);
         files.install(dispatcher);
+        // Some cases run a callback that never returns (a looping destructor, a routine at a data word); bound it
+        // like the calls themselves instead of the runtime's 2^32 so the suite does not spend minutes reaching it.
+        dispatcher.set_callback_budget(10000);
     }
     atlan::CallOutcome call(std::uint32_t target, std::initializer_list<std::uint32_t> args,
                             std::uint64_t budget = 10000) {

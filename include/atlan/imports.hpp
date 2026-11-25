@@ -91,8 +91,8 @@ struct CallOutcome {
 class ImportDispatcher {
 public:
     static constexpr unsigned max_depth = 16;
-    // Instructions one guest callback may retire, independent of the budget left to its caller.
-    static constexpr std::uint64_t callback_budget = 1ULL << 32;
+    // Instructions one guest callback may retire by default, independent of the budget left to its caller.
+    static constexpr std::uint64_t default_callback_budget = 1ULL << 32;
     // Registers a service for one symbol name; false if the name is already bound.
     bool bind(std::string name, ImportService service);
     // Binds one host-reserved, unmapped, 4-byte aligned trap address to a name.
@@ -129,6 +129,9 @@ public:
     [[nodiscard]] CallOutcome call_back(Runtime& runtime, std::uint32_t target,
                                         std::span<const std::uint32_t> arguments);
     [[nodiscard]] std::uint64_t remaining_budget() const noexcept { return remaining_; }
+    // Bound for one guest callback (default_callback_budget); tests lower it to reach a runaway callback quickly.
+    void set_callback_budget(std::uint64_t budget) noexcept { callback_budget_ = budget; }
+    [[nodiscard]] std::uint64_t callback_budget() const noexcept { return callback_budget_; }
     // Diagnostics: how often each import ran since the last reset (for telling a spin/wait loop from long work).
     [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_counts() const noexcept { return counts_; }
     void reset_import_counts() {
@@ -193,6 +196,7 @@ private:
     [[nodiscard]] static bool patch(Runtime& runtime, std::uint32_t address, std::uint32_t value, unsigned size);
     std::uint32_t return_target_{};
     std::uint64_t remaining_{};
+    std::uint64_t callback_budget_ = default_callback_budget;
     unsigned depth_{};
 };
 }
