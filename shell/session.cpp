@@ -26,6 +26,7 @@
 #include "atlan/runtime.hpp"
 #include "atlan/scanf.hpp"
 #include "atlan/sockets.hpp"
+#include "atlan/system_services.hpp"
 #include "atlan/threads.hpp"
 #include <array>
 #include <chrono>
@@ -182,6 +183,7 @@ void GuestSession::run() {
         install_time_services(dispatcher, guard_page + 0x400);
         install_libc_extra(dispatcher);
         install_scanf_services(dispatcher);
+        install_system_services(dispatcher, guard_page + 0x200);
         GuestHeap heap;
         install_heap_services(dispatcher, heap);
         install_string_services(dispatcher);

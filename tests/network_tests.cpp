@@ -4,6 +4,7 @@
 #include "atlan/abi.hpp"
 #include "atlan/scanf.hpp"
 #include "atlan/sockets.hpp"
+#include "atlan/system_services.hpp"
 #include "shell/http_client.hpp"
 #include <arpa/inet.h>
 #include <atomic>
@@ -266,6 +267,10 @@ void scanf_tests() {
     std::array<std::byte, 20> message{};
     check(runtime.memory.read(text, message) && std::memcmp(message.data(), "Bad file descriptor", 20) == 0, "strerror text in guest memory");
     check(call(dispatcher, runtime, "strerror", {111}) != text, "strerror codes have their own text");
+    atlan::install_system_services(dispatcher, 0x10000);
+    check(call(dispatcher, runtime, "sysinfo", {0x14000}) == 0 && read32(runtime, 0x14000 + 16) != 0 && read32(runtime, 0x14000 + 52) == 1, "sysinfo");
+    check(call(dispatcher, runtime, "statfs", {0x11000, 0x14100}) == 0 && read32(runtime, 0x14100 + 4) == 4096, "statfs");
+    check(call(dispatcher, runtime, "settimeofday", {0x14000, 0}) == 0xffffffffU && read32(runtime, 0x10000) == 1, "settimeofday is refused");
 }
 }
 
