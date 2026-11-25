@@ -212,6 +212,27 @@ void directories_and_descriptors() {
         check(f.call("open", {data + 0x300, 0101, 0644}).stop == atlan::Stop::returned && f.r0() >= 3, "open(O_CREAT) in an aliased folder");
         check(std::filesystem::exists(f.root / "cloudmap" / "mapversion.idx"), "aliased create lands under the root");
     }
+    {   // a mount serves an aliased prefix from a folder outside the root; a more specific mount added first stays separate
+        const auto outside = f.root.parent_path() / (f.root.filename().string() + "-mount");
+        std::filesystem::create_directories(outside / "Sub");
+        std::filesystem::create_directories(f.root / "state");
+        { std::ofstream(outside / "Sub" / "Tile.bin") << "tile"; }
+        f.stdio.add_alias("/storage/x", "MNT");
+        f.stdio.add_mount("MNT/NAND", f.root / "state");
+        f.stdio.add_mount("MNT", outside);
+        put_text(f.runtime.memory, data + 0x300, "/storage/x/sub/tile.bin");
+        check(f.call("open", {data + 0x300, 0, 0}).stop == atlan::Stop::returned && f.r0() >= 3, "open through a mount outside the root");
+        const auto mounted = f.r0();
+        check(f.stdio.descriptor_size(mounted) == 4u, "mounted file is read in place");
+        check(f.call("close", {mounted}).stop == atlan::Stop::returned, "close mounted file");
+        put_text(f.runtime.memory, data + 0x300, "/storage/x/NAND/new.bin");
+        check(f.call("open", {data + 0x300, 0101, 0644}).stop == atlan::Stop::returned && f.r0() >= 3, "create under the more specific mount");
+        check(f.call("close", {f.r0()}).stop == atlan::Stop::returned, "close created file");
+        check(std::filesystem::exists(f.root / "state" / "new.bin") && !std::filesystem::exists(outside / "NAND"), "writes stay out of the mounted map folder");
+        put_text(f.runtime.memory, data + 0x300, "/storage/x/../escape");
+        check(f.call("open", {data + 0x300, 0101, 0644}).stop == atlan::Stop::returned && f.r0() == 0xffffffff, "a mount cannot be escaped");
+        std::filesystem::remove_all(outside);
+    }
     check(f.call("umask", {077}).stop == atlan::Stop::returned, "umask call");
     check(f.r0() == 022, "umask returns the default mask first");
     check(f.call("umask", {022}).stop == atlan::Stop::returned, "umask call again");

@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
     atlan::shell::SessionConfig config;
     config.library_path = argv[1];
     config.data_root = argv[2];
+    if (const char* map_root = std::getenv("ATLAN_MAP_ROOT")) config.map_root = map_root;  // map folder outside DATA_ROOT
     if (raw) config.gl_backend = &recorder;
     else config.gl_backend = &context;
     if (const char* frames = std::getenv("ATLAN_FRAMES")) config.render_frames = static_cast<std::uint32_t>(std::atoi(frames));

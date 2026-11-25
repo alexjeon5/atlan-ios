@@ -147,6 +147,13 @@ void GuestSession::run() {
             stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
+            if (!config_.map_root.empty()) {
+                const auto state = std::filesystem::path(config_.data_root) / "ATLAN" / "NAND";
+                std::error_code ec;
+                std::filesystem::create_directories(state, ec);
+                stdio->add_mount("ATLAN/NAND", state);
+                stdio->add_mount("ATLAN", config_.map_root);
+            }
             stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
             stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder

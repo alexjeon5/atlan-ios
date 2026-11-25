@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/data_file.hpp"
+#include "shell/data_folder.hpp"
 #include "shell/render_config.hpp"
 #include "shell/session.hpp"
 #include "shell/surface.hpp"
@@ -105,6 +106,29 @@ void data_files() {
     write("map", data);
     check(!inspect_data_file(path, "MA").ok, "replaced file is validated afresh");
 }
+void data_folders() {
+    using atlan::shell::inspect_data_folder;
+    const auto root = scratch / "Pick";
+    check(!inspect_data_folder(root.string()).ok, "missing folder is rejected");
+    fs::create_directories(root / "atlan" / "MAP" / "deep");
+    check(inspect_data_folder(root.string()).message == "folder is empty", "folder without files is rejected");
+    { std::ofstream(root / "atlan" / "MAP" / "a.bin") << "12345"; }
+    { std::ofstream(root / "atlan" / "MAP" / "deep" / "b.bin") << "123"; }
+    const auto ok = inspect_data_folder(root.string());
+    check(ok.ok && ok.files == 2 && ok.bytes == 8 && ok.pending.empty(), "complete folder is accepted in place");
+    // A cloud placeholder stands for a file that is not on the device: the folder is refused until it is.
+    { std::ofstream(root / "atlan" / "MAP" / "deep" / ".c.bin.icloud") << "stub"; }
+    const auto evicted = inspect_data_folder(root.string());
+    check(!evicted.ok && evicted.files == 3 && evicted.bytes == 8 && evicted.pending.size() == 1 &&
+          evicted.message == "1 files are not downloaded", "folder with a file that is not downloaded is rejected");
+    check(fs::path(evicted.pending.front()).filename() == ".c.bin.icloud", "the pending file is named");
+    fs::remove(root / "atlan" / "MAP" / "deep" / ".c.bin.icloud");
+    { std::ofstream(root / "atlan" / "MAP" / "deep" / "c.bin") << "1"; }
+    check(inspect_data_folder(root.string()).ok, "folder is accepted once the file arrives");
+    check(atlan::shell::resolve_map_root(root.string()) == (root / "atlan").string(), "picking the parent selects its ATLAN child");
+    check(atlan::shell::resolve_map_root((root / "atlan").string()) == (root / "atlan").string(), "picking the folder itself keeps it");
+    check(atlan::shell::resolve_map_root((scratch / "gone").string()) == (scratch / "gone").string(), "missing folder is returned unchanged");
+}
 struct Collector {
     std::mutex lock;
     std::vector<std::string> lines;
@@ -151,6 +175,7 @@ int main() {
             check(surface.get().width == 2556 && surface.get().height == 1179 && surface.generation() == 1, "surface publishes size");
         }
         data_files();
+        data_folders();
         sessions();
         fs::remove_all(scratch);
         std::cout << "shell tests passed: " << checks << " checks\n";

@@ -30,6 +30,9 @@ public:
     // e.g. the app's absolute Android paths onto folders the user can reach. First matching alias wins.
     // create_target makes the host folder (beneath the root) so apps that open(O_CREAT) there without a mkdir work.
     void add_alias(std::string guest_prefix, std::string host_prefix, bool create_target = false);
+    // Host paths (after aliasing) whose leading components equal `host_prefix` are served from `directory`, which may
+    // lie outside the root (e.g. a user-chosen map folder). First matching mount wins, so add the more specific first.
+    void add_mount(std::filesystem::path host_prefix, std::filesystem::path directory);
     [[nodiscard]] std::size_t open_files() const noexcept;
     [[nodiscard]] std::size_t open_descriptors() const noexcept;
     // Size of the regular file behind a POSIX descriptor opened through open(), for fstat.
@@ -41,6 +44,7 @@ private:
     [[nodiscard]] std::string alias(const std::string& path) const;
     [[nodiscard]] std::filesystem::path locate(const std::filesystem::path& relative) const;
     std::vector<std::pair<std::string, std::string>> aliases_;
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> mounts_;
     std::filesystem::path root_;
     std::uint32_t errno_address_;
     std::function<void(const std::string&, const std::string&, bool)> trace_;

@@ -44,8 +44,14 @@ std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) 
     // The data folder may live on a case-sensitive host while the app was written for Android's case-insensitive
     // storage: take the exact name when it exists, else the unique-by-iteration case-insensitive match.
     std::filesystem::path current = root_;
+    auto next = relative.begin();
+    for (const auto& [prefix, directory] : mounts_) {
+        const auto [end, rest] = std::mismatch(prefix.begin(), prefix.end(), relative.begin(), relative.end());
+        if (end == prefix.end()) { current = directory; next = rest; break; }
+    }
     const auto lower = [](std::string text) { for (auto& c : text) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32); return text; };
-    for (const auto& part : relative) {
+    for (; next != relative.end(); ++next) {
+        const auto& part = *next;
         std::error_code ec;
         if (std::filesystem::exists(current / part, ec)) { current /= part; continue; }
         bool found = false;
@@ -58,6 +64,9 @@ std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) 
         if (!found) current /= part;
     }
     return current;
+}
+void GuestStdio::add_mount(std::filesystem::path host_prefix, std::filesystem::path directory) {
+    if (!host_prefix.empty()) mounts_.emplace_back(std::move(host_prefix), std::move(directory));
 }
 void GuestStdio::add_alias(std::string guest_prefix, std::string host_prefix, bool create_target) {
     if (create_target) { std::error_code ec; std::filesystem::create_directories(locate(std::filesystem::path(host_prefix)), ec); }

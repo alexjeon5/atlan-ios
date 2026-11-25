@@ -16,6 +16,9 @@ struct SessionConfig {
     std::uint64_t initializer_budget{3000000};  // retired instructions per initializer
     AudioSink* audio_sink{};                    // device sink; nullptr uses a silent recording sink
     std::string data_root;                      // guest-visible file root (the app Documents folder); empty disables stdio
+    // Map data folder the guest's ROOTPATH resolves to, read in place (may lie outside data_root, e.g. a user-picked
+    // folder). Empty uses data_root/ATLAN. App-written state stays under data_root/ATLAN/NAND either way.
+    std::string map_root;
     std::uint64_t native_init_budget{200000000};  // retired instructions for MainActivity.nativeInit
     std::uint64_t surface_call_budget{2000000000};  // retired instructions per createUISF/createGLSF/changedUISF/renderGLSF call
     std::uint32_t render_frames{3};               // renderGLSF calls after the surface is created
