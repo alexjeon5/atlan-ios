@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <chrono>
 #include "atlan/imports.hpp"
 #include "atlan/threads.hpp"
 #include <stdexcept>
@@ -167,14 +168,24 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
                 outcome.import = trap->second;
                 return finish(Stop::unresolved_import, result);
             }
-            target = {&trap->second, &service->second, &counts_[trap->second]};
+            target = {&trap->second, &service->second, &counts_[trap->second], &times_[trap->second]};
             resolved_.emplace(trap_address, target);
         }
         const std::string& name = *target.name;
         const auto link = static_cast<std::uint32_t>(runtime.cpu.registers[14]);
         ++*target.count;
         ImportCall call(*this, runtime, name);
-        if (auto error = (*target.service)(call)) {
+        std::optional<std::string> error;
+        if (timing_) [[unlikely]] {
+            // The service may reset the counters (and with them `target`'s pointers) through a nested call.
+            const auto started = std::chrono::steady_clock::now();
+            error = (*target.service)(call);
+            times_[name] += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+        } else {
+            error = (*target.service)(call);
+        }
+        if (error) {
             outcome.import = name;
             outcome.message = std::move(*error);
             return finish(Stop::service_error, result);

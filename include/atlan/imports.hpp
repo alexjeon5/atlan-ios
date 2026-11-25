@@ -106,7 +106,11 @@ public:
     [[nodiscard]] std::uint64_t remaining_budget() const noexcept { return remaining_; }
     // Diagnostics: how often each import ran since the last reset (for telling a spin/wait loop from long work).
     [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_counts() const noexcept { return counts_; }
-    void reset_import_counts() { counts_.clear(); resolved_.clear(); }
+    void reset_import_counts() { counts_.clear(); times_.clear(); resolved_.clear(); }
+    // Diagnostics: also measure the host time each import's service takes (two clock reads per call). A service
+    // that calls back into the guest includes that guest code and its imports.
+    void set_import_timing(bool enabled) noexcept { timing_ = enabled; }
+    [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_nanoseconds() const noexcept { return times_; }
 
     // Attaches the guest thread scheduler (optional). Without one the dispatcher runs a
     // single guest thread and blocking services report a deadlock diagnostic instead.
@@ -132,6 +136,8 @@ private:
     bool block_cache_{true};
     std::unordered_map<std::string, ImportService> services_;
     std::unordered_map<std::string, std::uint64_t> counts_;
+    std::unordered_map<std::string, std::uint64_t> times_;  // nanoseconds per import while timing_
+    bool timing_{};
     std::unordered_map<std::uint32_t, std::string> traps_;  // trap base address -> name
     // Per trap address: the service and counter its name resolves to, so a call costs one integer lookup.
     // Cleared whenever a binding or the counters change; elements of the maps above never move.
@@ -139,6 +145,7 @@ private:
         const std::string* name{};
         const ImportService* service{};
         std::uint64_t* count{};
+        std::uint64_t* nanoseconds{};
     };
     std::unordered_map<std::uint32_t, Resolved> resolved_;
     std::uint32_t return_target_{};
