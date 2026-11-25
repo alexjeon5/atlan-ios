@@ -29,7 +29,7 @@ target_include_directories(atlan_runtime PUBLIC include)
 target_link_libraries(atlan_runtime PRIVATE kernarium_aarch32)
 target_compile_options(atlan_runtime PRIVATE -Wall -Wextra -Werror)
 
-add_library(atlan_shell STATIC shell/app_package.cpp shell/data_file.cpp shell/guest_ini.cpp shell/input.cpp shell/session.cpp shell/http_client.cpp shell/java_services.cpp)
+add_library(atlan_shell STATIC shell/app_package.cpp shell/data_file.cpp shell/guest_ini.cpp shell/log_file.cpp shell/input.cpp shell/session.cpp shell/http_client.cpp shell/java_services.cpp)
 target_include_directories(atlan_shell PUBLIC .)
 target_link_libraries(atlan_shell PUBLIC atlan_runtime)
 target_compile_options(atlan_shell PRIVATE -Wall -Wextra -Werror)

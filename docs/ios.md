@@ -38,3 +38,4 @@ CI는 `Release-iphoneos` 앱을 `Payload/`로 압축한 서명 없는 IPA(`atlan
 - 게스트 화면은 설정의 화면 크기와 상관없이 기기 화면 전체에 늘려 표시한다.
 - 게스트가 실행 중이면 화면 자동 잠금을 끈다(`idleTimerDisabled`).
 - 게스트의 종료 대화상자에서 종료를 고르면 앱도 끝난다. 안드로이드 쪽 Java 코드처럼 `MainActivity.nativeIsProgramExit`를 1초마다 확인하고(`SessionConfig::on_guest_exit`), 참이면 세션을 끝낸 뒤 프로세스를 종료한다.
+- 디버깅용으로 한 번 실행한 동안의 모든 로그 줄을 걸러내지 않고 `Documents/logs/session-<시각>.log`에 줄마다 바로 기록한다(앞의 숫자는 시작 후 경과 초, 최근 5개만 보관). 충돌하거나 종료해도 그때까지의 내용이 남는다. `platform/ios/main.mm`의 `kWriteSessionLog`를 `false`로 바꾸면 꺼진다.

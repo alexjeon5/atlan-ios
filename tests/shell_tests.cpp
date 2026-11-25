@@ -2,6 +2,7 @@
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/guest_ini.hpp"
+#include "shell/log_file.hpp"
 #include "shell/log_filter.hpp"
 #include "shell/session.hpp"
 #include "shell/surface.hpp"
@@ -174,6 +175,28 @@ int main() {
             check(ini_set(text, "NEW", "3") == text + "NEW|1=3\r\n" && ini_set("A|1=1", "B", "2") == "A|1=1\nB|1=2\n", "a missing key is appended");
             check(ini_set("A|1=1\r\n", "P", "/q", '2') == "A|1=1\r\nP|2=/q\r\n", "an appended entry takes the given type");
             check(ini_value("K|1=9", "K") == "9" && ini_set("K|1=9", "K", "10") == "K|1=10", "a last line without a newline works");
+        }
+        {
+            const auto logs = scratch / "logs";
+            fs::create_directories(logs);
+            for (const char* name : {"session-20200101-000000.log", "session-20200102-000000.log", "session-20200103-000000.log", "other.txt"})
+                std::ofstream(logs / name) << "old\n";
+            std::string path;
+            {
+                atlan::shell::SessionLogFile log;
+                log.write("before open is dropped");
+                check(log.open(logs.string(), 3), "session log opens");
+                log.write("first line");
+                log.write("second line");
+                path = log.path();
+                std::ifstream in(path);  // readable while still open: every line is flushed
+                std::string a, b;
+                std::getline(in, a); std::getline(in, b);
+                check(a.ends_with(" first line") && b.ends_with(" second line"), "lines reach the file as they are written");
+            }
+            check(!fs::exists(logs / "session-20200101-000000.log") && fs::exists(logs / "session-20200102-000000.log") &&
+                  fs::exists(logs / "session-20200103-000000.log") && fs::exists(logs / "other.txt") && fs::exists(path),
+                  "only the newest session logs are kept; other files are left alone");
         }
         data_files();
         sessions();

@@ -12,6 +12,7 @@
 #include <string>
 #include <cstdio>
 #include "shell/input.hpp"
+#include "shell/log_file.hpp"
 #include "shell/log_filter.hpp"
 #include "shell/render_config.hpp"
 #include "shell/session.hpp"
@@ -19,6 +20,10 @@
 #include <exception>
 #include <memory>
 #include <vector>
+
+// Debugging aid while the app is being stabilised: every log line of a run, unfiltered, goes to
+// Documents/logs/session-<time>.log (the newest five are kept). Set to false to turn it off.
+static constexpr bool kWriteSessionLog = true;
 
 @interface ShellViewController : UIViewController <UIDocumentPickerDelegate, CLLocationManagerDelegate>
 @end
@@ -39,6 +44,7 @@
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
     std::vector<UITouch*> _fingers;            // slot index = pointer id; nil when free
     CLLocationManager* _location;
+    atlan::shell::SessionLogFile _logFile;
     NSString* _package;                        // the app package in Documents/ATLAN, run in preference to guest.so
     BOOL _autoStarted;
 }
@@ -124,14 +130,14 @@
     }
     const CLAuthorizationStatus status = _location.authorizationStatus;
     if (status == kCLAuthorizationStatusNotDetermined) [_location requestWhenInUseAuthorization];
-    else if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) [self append:@"location denied"];
+    else if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) [self note:@"location denied"];
     else [_location startUpdatingLocation];
 }
 - (void)locationManagerDidChangeAuthorization:(CLLocationManager*)manager {
     const CLAuthorizationStatus status = manager.authorizationStatus;
     if (status == kCLAuthorizationStatusAuthorizedWhenInUse || status == kCLAuthorizationStatusAuthorizedAlways)
         [manager startUpdatingLocation];
-    else if (status != kCLAuthorizationStatusNotDetermined) [self append:@"location denied"];
+    else if (status != kCLAuthorizationStatusNotDetermined) [self note:@"location denied"];
 }
 - (void)locationManager:(CLLocationManager*)manager didUpdateLocations:(NSArray<CLLocation*>*)locations {
     (void)manager;
@@ -143,7 +149,7 @@
 }
 - (void)locationManager:(CLLocationManager*)manager didFailWithError:(NSError*)error {
     (void)manager;
-    if (error.code != kCLErrorLocationUnknown) [self append:[NSString stringWithFormat:@"location failed: %@", error.localizedDescription]];
+    if (error.code != kCLErrorLocationUnknown) [self note:[NSString stringWithFormat:@"location failed: %@", error.localizedDescription]];
 }
 
 - (NSURL*)libraryURL {
@@ -204,6 +210,12 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self autoRun];
+}
+
+// A line of the shell itself: on screen and in the session log file.
+- (void)note:(NSString*)line {
+    _logFile.write(line.UTF8String ?: "?");
+    [self append:line];
 }
 
 - (void)append:(NSString*)line {
@@ -276,11 +288,12 @@
         [_log.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         [_log.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor]
     ]];
+    if (kWriteSessionLog) _logFile.open([self.documentsPath stringByAppendingPathComponent:@"logs"].UTF8String);
     try {
         const auto demo = atlan::run_demo();
-        [self append:[NSString stringWithFormat:@"selftest %u", demo.value]];
+        [self note:[NSString stringWithFormat:@"selftest %u", demo.value]];
     } catch (const std::exception&) {
-        [self append:@"selftest failed"];
+        [self note:@"selftest failed"];
     }
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(becameActive)
         name:UIApplicationDidBecomeActiveNotification object:nil];
@@ -306,11 +319,11 @@
     if ([NSFileManager.defaultManager copyItemAtURL:urls.firstObject toURL:staged error:&error] &&
         [NSFileManager.defaultManager replaceItemAtURL:destination withItemAtURL:staged backupItemName:nil
                                                options:0 resultingItemURL:nil error:&error]) {
-        [self append:[NSString stringWithFormat:@"library %@", urls.firstObject.lastPathComponent]];
+        [self note:[NSString stringWithFormat:@"library %@", urls.firstObject.lastPathComponent]];
     } else if ([NSFileManager.defaultManager moveItemAtURL:staged toURL:destination error:nil]) {
-        [self append:[NSString stringWithFormat:@"library %@", urls.firstObject.lastPathComponent]];
+        [self note:[NSString stringWithFormat:@"library %@", urls.firstObject.lastPathComponent]];
     } else {
-        [self append:[NSString stringWithFormat:@"import failed: %@", error.localizedDescription]];
+        [self note:[NSString stringWithFormat:@"import failed: %@", error.localizedDescription]];
     }
     [self refresh];
 }
@@ -319,15 +332,15 @@
     if (_session) { _session->stop(); _session->join(); _session.reset(); }
     [self findPackage];
     NSString* library = self.guestLibraryPath;
-    if (!library) { [self append:@"library missing"]; [self refresh]; return; }
+    if (!library) { [self note:@"library missing"]; [self refresh]; return; }
     const NSUInteger documents = self.documentsPath.length + 1;
-    [self append:_package && _package.length > documents ? [_package substringFromIndex:documents] : @"guest.so"];
+    [self note:_package && _package.length > documents ? [_package substringFromIndex:documents] : @"guest.so"];
     NSString* map = self.mapPath;
     if (map) {
         const auto status = atlan::shell::inspect_data_file(map.UTF8String);
-        [self append:status.ok ? @"map ok" : [NSString stringWithFormat:@"map rejected: %s", status.message.c_str()]];
+        [self note:status.ok ? @"map ok" : [NSString stringWithFormat:@"map rejected: %s", status.message.c_str()]];
     } else {
-        [self append:@"map missing"];
+        [self note:@"map missing"];
     }
     __weak ShellViewController* weakSelf = self;
     atlan::shell::SessionConfig config;
@@ -364,9 +377,9 @@
         std::string why;
         if (auto bindings = atlan::shell::load_input_bindings(self.inputBindingsPath.UTF8String, why)) {
             config.input_bindings = std::move(*bindings);
-            [self append:config.input_bindings.empty() ? @"input bindings missing" : @"input bindings ok"];
+            [self note:config.input_bindings.empty() ? @"input bindings missing" : @"input bindings ok"];
         } else {
-            [self append:[NSString stringWithFormat:@"input bindings rejected: %s", why.c_str()]];
+            [self note:[NSString stringWithFormat:@"input bindings rejected: %s", why.c_str()]];
         }
     }
     [self startLocation];
@@ -387,7 +400,9 @@
         _layer = layer;
         [self layoutSurface];
         _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
-        _gl->set_log([weakSelf, repeats](const std::string& line) {
+        atlan::shell::SessionLogFile* logFile = &_logFile;  // outlives the backend and the session
+        _gl->set_log([weakSelf, repeats, logFile](const std::string& line) {
+            logFile->write("gl " + line);
             std::string shown = "gl " + line;
             if (!repeats->admit(shown)) return;
             NSString* text = [NSString stringWithUTF8String:shown.c_str()] ?: @"?";
@@ -410,7 +425,8 @@
     }
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,
-        [weakSelf, repeats, perfPath, netPath](const std::string& line) {
+        [weakSelf, repeats, perfPath, netPath, logFile = &_logFile](const std::string& line) {
+            logFile->write(line);
             // Lines the guest repeats every frame are shown a few times only. Performance lines are also kept in
             // Documents/perf.log and network lines in Documents/net.log, which the Files app can open and share.
             const bool network = line.starts_with("net ") || line.starts_with("http ") || line.starts_with("java online") ||
@@ -431,7 +447,7 @@
                 [strongSelf refresh];
             });
         });
-    if (!_session->start()) [self append:@"thread start failed"];
+    if (!_session->start()) [self note:@"thread start failed"];
     UIApplication.sharedApplication.idleTimerDisabled = YES;  // a navigation screen stays on without touches
     [self refresh];
 }
