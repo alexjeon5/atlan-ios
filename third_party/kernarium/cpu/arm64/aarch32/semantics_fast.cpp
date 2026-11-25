@@ -52,6 +52,14 @@ constexpr std::uint16_t condition_mask(unsigned cond) noexcept
 	return (op.cond_mask >> (cpu.nzcv >> 28) & 1U) != 0U;
 }
 
+/* clear_exclusive_monitor() after a store. A held reservation always has a
+ * 32-bit address, so an address of ~0 means every field is already clear. */
+inline void stored(CpuState &cpu) noexcept
+{
+	if (cpu.exclusive_address != ~std::uint64_t{0}) [[unlikely]]
+		cpu.clear_exclusive_monitor();
+}
+
 /* The caller writes back next_key and next_it (see fast_next). */
 [[nodiscard]] inline unsigned advance(CpuState &, const FastOp &) noexcept
 {
@@ -327,7 +335,7 @@ unsigned single_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noexce
 		const std::uint32_t value = reg(cpu, op.d);
 		std::memcpy(host, &value, Size);
 		/* What the runtime's A32Memory::stored() does after every store. */
-		cpu.clear_exclusive_monitor();
+		stored(cpu);
 		if (Address != address_constant && !BaseConstant && op.wback)
 			cpu.registers[op.n] = offset_address;
 	}
@@ -400,7 +408,7 @@ unsigned multiple_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noex
 			std::memcpy(host, &word, 4);
 			host += 4;
 		}
-		cpu.clear_exclusive_monitor();
+		stored(cpu);
 		if (op.wback)
 			cpu.registers[op.n] = base + op.imm2;
 	}
