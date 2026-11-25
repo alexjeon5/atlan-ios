@@ -24,7 +24,8 @@ CI 가 만든 서명 없는 IPA 를 iPhone/iPad 에 설치해서 앱 셸이 어�
 ## 3. 지도·데이터 넣기
 
 - 파일 앱 → **내 iPhone > (앱 이름)** 폴더 = 앱의 Documents 폴더야. 여기에 `ATLAN` 폴더를 통째로 복사해 넣어. 안에 `APP`, `MAP`, `UI`, `Sys` 같은 폴더가 있어야 해.
-- 앱은 `system.ini` 에 적힌 안드로이드 경로(`/storage/sdcard1/Atlan/…`)를 Documents 의 `ATLAN/…` 로, 앱이 쓰는 저장 공간(`/data/app_storage/Atlan/…`)은 `ATLAN/NAND/…` 로 연결해 줘. 그래서 `ATLAN/NAND` 는 앱이 직접 만드는 폴더야.
+- 앱은 `system.ini` 에 적힌 안드로이드 경로를 Documents 의 `ATLAN` 폴더로 연결해 줘. `ROOTPATH` 에 적힌 경로가 무엇이든 그게 `ATLAN` 폴더고, `/storage/emulated/0/ATLAN/…`, `/storage/sdcard1/Atlan/…` 처럼 `atlan` 이라는 폴더(대소문자 무관)를 지나는 다른 절대 경로도 같은 폴더로 가. 기본 ini 의 `/data/app_storage/Atlan/…` 만 `ATLAN/NAND/…` 로 가. 그래서 ini 의 경로 값은 기기에 맞게 고칠 필요가 없어.
+- 화면 크기는 `SCREENWIDTH`·`SCREENHEIGHT` 의 짧은 변을 그대로 쓰고 긴 변을 기기 화면 비율에 맞춰서(8의 배수) 앱에 알려 줘. 800×480 이면 아이폰에서 1040×480 정도로 돌고 화면을 꽉 채워. 더 선명하게 보려면 `SCREENHEIGHT` 를 키우면 되는데 그만큼 느려져. `FIXEDSCREENWIDTH`·`FIXEDSCREENHEIGHT` 를 둘 다 0 이 아닌 값으로 두면 ini 의 크기 그대로 돌고 비율을 유지한 채 가운데에 표시돼. 원본 파일은 바뀌지 않아.
 - 지도 파일 용량이 크니까(수 GB) 복사 시간과 기기 저장 공간을 확인해줘.
 - 데이터가 없어도 실행은 끝까지 가고, 없는 파일은 `fopen … failed` 로그로 남아.
 - 데이터를 바꾸려면 같은 폴더의 파일을 바꿔 넣으면 돼.
@@ -65,7 +66,7 @@ audio callbacks=0 players=1
 - 정상 종료 지점은 `audio callbacks=… players=1` 줄이야. 이 줄까지 나오면 이번 단계는 성공이고, 그 뒤에 아무것도 안 뜨는 게 **현재 예상 결과**야. (지도 데이터가 없으면 `createGLSF` 가 빨리 끝나고 `players=0` 이야.)
 - 핵심 확인 줄은 `JNI_OnLoad returned 0x10004`, `nativeInit returned 0x0`, 그리고 `createGLSF returned 0x0`(지도 데이터가 있을 때) 이야.
 - `createGLSF` 는 지도 파일을 읽느라 폰에서 몇 분 걸릴 수 있어. 서버(arm64 리눅스)에서는 약 3분이야. 그동안 앱이 멈춘 것처럼 보여도 로그가 늘어나면 정상이야.
-- `guest stdout read error: Bad file descriptor` 줄이 많이 반복되는 건 앱 자신의 동작이야. system.ini 의 `CLOUDMAPPATH=/map/CLOUD_MAP` 은 클라우드 지도 저장 폴더인데, 쓸 수 있는 폴더가 없으면 앱이 `open` 실패 값 -1 을 확인하지 않고 그대로 `read` 해서 `perror` 가 찍혀. 이 줄은 해롭지 않아. 실제 안드로이드 기기에서 `/map` 이 없을 때도 똑같이 나와. 일부러 이 폴더를 만들어 주지 않아: 만들어 주면 앱이 클라우드 지도 받기 스레드를 살리는데, 그 스레드 초기화(`InitializeMapDownload`)가 끝나기 전에 `MainProc` 가 `CMapReadThread::enqueue` 를 NULL 객체로 불러서 세 번째 `renderGLSF` 에서 멈춰 (`memory_fault address=0x15c`). 클라우드 받기에는 소켓도 필요해서 지금은 쓸모가 없어.
+- `guest stdout read error: Bad file descriptor` 줄이 많이 반복되는 건 앱 자신의 동작이야. system.ini 의 `CLOUDMAPPATH=/map/CLOUD_MAP` 은 클라우드 지도 저장 폴더인데, 쓸 수 있는 폴더가 없으면 앱이 `open` 실패 값 -1 을 확인하지 않고 그대로 `read` 해서 `perror` 가 찍혀. 이 줄은 해롭지 않아. 실제 안드로이드 기기에서 `/map` 이 없을 때도 똑같이 나와. 일부러 이 폴더를 만들어 주지 않아: 만들어 주면 앱이 클라우드 지도 받기 스레드를 살리는데, 그 스레드 초기화(`InitializeMapDownload`)가 끝나기 전에 `MainProc` 가 `CMapReadThread::enqueue` 를 NULL 객체로 불러서 세 번째 `renderGLSF` 에서 멈춰 (`memory_fault address=0x15c`). 클라우드 받기에는 소켓도 필요해서 지금은 쓸모가 없어. ini 에 `CLOUDMAPPATH` 가 없거나 쓸 수 있는 폴더로 바뀌어 있으면 클라우드 지도 내려받기가 켜지면서 세 번째 `renderGLSF` 부근에서 `CMapReadThread::enqueue` 널 접근으로 멈추기 때문에, 앱에는 항상 `CLOUDMAPPATH=/map/CLOUD_MAP` 인 사본을 읽혀 줘.
 - 지도·데이터를 안 넣었으면 `fopen ATLAN/MAP/WAVE/….idx … failed` 가 찍혀. 그래도 `nativeInit returned 0x0` 까지는 가. 데이터를 넣으면 `ok` 로 바뀌는지, 그 뒤에 새로 멈추는 곳이 있는지 보는 게 이번 테스트의 목적이야.
 - `setSurfaces` 는 화면 연결이 아직 없어서 호출만 기록하고 아무 일도 안 해. 화면에는 아직 아무것도 그려지지 않아.
 - 화면에는 아직 아무것도 그려지지 않아 (그래픽 백엔드 연결 전). 시작음 같은 소리가 날 수 있어.

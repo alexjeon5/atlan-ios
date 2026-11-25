@@ -15,6 +15,10 @@ constexpr std::uint32_t file_base = 0xe4000000;
 constexpr std::uint32_t guest_enoent = 2, guest_eacces = 13, guest_einval = 22, guest_emfile = 24;
 constexpr std::uint32_t dir_base = 0xe5000000, dirent_base = 0xe5100000, dirent_stride = 512;
 constexpr std::uint32_t max_io = 16U * 1024 * 1024;
+std::string ascii_lower(std::string text) {
+    for (auto& c : text) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    return text;
+}
 }
 GuestStdio::~GuestStdio() {
     for (auto& fd : fds_) if (fd.host >= 0) ::close(fd.host);
@@ -68,7 +72,55 @@ std::string GuestStdio::alias(const std::string& path) const {
         if (path.size() >= guest.size() && path.compare(0, guest.size(), guest) == 0 &&
             (path.size() == guest.size() || path[guest.size()] == '/'))
             return host + path.substr(guest.size());
+    if (path.empty() || path.front() != '/') return path;
+    for (std::size_t start = 1; start < path.size();) {
+        const auto end = std::min(path.find('/', start), path.size());
+        const auto component = ascii_lower(path.substr(start, end - start));
+        for (const auto& [name, host] : anchors_)
+            if (component == name) return host + path.substr(end);
+        start = end + 1;
+    }
     return path;
+}
+void GuestStdio::add_anchor(std::string component, std::string host_prefix) {
+    anchors_.emplace_back(ascii_lower(std::move(component)), std::move(host_prefix));
+}
+void GuestStdio::add_read_filter(std::string relative, std::function<std::string(std::string)> transform) {
+    read_filters_.emplace_back(ascii_lower(std::filesystem::path(std::move(relative)).lexically_normal().generic_string()),
+                               std::move(transform));
+}
+std::filesystem::path GuestStdio::host_path(const std::string& guest_path) const {
+    std::filesystem::path relative;
+    for (const auto& part : std::filesystem::path(alias(guest_path)).relative_path()) {
+        if (part == "..") return {};
+        if (part != ".") relative /= part;
+    }
+    return relative.empty() ? std::filesystem::path{} : locate(relative);
+}
+std::FILE* GuestStdio::open_filtered(const std::filesystem::path& relative) const {
+    const auto wanted = ascii_lower(relative.generic_string());
+    for (const auto& [name, transform] : read_filters_) {
+        if (name != wanted) continue;
+        std::FILE* source = std::fopen(locate(relative).string().c_str(), "rb");
+        if (!source) return nullptr;
+        std::string bytes;
+        std::array<char, 4096> chunk{};
+        for (std::size_t got; bytes.size() <= max_io && (got = std::fread(chunk.data(), 1, chunk.size(), source)) > 0;)
+            bytes.append(chunk.data(), got);
+        std::fclose(source);
+        const auto served = transform(std::move(bytes));
+        std::error_code ec;
+        auto pattern = (std::filesystem::temp_directory_path(ec) / "atlan-filtered-XXXXXX").string();
+        const int fd = ec ? -1 : ::mkstemp(pattern.data());
+        if (fd < 0) return nullptr;
+        ::unlink(pattern.c_str());
+        std::FILE* file = ::fdopen(fd, "w+b");
+        if (!file) { ::close(fd); return nullptr; }
+        if (std::fwrite(served.data(), 1, served.size(), file) != served.size() || std::fflush(file) != 0) { std::fclose(file); return nullptr; }
+        std::rewind(file);
+        return file;
+    }
+    return nullptr;
 }
 void GuestStdio::install(ImportDispatcher& dispatcher) {
     const auto set_errno = [this](ImportCall& call, std::uint32_t code) {
@@ -402,7 +454,8 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         std::uint32_t code = guest_enoent;
         if (files_.size() >= max_open && open_files() >= max_open) code = guest_emfile;
         else if (!relative.empty() && !std::filesystem::is_directory(locate(relative))) {
-            file = std::fopen((locate(relative)).string().c_str(), mode.c_str());
+            if (mode == "r" || mode == "rb") file = open_filtered(relative);
+            if (!file) file = std::fopen((locate(relative)).string().c_str(), mode.c_str());
             if (!file) code = errno == ENOENT ? guest_enoent : errno == EACCES ? guest_eacces : guest_einval;
         }
         if (trace_) trace_(path, mode, file != nullptr);

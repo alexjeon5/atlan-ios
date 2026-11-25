@@ -48,10 +48,10 @@ private:
     std::uint64_t dropped_{};
 };
 
-// View point (in points, origin top-left) to guest surface pixels, for a surface stretched over the whole view.
+// View point (origin top-left) to guest surface pixels, for a surface shown in `shown` (see fit_rect). Points outside
+// `shown` clamp to the surface edge.
 struct SurfacePoint { float x{}, y{}; };
-[[nodiscard]] SurfacePoint to_surface(double x_points, double y_points, double view_width, double view_height,
-                                      PixelSize surface) noexcept;
+[[nodiscard]] SurfacePoint to_surface(double x, double y, ViewRect shown, PixelSize surface) noexcept;
 
 // Where one argument of a bound native method comes from. The value is multiplied by `scale` and then converted to
 // the JNI type at that position of the signature (Z B C S I: rounded 32-bit integer, J: rounded 64-bit integer,

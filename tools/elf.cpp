@@ -119,6 +119,7 @@ int main(int argc, char* argv[]) {
             stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
             stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
+            stdio->add_anchor("atlan", "ATLAN");  // other absolute paths through a folder named "atlan"
             stdio->install(dispatcher);
         }
         const std::map<std::string, std::string> properties;

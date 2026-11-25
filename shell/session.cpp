@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
+#include "shell/guest_ini.hpp"
+#include <iterator>
 #include <chrono>
 #include <algorithm>
 #include "atlan/gles.hpp"
@@ -75,12 +77,20 @@ std::string describe_stop(const std::string& label, const CallOutcome& outcome) 
                  " access=" + std::to_string(static_cast<int>(outcome.cpu.access));
     return line;
 }
-std::string describe_state(const Runtime& runtime, const ImportDispatcher& dispatcher) {
+std::string describe_state(Runtime& runtime, const ImportDispatcher& dispatcher) {
     std::string out = "state pc=0x" + hex(runtime.pc()) + " lr=0x" + hex(runtime.cpu.registers[14]) +
                       " sp=0x" + hex(runtime.cpu.registers[13]);
     for (unsigned i = 0; i < 4; ++i) out += " r" + std::to_string(i) + "=0x" + hex(runtime.cpu.registers[i]);
     std::vector<std::pair<std::string, std::uint64_t>> top(dispatcher.import_counts().begin(), dispatcher.import_counts().end());
     std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    out += " stack:";
+    for (std::uint32_t i = 0; i < 24; ++i) {  // enough to find the callers' return addresses
+        std::array<std::byte, 4> word{};
+        if (!runtime.memory.read(static_cast<std::uint32_t>(runtime.cpu.registers[13]) + 4 * i, word)) break;
+        std::uint32_t value = 0;
+        for (unsigned b = 0; b < 4; ++b) value |= std::to_integer<std::uint32_t>(word[b]) << (8 * b);
+        out += " " + hex(value);
+    }
     out += " imports:";
     for (std::size_t i = 0; i < top.size() && i < 8; ++i) out += " " + top[i].first + "=" + std::to_string(top[i].second);
     return out;
@@ -152,9 +162,43 @@ void GuestSession::run() {
             stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
-            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
-            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
+            // The guest's settings file names its folders by absolute Android paths, which differ per device and may
+            // be edited by the user. Whatever ROOTPATH says is the ATLAN folder beneath the data root; any other
+            // absolute path through a folder named "atlan" (any case) lands in that same folder.
+            const char* settings_file = "ATLAN/APP/system.ini";
+            std::string settings;
+            if (std::ifstream input(stdio->host_path(settings_file), std::ios::binary); input)
+                settings.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+            if (const auto root = ini_value(settings, "ROOTPATH"); root && root->size() > 1 && root->front() == '/') {
+                stdio->add_alias(*root, "ATLAN");
+                log_("data root " + *root);
+            }
+            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH of the stock settings: the map data folder
+            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // stock NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
+            stdio->add_anchor("atlan", "ATLAN");
+            // The guest reads a copy of the settings file with two entries controlled here.
+            // CLOUDMAPPATH: where downloaded map tiles would be kept. The stock value names a folder that does not
+            // exist, which keeps the downloader off; a missing or writable value turns it on, and its map read thread
+            // is never started here, so the first tile request would stop the guest. Always serve the stock value.
+            // SCREENWIDTH/SCREENHEIGHT: the guest takes its screen size from these and reports it back through
+            // setSurfaces. To fill the host surface the long side is adjusted.
+            PixelSize configured{ini_number(settings, "SCREENWIDTH").value_or(0), ini_number(settings, "SCREENHEIGHT").value_or(0)};
+            auto screen = configured;
+            if (config_.fill_surface && config_.surface) {
+                const bool fixed = ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
+                                   ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0;
+                if (!fixed) screen = fill_screen(configured, config_.surface->get());
+                log_("screen " + std::to_string(configured.width) + "x" + std::to_string(configured.height) +
+                     (fixed ? " fixed" : " -> " + std::to_string(screen.width) + "x" + std::to_string(screen.height)));
+            }
+            const bool resize = screen.width != configured.width || screen.height != configured.height;
+            stdio->add_read_filter(settings_file, [screen, resize](std::string text) {
+                text = ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
+                if (!resize) return text;
+                return ini_set(ini_set(std::move(text), "SCREENWIDTH", std::to_string(screen.width)),
+                               "SCREENHEIGHT", std::to_string(screen.height));
+            });
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;

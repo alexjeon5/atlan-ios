@@ -48,14 +48,13 @@ std::uint64_t InputQueue::dropped() const {
     return dropped_;
 }
 
-SurfacePoint to_surface(double x_points, double y_points, double view_width, double view_height,
-                        PixelSize surface) noexcept {
-    const auto axis = [](double value, double extent, std::uint32_t pixels) {
+SurfacePoint to_surface(double x, double y, ViewRect shown, PixelSize surface) noexcept {
+    const auto axis = [](double value, double origin, double extent, std::uint32_t pixels) {
         if (!(extent > 0) || pixels == 0) return 0.0f;
-        const double scaled = value / extent * pixels;
+        const double scaled = (value - origin) / extent * pixels;
         return static_cast<float>(std::clamp(scaled, 0.0, static_cast<double>(pixels - 1)));
     };
-    return {axis(x_points, view_width, surface.width), axis(y_points, view_height, surface.height)};
+    return {axis(x, shown.x, shown.width, surface.width), axis(y, shown.y, shown.height, surface.height)};
 }
 
 bool InputBindings::empty() const noexcept {
