@@ -108,7 +108,9 @@ void randomize(Runtime& r, std::mt19937& random, bool seams = false) {
 }
 
 // One random instruction, executed through both paths from identical state.
-void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = false, bool vfp = false) {
+// `mask`/`value` force bits of every word (an encoding family the generic random words rarely hit).
+void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = false, bool vfp = false,
+                   std::uint32_t mask = 0, std::uint32_t value = 0) {
     std::mt19937 random{seed};
     Runtime a, b;
     for (auto* r : {&a, &b}) {
@@ -124,6 +126,7 @@ void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = 
         if (thumb && random() % 2) word &= 0xffffU;                            // 16-bit forms
         // Scalar VFP: coprocessor 10 or 11 in the three classes the VFP executor takes.
         if (vfp) word = (word & 0xf0fff0ffU) | (12U + random() % 3) << 24 | (10U + random() % 2) << 8;
+        word = (word & ~mask) | value;
         const std::uint32_t at = bench::code_base + (thumb ? 2 * (random() % 8) : 0);
         for (auto* r : {&a, &b}) {
             r->memory.protect(bench::code_base, 0x2000, Permissions::read_write);
@@ -335,6 +338,15 @@ int main() {
         random_single(30000 / scale, true, 14, true);
         random_single(60000 / scale, false, 15, false, true);
         random_single(60000 / scale, false, 16, true, true);
+        // Long and halfword multiplies, LDRD/STRD (immediate and register), A32 and T32.
+        random_single(8000 / scale, false, 31, false, false, 0x0f8000f0U, 0x00800090U);  // UMULL/UMLAL/SMULL/SMLAL
+        random_single(8000 / scale, false, 32, false, false, 0x0f900090U, 0x01000080U);  // SMLA<x><y>, SMUL<x><y> and neighbours
+        random_single(8000 / scale, false, 33, false, false, 0x0e0000d0U, 0x000000d0U);  // LDRD/STRD and neighbours
+        random_single(8000 / scale, false, 34, true, false, 0x0e0000d0U, 0x000000d0U);
+        random_single(8000 / scale, true, 35, false, false, 0xfe400000U, 0xe8400000U);   // T32 LDRD/STRD (immediate)
+        random_single(8000 / scale, true, 36, true, false, 0xfe400000U, 0xe8400000U);
+        random_single(8000 / scale, true, 37, false, false, 0xff800000U, 0xfb800000U);   // T32 long multiplies
+        random_single(8000 / scale, true, 38, false, false, 0xfff00000U, 0xfb100000U);   // T32 SMLA<x><y>/SMUL<x><y>
         random_programs(1500 / scale, false, 21);
         random_programs(1500 / scale, true, 22);
         dispatcher_paths();
