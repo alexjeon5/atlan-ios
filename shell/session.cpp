@@ -482,16 +482,24 @@ void GuestSession::run() {
                 dispatcher.reset_import_counts();
                 log_(on_demand ? "frames on request" : "frames every interval");
                 auto last_draw = std::chrono::steady_clock::now();
+                auto next_draw = last_draw;  // a frame starts no earlier: `frame_interval_ms` after the previous one
                 std::uint64_t drawn = 0;
+                // Between frames the loop wakes for the guest's own timers (a thread in usleep or a timed wait) and
+                // for input instead of sleeping out the interval, so the guest's threads keep their pace and a
+                // request for a frame is served as soon as the interval allows.
+                constexpr auto longest_nap = std::chrono::milliseconds(8);   // bounds the delay of host input
+                constexpr auto shortest_nap = std::chrono::milliseconds(2);  // a guest polling faster does not spin the host
                 while (!stop_.load()) {
                     const auto frame_start = std::chrono::steady_clock::now();
                     if (!deliver_input()) return;
                     CallOutcome frame;
-                    const bool draw = !on_demand || render_requested ||
-                                      seconds_since(last_draw) * 1000.0 >= static_cast<double>(config_.idle_redraw_ms);
+                    const bool draw = frame_start >= next_draw &&
+                                      (!on_demand || render_requested ||
+                                       seconds_since(last_draw) * 1000.0 >= static_cast<double>(config_.idle_redraw_ms));
                     if (draw) {
                         render_requested = false;
                         last_draw = frame_start;
+                        next_draw = frame_start + std::chrono::milliseconds(config_.frame_interval_ms);
                         ++drawn;
                         frame = dispatcher.call(runtime, render->address, render_args, stack_base + stack_bytes,
                                                 return_sentinel, config_.surface_call_budget);
@@ -509,30 +517,44 @@ void GuestSession::run() {
                     const auto background = dispatcher.pump(runtime, config_.initializer_budget);
                     if (background.stop == Stop::unresolved_import) { fail("pump stopped at missing service " + background.import); return; }
                     if (background.stop != Stop::returned && background.stop != Stop::budget_exhausted) { fail(describe_stop("pump", background)); return; }
+                    // When the earliest guest timer is due; none pending: no bound from the guest.
+                    std::optional<std::chrono::steady_clock::time_point> guest_timer;
+                    if (const auto wake = threads.next_wake_ns(); wake != 0) {
+                        const auto now = threads.now_ns();
+                        guest_timer = std::chrono::steady_clock::now() + std::chrono::nanoseconds(wake > now ? wake - now : 0);
+                    }
                     const double pumped_seconds = seconds_since(pump_start);
                     const auto audio_start = std::chrono::steady_clock::now();
                     const auto sound = audio->pump(runtime, stack_base + stack_bytes, return_sentinel, config_.initializer_budget);
                     if (sound.error) { fail("audio callback: " + *sound.error); return; }
                     audio_seconds += seconds_since(audio_start);
                     const auto idle_start = std::chrono::steady_clock::now();
-                    std::this_thread::sleep_until(frame_start + std::chrono::milliseconds(config_.frame_interval_ms));
+                    if (background.stop != Stop::budget_exhausted) {
+                        auto wake = idle_start + longest_nap;
+                        if (guest_timer) wake = std::min(wake, std::max(idle_start + shortest_nap, *guest_timer));
+                        if (!on_demand || render_requested) wake = std::min(wake, next_draw);
+                        std::this_thread::sleep_until(wake);
+                    }
                     idle_seconds += seconds_since(idle_start);
                     ++frames;
                     render_instructions += frame.retired;
                     pump_instructions += background.retired;
                     render_seconds += rendered;
-                    render_worst = std::max(render_worst, rendered);
+                    if (draw) render_worst = std::max(render_worst, rendered);
                     pump_seconds += pumped_seconds;
                     if (const double elapsed = seconds_since(report_start); elapsed >= report_seconds) {
-                        const auto ms = [&](double total) { return std::to_string(total * 1000.0 / static_cast<double>(frames)); };
+                        const double frames_drawn = static_cast<double>(std::max<std::uint64_t>(drawn, 1));
+                        const auto share = [&](double total) { return std::to_string(total * 100.0 / elapsed); };
                         std::string line = "perf frames: " + std::to_string(static_cast<double>(drawn) / elapsed) + " fps (" +
-                            std::to_string(drawn) + " drawn in " + std::to_string(frames) + " intervals, " + std::to_string(render_requests) +
-                            " requests); per interval render " +
-                            ms(render_seconds) + " ms (worst " + std::to_string(render_worst * 1000.0) + "), threads " + ms(pump_seconds) +
-                            " ms, audio " + ms(audio_seconds) + " ms, idle " + ms(idle_seconds) + " ms; render " +
-                            std::to_string(render_instructions / frames) + " instructions/frame at " +
+                            std::to_string(drawn) + " drawn, " + std::to_string(render_requests) + " requests, " +
+                            std::to_string(frames) + " wakeups); per drawn frame render " +
+                            std::to_string(render_seconds * 1000.0 / frames_drawn) + " ms (worst " +
+                            std::to_string(render_worst * 1000.0) + "), " +
+                            std::to_string(render_instructions / std::max<std::uint64_t>(drawn, 1)) + " instructions at " +
                             std::to_string(render_seconds > 0 ? static_cast<double>(render_instructions) / render_seconds / 1e6 : 0.0) +
-                            " MIPS, threads " + std::to_string(pump_instructions / frames) + " instructions/frame";
+                            " MIPS; time render " + share(render_seconds) + "%, threads " + share(pump_seconds) + "% (" +
+                            std::to_string(pump_seconds > 0 ? static_cast<double>(pump_instructions) / pump_seconds / 1e6 : 0.0) +
+                            " MIPS), audio " + share(audio_seconds) + "%, idle " + share(idle_seconds) + "%";
                         if (config_.perf_log) line += perf_details();
                         log_(line);
                         dispatcher.reset_import_counts();
