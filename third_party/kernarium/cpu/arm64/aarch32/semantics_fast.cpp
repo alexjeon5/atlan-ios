@@ -275,6 +275,61 @@ unsigned multiply_accumulate(CpuState &cpu, const FastOp &op, Memory &) noexcept
 	return advance(cpu, op);
 }
 
+/* UMULL, SMULL, UMLAL, SMLAL: `d` is RdLo and `shift_t` RdHi (written in that
+ * order, as exec_multiply() does). */
+template <bool Signed, bool Accumulate, bool SetFlags>
+unsigned multiply_long(CpuState &cpu, const FastOp &op, Memory &) noexcept
+{
+	if (passes(cpu, op)) [[likely]] {
+		std::uint64_t result = Signed
+			? static_cast<std::uint64_t>(std::int64_t{static_cast<std::int32_t>(reg(cpu, op.n))}
+				* std::int64_t{static_cast<std::int32_t>(reg(cpu, op.m))})
+			: std::uint64_t{reg(cpu, op.n)} * std::uint64_t{reg(cpu, op.m)};
+		if (Accumulate)
+			result += std::uint64_t{reg(cpu, op.shift_t)} << 32 | reg(cpu, op.d);
+		cpu.registers[op.d] = static_cast<std::uint32_t>(result);
+		cpu.registers[op.shift_t] = static_cast<std::uint32_t>(result >> 32);
+		if (SetFlags)
+			cpu.nzcv = (cpu.nzcv & 0x3fff'ffffU)
+				| static_cast<std::uint32_t>(result >> 32 & 0x8000'0000U)
+				| (result == 0U ? 0x4000'0000U : 0U);
+	}
+	return advance(cpu, op);
+}
+
+/* SMLA<x><y> (Accumulate) and SMUL<x><y>: `add` and `index` pick the top
+ * halves of Rn and Rm, `shift_n` names the addend; overflow of the addition
+ * sets Q. */
+template <bool NTop, bool MTop, bool Accumulate>
+unsigned multiply_halves(CpuState &cpu, const FastOp &op, Memory &) noexcept
+{
+	if (passes(cpu, op)) [[likely]] {
+		const std::uint32_t n = reg(cpu, op.n), m = reg(cpu, op.m);
+		const std::int32_t a = NTop ? static_cast<std::int32_t>(n) >> 16
+			: static_cast<std::int16_t>(n);
+		const std::int32_t b = MTop ? static_cast<std::int32_t>(m) >> 16
+			: static_cast<std::int16_t>(m);
+		const std::int64_t product = std::int64_t{a} * b;
+		if (!Accumulate) {
+			cpu.registers[op.d] = static_cast<std::uint32_t>(product);
+		} else {
+			const std::int64_t result = product
+				+ std::int64_t{static_cast<std::int32_t>(reg(cpu, op.shift_n))};
+			cpu.registers[op.d] = static_cast<std::uint32_t>(result);
+			if (result != std::int64_t{static_cast<std::int32_t>(result)})
+				cpu.a32_q = 1;
+		}
+	}
+	return advance(cpu, op);
+}
+
+template <bool Accumulate>
+[[nodiscard]] FastOp::Run multiply_halves_for(bool n_top, bool m_top) noexcept
+{
+	return n_top ? (m_top ? multiply_halves<true, true, Accumulate> : multiply_halves<true, false, Accumulate>)
+		     : (m_top ? multiply_halves<false, true, Accumulate> : multiply_halves<false, false, Accumulate>);
+}
+
 /* How a single transfer forms its address: a constant (the literal pool), the
  * base and an immediate, the base and a register, the base and a shifted
  * register. */
@@ -366,6 +421,42 @@ template <int Address>
 {
 	return base_constant ? single_transfer_as<Address, true>(op, to_pc)
 			     : single_transfer_as<Address, false>(op, to_pc);
+}
+
+/* LDRD and STRD with an immediate or register offset: `d` is Rt and
+ * `shift_t` Rt2. A doubleword access must be word aligned; an unaligned one
+ * or one that crosses a page falls back. */
+template <bool Load, int Address>
+unsigned doubleword_transfer(CpuState &cpu, const FastOp &op, Memory &memory) noexcept
+{
+	if (!passes(cpu, op)) [[unlikely]]
+		return advance(cpu, op);
+	const std::uint32_t base = reg(cpu, op.n);
+	const std::uint32_t offset = Address == address_immediate ? op.imm : reg(cpu, op.m);
+	const std::uint32_t offset_address = op.add ? base + offset : base - offset;
+	const std::uint32_t address = op.index ? offset_address : base;
+	if ((address & 3U) != 0U || (address & (guest_page_size - 1U)) > guest_page_size - 8U) [[unlikely]]
+		return fast_fallback;
+	std::byte *host = memory.translate(address, Load ? MemoryAccess::read : MemoryAccess::write);
+	if (host == nullptr) [[unlikely]]
+		return fast_fallback;
+	if (Load) {
+		std::uint32_t low, high;
+		std::memcpy(&low, host, 4);
+		std::memcpy(&high, host + 4, 4);
+		if (op.wback)
+			cpu.registers[op.n] = offset_address;
+		cpu.registers[op.d] = low;
+		cpu.registers[op.shift_t] = high;
+	} else {
+		const std::uint32_t low = reg(cpu, op.d), high = reg(cpu, op.shift_t);
+		std::memcpy(host, &low, 4);
+		std::memcpy(host + 4, &high, 4);
+		stored(cpu);
+		if (op.wback)
+			cpu.registers[op.n] = offset_address;
+	}
+	return advance(cpu, op);
 }
 
 /* exec_multiple_transfer() when the block of words is aligned and inside one
@@ -607,6 +698,55 @@ bool prepare_fast(const Instruction &instruction, std::uint64_t key, FastOp &out
 		op.run = info.op == Op::mls
 			? (o.setflags ? multiply_accumulate<true, true> : multiply_accumulate<true, false>)
 			: (o.setflags ? multiply_accumulate<false, true> : multiply_accumulate<false, false>);
+		break;
+	case Op::umull: case Op::smull: case Op::umlal: case Op::smlal: {
+		if (!is_core(o.dLo) || !is_core(o.dHi) || !is_core(o.n) || !is_core(o.m))
+			return false;
+		op.d = static_cast<std::uint8_t>(o.dLo);
+		op.shift_t = static_cast<std::uint8_t>(o.dHi);
+		op.n = static_cast<std::uint8_t>(o.n);
+		op.m = static_cast<std::uint8_t>(o.m);
+		const bool is_signed = info.op == Op::smull || info.op == Op::smlal;
+		const bool accumulate = info.op == Op::umlal || info.op == Op::smlal;
+		if (is_signed)
+			op.run = accumulate ? (o.setflags ? multiply_long<true, true, true> : multiply_long<true, true, false>)
+					    : (o.setflags ? multiply_long<true, false, true> : multiply_long<true, false, false>);
+		else
+			op.run = accumulate ? (o.setflags ? multiply_long<false, true, true> : multiply_long<false, true, false>)
+					    : (o.setflags ? multiply_long<false, false, true> : multiply_long<false, false, false>);
+		break;
+	}
+	case Op::smla_xy: case Op::smul_xy:
+		if (!is_core(o.d) || !is_core(o.n) || !is_core(o.m)
+			|| (info.op == Op::smla_xy && !is_core(o.a)))
+			return false;
+		op.d = static_cast<std::uint8_t>(o.d);
+		op.n = static_cast<std::uint8_t>(o.n);
+		op.m = static_cast<std::uint8_t>(o.m);
+		op.shift_n = info.op == Op::smla_xy ? static_cast<std::uint8_t>(o.a) : std::uint8_t{0};
+		op.run = info.op == Op::smla_xy ? multiply_halves_for<true>(o.n_index != 0, o.m_index != 0)
+						: multiply_halves_for<false>(o.n_index != 0, o.m_index != 0);
+		break;
+	case Op::ldrd: case Op::strd:
+		if (info.shape == Shape::literal || !is_core(o.n) || !is_core(o.t) || !is_core(o.t2))
+			return false;
+		op.d = static_cast<std::uint8_t>(o.t);
+		op.shift_t = static_cast<std::uint8_t>(o.t2);
+		op.n = static_cast<std::uint8_t>(o.n);
+		op.add = o.add;
+		op.index = o.index;
+		op.wback = o.wback;
+		if (info.shape == Shape::reg) {
+			if (!is_core(o.m) || o.shift_n != 0)
+				return false;
+			op.m = static_cast<std::uint8_t>(o.m);
+			op.run = info.op == Op::ldrd ? doubleword_transfer<true, address_register>
+						     : doubleword_transfer<false, address_register>;
+		} else {
+			op.imm = static_cast<std::uint32_t>(o.imm32);
+			op.run = info.op == Op::ldrd ? doubleword_transfer<true, address_immediate>
+						     : doubleword_transfer<false, address_immediate>;
+		}
 		break;
 	case Op::it: case Op::nop:
 		op.run = nothing;
