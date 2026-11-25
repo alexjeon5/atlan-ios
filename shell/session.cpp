@@ -487,8 +487,32 @@ void GuestSession::run() {
                     const auto frame_start = std::chrono::steady_clock::now();
                     if (!deliver_input()) return;
                     CallOutcome frame;
-                    const bool draw = !on_demand || render_requested ||
-                                      seconds_since(last_draw) * 1000.0 >= static_cast<double>(config_.idle_redraw_ms);
+                    bool draw = !on_demand || render_requested;
+                    if (!draw && seconds_since(last_draw) * 1000.0 >= static_cast<double>(config_.idle_redraw_ms)) {
+                        // No request for a while: ask the guest the same question its callback would have. A frame
+                        // drawn while it is not ready is only the clear colour, so that case draws nothing.
+                        last_draw = frame_start;
+                        const auto cls = java.class_handle("com/atlan/AtlanGLThread");
+                        const auto ask = [&](std::uint32_t address, std::optional<std::uint32_t> argument) -> std::optional<std::uint32_t> {
+                            std::vector<std::uint32_t> words{java.env(), cls};
+                            if (argument) words.push_back(*argument);
+                            const auto outcome = dispatcher.call(runtime, address, words, stack_base + stack_bytes,
+                                                                 return_sentinel, config_.surface_call_budget);
+                            if (outcome.stop != Stop::returned) {
+                                log_(describe_state(runtime, dispatcher));
+                                fail(describe_stop("GL thread state", outcome));
+                                return std::nullopt;
+                            }
+                            return static_cast<std::uint32_t>(runtime.cpu.registers[0]);
+                        };
+                        const auto ready = ask(is_state_ready, std::nullopt);
+                        if (!ready) return;
+                        if ((*ready & 0xff) != 0) {
+                            const auto initialised = ask(is_gl_init, std::nullopt);
+                            if (!initialised || !ask(set_state, (*initialised & 0xff) != 0 ? 3u : 2u)) return;
+                            draw = (*initialised & 0xff) != 0;
+                        }
+                    }
                     if (draw) {
                         render_requested = false;
                         last_draw = frame_start;
@@ -515,7 +539,10 @@ void GuestSession::run() {
                     if (sound.error) { fail("audio callback: " + *sound.error); return; }
                     audio_seconds += seconds_since(audio_start);
                     const auto idle_start = std::chrono::steady_clock::now();
-                    std::this_thread::sleep_until(frame_start + std::chrono::milliseconds(config_.frame_interval_ms));
+                    // A frame requested while nothing was being drawn is served as soon as the interval since the
+                    // last drawn frame allows, not a whole interval later: the guest may move on in between.
+                    std::this_thread::sleep_until((on_demand && render_requested ? last_draw : frame_start) +
+                                                  std::chrono::milliseconds(config_.frame_interval_ms));
                     idle_seconds += seconds_since(idle_start);
                     ++frames;
                     render_instructions += frame.retired;
