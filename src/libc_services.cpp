@@ -2,6 +2,7 @@
 #include "atlan/libc_services.hpp"
 #include <array>
 #include <chrono>
+#include <algorithm>
 #include <cstring>
 #include <ctime>
 #include <map>
@@ -30,20 +31,23 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         const auto dest = call.arg(0), count = call.arg(2);
         if (count > max_block) return "memset size exceeds service bound";
         if (count != 0 && std::uint64_t{dest} + count > 0x100000000ULL) return "memset wraps the guest address space";
-        const std::vector<std::byte> block(count, std::byte(call.arg(1) & 0xff));
-        if (!call.runtime().memory.write(dest, block)) return "memset guest memory fault";
+        if (!call.runtime().memory.fill(dest, std::byte(call.arg(1) & 0xff), count)) return "memset guest memory fault";
         call.set_result(dest);
         return std::nullopt;
     });
     // size_t strlen(const char* text): bounded scan of guest memory.
     dispatcher.bind("strlen", [](ImportCall& call) -> std::optional<std::string> {
         const auto start = call.arg(0);
-        for (std::uint32_t length = 0; length < max_block; ++length) {
-            std::byte value{};
-            if (std::uint64_t{start} + length > 0xffffffffULL ||
-                !call.runtime().memory.read(start + length, std::span<std::byte>(&value, 1)))
-                return "strlen read left mapped guest memory";
-            if (value == std::byte{0}) { call.set_result(length); return std::nullopt; }
+        for (std::uint64_t length = 0; length < max_block;) {
+            if (std::uint64_t{start} + length > 0xffffffffULL) return "strlen read left mapped guest memory";
+            const auto bytes = call.runtime().memory.page_span(static_cast<std::uint32_t>(start + length), MemoryAccess::read);
+            if (bytes.empty()) return "strlen read left mapped guest memory";
+            const auto scan = static_cast<std::size_t>(std::min<std::uint64_t>(bytes.size(), max_block - length));
+            if (const void* end = std::memchr(bytes.data(), 0, scan)) {
+                call.set_result(static_cast<std::uint32_t>(length + static_cast<std::size_t>(static_cast<const std::byte*>(end) - bytes.data())));
+                return std::nullopt;
+            }
+            length += scan;
         }
         return "strlen exceeds service bound";
     });
@@ -73,9 +77,8 @@ void install_libc_services(ImportDispatcher& dispatcher) {
             const auto dest = call.arg(0), src = call.arg(1), count = call.arg(2);
             if (count > max_block) return std::string(name) + " size exceeds service bound";
             auto& memory = call.runtime().memory;
-            std::vector<std::byte> data(count);
             if ((count != 0 && (std::uint64_t{src} + count > 0x100000000ULL || std::uint64_t{dest} + count > 0x100000000ULL)) ||
-                !memory.read(src, data) || !memory.write(dest, data))
+                !memory.move(dest, src, count))
                 return std::string(name) + " guest memory fault";
             call.set_result(dest);
             return std::nullopt;

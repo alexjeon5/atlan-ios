@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "atlan/string_services.hpp"
 #include "atlan/abi.hpp"
+#include <algorithm>
 #include <vector>
 
 namespace atlan {
@@ -16,18 +17,28 @@ bool byte_at(Memory& memory, std::uint32_t address, std::uint32_t offset, std::u
 // Compares up to `limit` bytes, stopping after a NUL when `text` is set.
 std::optional<std::string> compare(ImportCall& call, bool text, std::uint32_t limit, const char* name, bool fold = false) {
     if (limit > max_scan) return std::string(name) + " size exceeds service bound";
-    for (std::uint32_t i = 0; i < limit; ++i) {
-        std::uint8_t a{}, b{};
-        if (!byte_at(call.runtime().memory, call.arg(0), i, a) || !byte_at(call.runtime().memory, call.arg(1), i, b))
+    auto& memory = call.runtime().memory;
+    for (std::uint64_t i = 0; i < limit;) {
+        // Both operands a page piece at a time; the bytes are compared in order, so a fault is reported only
+        // when the scan reaches an unmapped byte before it finds a difference or a terminator.
+        if (std::uint64_t{call.arg(0)} + i > 0xffffffffULL || std::uint64_t{call.arg(1)} + i > 0xffffffffULL)
             return std::string(name) + " read left mapped guest memory";
-        if (fold) {  // C locale: only ASCII letters fold
-            if (a >= 'A' && a <= 'Z') a = static_cast<std::uint8_t>(a + 32);
-            if (b >= 'A' && b <= 'Z') b = static_cast<std::uint8_t>(b + 32);
+        const auto left = memory.page_span(static_cast<std::uint32_t>(call.arg(0) + i), MemoryAccess::read);
+        const auto right = memory.page_span(static_cast<std::uint32_t>(call.arg(1) + i), MemoryAccess::read);
+        if (left.empty() || right.empty()) return std::string(name) + " read left mapped guest memory";
+        const auto count = static_cast<std::size_t>(std::min<std::uint64_t>({left.size(), right.size(), limit - i}));
+        for (std::size_t k = 0; k < count; ++k) {
+            auto a = std::to_integer<std::uint8_t>(left[k]), b = std::to_integer<std::uint8_t>(right[k]);
+            if (fold) {  // C locale: only ASCII letters fold
+                if (a >= 'A' && a <= 'Z') a = static_cast<std::uint8_t>(a + 32);
+                if (b >= 'A' && b <= 'Z') b = static_cast<std::uint8_t>(b + 32);
+            }
+            if (a != b || (text && a == 0)) {
+                call.set_result(static_cast<std::uint32_t>(static_cast<int>(a) - static_cast<int>(b)));
+                return std::nullopt;
+            }
         }
-        if (a != b || (text && a == 0)) {
-            call.set_result(static_cast<std::uint32_t>(static_cast<int>(a) - static_cast<int>(b)));
-            return std::nullopt;
-        }
+        i += count;
     }
     call.set_result(0);
     return std::nullopt;

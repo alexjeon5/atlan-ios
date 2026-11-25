@@ -2,6 +2,7 @@
 #include "atlan/memory.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <stdexcept>
 
 namespace atlan {
@@ -79,16 +80,59 @@ void Memory::map_external(std::uint32_t base, std::uint64_t size, Permissions pe
     if (permissions == Permissions::read_execute) code_generation_ = next_code_generation();
 }
 
+bool Memory::translates(std::uint32_t address, std::uint64_t count, MemoryAccess access) noexcept {
+    if (count > (std::uint64_t{1} << 32) - address) return false;
+    for (std::uint64_t i = 0; i < count;) {
+        const auto at = std::uint64_t{address} + i;
+        if (!translate(at, access)) return false;
+        i += std::min<std::uint64_t>(page_size - (at % page_size), count - i);
+    }
+    return true;
+}
+
 bool Memory::read(std::uint32_t address, std::span<std::byte> out) noexcept {
-    if (out.size() > (std::uint64_t{1} << 32) - address) return false;
     // Check every page before exposing any partial result.
+    if (!translates(address, out.size(), MemoryAccess::read)) return false;
     for (std::size_t i = 0; i < out.size();) {
         const auto at = std::uint64_t{address} + i;
-        if (!translate(at, MemoryAccess::read)) return false;
-        i += std::min<std::size_t>(page_size - (at % page_size), out.size() - i);
+        const auto count = std::min<std::size_t>(page_size - (at % page_size), out.size() - i);
+        std::copy_n(translate(at, MemoryAccess::read), count, out.data() + i);
+        i += count;
     }
-    for (std::size_t i = 0; i < out.size(); ++i)
-        out[i] = *translate(std::uint64_t{address} + i, MemoryAccess::read);
+    return true;
+}
+
+bool Memory::fill(std::uint32_t address, std::byte value, std::uint64_t count) noexcept {
+    if (!translates(address, count, MemoryAccess::write)) return false;
+    for (std::uint64_t i = 0; i < count;) {
+        const auto at = std::uint64_t{address} + i;
+        const auto chunk = std::min<std::uint64_t>(page_size - (at % page_size), count - i);
+        std::memset(translate(at, MemoryAccess::write), std::to_integer<int>(value), static_cast<std::size_t>(chunk));
+        i += chunk;
+    }
+    return true;
+}
+
+bool Memory::move(std::uint32_t destination, std::uint32_t source, std::uint64_t count) noexcept {
+    if (!translates(source, count, MemoryAccess::read) || !translates(destination, count, MemoryAccess::write)) return false;
+    // Chunks never cross a page of either range. Ascending order is safe when the destination is below the
+    // source, descending when it is above; memmove covers the overlap inside one chunk.
+    if (destination <= source) {
+        for (std::uint64_t i = 0; i < count;) {
+            const auto from = std::uint64_t{source} + i, to = std::uint64_t{destination} + i;
+            const auto chunk = std::min<std::uint64_t>({page_size - (from % page_size), page_size - (to % page_size), count - i});
+            std::memmove(translate(to, MemoryAccess::write), translate(from, MemoryAccess::read), static_cast<std::size_t>(chunk));
+            i += chunk;
+        }
+    } else {
+        for (std::uint64_t left = count; left != 0;) {
+            const auto from_end = std::uint64_t{source} + left, to_end = std::uint64_t{destination} + left;
+            const auto chunk = std::min<std::uint64_t>({((from_end - 1) % page_size) + 1, ((to_end - 1) % page_size) + 1, left});
+            std::memmove(translate(to_end - chunk, MemoryAccess::write), translate(from_end - chunk, MemoryAccess::read),
+                         static_cast<std::size_t>(chunk));
+            left -= chunk;
+        }
+    }
     return true;
 }
 

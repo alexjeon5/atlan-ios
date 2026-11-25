@@ -7,7 +7,10 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include "atlan/demo.hpp"
 #include "shell/data_file.hpp"
+#include <string>
+#include <cstdio>
 #include "shell/input.hpp"
+#include "shell/log_filter.hpp"
 #include "shell/render_config.hpp"
 #include "shell/session.hpp"
 #include <atomic>
@@ -316,6 +319,9 @@
         }
     }
     [self startLocation];
+    const auto repeats = std::make_shared<atlan::shell::RepeatFilter>();
+    const std::string perfPath = [self.documentsPath stringByAppendingPathComponent:@"perf.log"].UTF8String;
+    std::remove(perfPath.c_str());  // one run per file
     // A CAMetalLayer sublayer sized in native pixels; GL output is presented there.
     {
         const auto size = _surface.get();
@@ -328,8 +334,10 @@
         _layer = layer;
         [self layoutSurface];
         _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
-        _gl->set_log([weakSelf](const std::string& line) {
-            NSString* text = [NSString stringWithFormat:@"gl %s", line.c_str()];
+        _gl->set_log([weakSelf, repeats](const std::string& line) {
+            std::string shown = "gl " + line;
+            if (!repeats->admit(shown)) return;
+            NSString* text = [NSString stringWithUTF8String:shown.c_str()] ?: @"?";
             dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf append:text]; });
         });
         config.gl_backend = _gl.get();
@@ -349,8 +357,19 @@
     }
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,
-        [weakSelf](const std::string& line) {
-            NSString* text = [NSString stringWithUTF8String:line.c_str()] ?: @"?";
+        [weakSelf, repeats, perfPath](const std::string& line) {
+            // Lines the guest repeats every frame are shown a few times only. Performance lines are also kept in
+            // Documents/perf.log, which the Files app can open and share.
+            if (line.starts_with("perf ")) {
+                if (std::FILE* file = std::fopen(perfPath.c_str(), "a")) {
+                    std::fputs(line.c_str(), file);
+                    std::fputc('\n', file);
+                    std::fclose(file);
+                }
+            }
+            std::string shown = line;
+            if (!repeats->admit(shown)) return;
+            NSString* text = [NSString stringWithUTF8String:shown.c_str()] ?: @"?";
             dispatch_async(dispatch_get_main_queue(), ^{
                 ShellViewController* strongSelf = weakSelf;
                 [strongSelf append:text];

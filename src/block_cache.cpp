@@ -125,7 +125,9 @@ struct BlockRunner::Impl {
             const std::uint32_t next = pc + length;
             const std::uint64_t next_key = thumb ? a32::t32_key(next) : a32::a32_key(next);
             a32::FastOp fast{};
-            if (route || !a32::prepare_fast(insn, thumb ? a32::t32_key(pc) : a32::a32_key(pc), fast)) {
+            // A routed word is offered to the VFP executor first, so only its handlers may take it.
+            if (route ? !vfp::prepare_fast(word, pc, fast)
+                      : !a32::prepare_fast(insn, thumb ? a32::t32_key(pc) : a32::a32_key(pc), fast)) {
                 fast = {};
                 fast.next_key = next_key;
                 fast.imm = static_cast<std::uint32_t>(block->entries.size());
@@ -184,8 +186,9 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
                 block = slot;
                 ++stats_.block_entries;
             } else if (d.memory.translate(a32::key_pc(key), MemoryAccess::execute) == nullptr) {
-                // Not executable (an import trap, a return sentinel): Runtime::step() below reports the fault
-                // without a block being allocated for nothing.
+                // Not executable (an import trap, a return sentinel): the fetch fault Runtime::step() reports.
+                ++stats_.slow_steps;
+                return {Event::memory_fault, retired, a32::key_pc(key), 0, MemoryAccess::execute, false};
             } else {
                 const std::uint64_t flushes = stats_.flushes;
                 try { block = d.build(key, it); } catch (...) { block = nullptr; }

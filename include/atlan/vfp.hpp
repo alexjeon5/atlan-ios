@@ -18,3 +18,9 @@ struct Execution {
 [[nodiscard]] Execution execute_a32(CpuState& cpu, Memory& memory, std::uint32_t word,
                                     std::uint32_t pc) noexcept;
 }
+namespace uml::cpu::arm64::aarch32 { struct FastOp; }
+namespace atlan::vfp {
+// Block cache: reduces the A32 word at `pc` to a pre-decoded handler with the results of execute_a32().
+// False when the word is not VFP or has no such handler; execute_a32() then runs it.
+[[nodiscard]] bool prepare_fast(std::uint32_t word, std::uint32_t pc, uml::cpu::arm64::aarch32::FastOp& out) noexcept;
+}

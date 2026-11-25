@@ -108,7 +108,7 @@ void randomize(Runtime& r, std::mt19937& random, bool seams = false) {
 }
 
 // One random instruction, executed through both paths from identical state.
-void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = false) {
+void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = false, bool vfp = false) {
     std::mt19937 random{seed};
     Runtime a, b;
     for (auto* r : {&a, &b}) {
@@ -122,6 +122,8 @@ void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = 
         std::uint32_t word = random();
         if (!thumb && random() % 3) word = (word & 0x0fffffffU) | 0xe0000000U;  // mostly AL
         if (thumb && random() % 2) word &= 0xffffU;                            // 16-bit forms
+        // Scalar VFP: coprocessor 10 or 11 in the three classes the VFP executor takes.
+        if (vfp) word = (word & 0xf0fff0ffU) | (12U + random() % 3) << 24 | (10U + random() % 2) << 8;
         const std::uint32_t at = bench::code_base + (thumb ? 2 * (random() % 8) : 0);
         for (auto* r : {&a, &b}) {
             r->memory.protect(bench::code_base, 0x2000, Permissions::read_write);
@@ -142,7 +144,7 @@ void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = 
         expect_same(a, b, ra, rb, std::string(thumb ? "thumb" : "a32") + " word " + std::to_string(word));
     }
     std::printf("  random %s%s: retired %u, svc %u, undefined %u, fault %u, unsupported %u, budget %u\n",
-                thumb ? "thumb" : "a32", seams ? " (seams)" : "", events[0], events[1], events[3], events[4], events[6], events[7]);
+                thumb ? "thumb" : "a32", vfp ? (seams ? " (vfp, seams)" : " (vfp)") : seams ? " (seams)" : "", events[0], events[1], events[3], events[4], events[6], events[7]);
 }
 
 // Random straight-line and branching programs run for a fixed budget.
@@ -331,6 +333,8 @@ int main() {
         random_single(30000 / scale, true, 12);
         random_single(30000 / scale, false, 13, true);
         random_single(30000 / scale, true, 14, true);
+        random_single(60000 / scale, false, 15, false, true);
+        random_single(60000 / scale, false, 16, true, true);
         random_programs(1500 / scale, false, 21);
         random_programs(1500 / scale, true, 22);
         dispatcher_paths();
