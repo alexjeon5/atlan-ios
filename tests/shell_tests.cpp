@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
+#include "shell/guest_ini.hpp"
 #include "shell/session.hpp"
 #include "shell/surface.hpp"
 #include <array>
@@ -149,6 +150,21 @@ int main() {
             check(surface.get().width == 0 && surface.generation() == 0, "surface starts unknown");
             surface.set({2556, 1179});
             check(surface.get().width == 2556 && surface.get().height == 1179 && surface.generation() == 1, "surface publishes size");
+        }
+        {
+            using atlan::shell::fill_screen, atlan::shell::ini_value, atlan::shell::ini_number, atlan::shell::ini_set;
+            static_assert(fill_screen({800, 480}, {2556, 1179}).width == 1040 && fill_screen({800, 480}, {2556, 1179}).height == 480);
+            static_assert(fill_screen({480, 800}, {2556, 1179}).width == 1040);  // the short side is what is kept
+            static_assert(fill_screen({800, 480}, {1179, 2556}).width == 480 && fill_screen({800, 480}, {1179, 2556}).height == 1040);
+            static_assert(fill_screen({1280, 720}, {2048, 1536}).width == 960 && fill_screen({1280, 720}, {2048, 1536}).height == 720);
+            static_assert(fill_screen({800, 480}, {0, 0}).width == 800 && fill_screen({0, 480}, {2556, 1179}).width == 0);
+            const std::string text = "A|1=5\r\nPATH|2= /x/y \r\nA2|1=7\r\nBAD\r\nA|1=6\r\n";
+            check(ini_value(text, "PATH") == "/x/y" && ini_value(text, "A") == "5" && !ini_value(text, "BAD") && !ini_value(text, "ATH"),
+                  "settings entries are found by exact key");
+            check(ini_number(text, "A2") == 7u && !ini_number(text, "PATH") && !ini_number(text, "NONE"), "numeric settings parse");
+            check(ini_set(text, "A", "12") == "A|1=12\r\nPATH|2= /x/y \r\nA2|1=7\r\nBAD\r\nA|1=12\r\n", "every entry of a key is replaced in place");
+            check(ini_set(text, "NEW", "3") == text + "NEW|1=3\r\n" && ini_set("A|1=1", "B", "2") == "A|1=1\nB|1=2\n", "a missing key is appended");
+            check(ini_value("K|1=9", "K") == "9" && ini_set("K|1=9", "K", "10") == "K|1=10", "a last line without a newline works");
         }
         data_files();
         sessions();

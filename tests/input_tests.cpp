@@ -43,11 +43,21 @@ void queue() {
     q.push(TouchEvent{TouchPhase::up, 0, 0, 0, 0});
     check(q.drain().size() == InputQueue::capacity + 1, "an up always enters");
 
-    const auto p = to_surface(426, 196.5, 852, 393, {800, 480});
-    check(p.x == 400 && p.y == 240, "view points scale to surface pixels");
-    const auto edge = to_surface(900, -5, 852, 393, {800, 480});
-    check(edge.x == 799 && edge.y == 0, "points outside the view clamp to the surface");
-    check(to_surface(1, 1, 0, 0, {800, 480}).x == 0 && to_surface(1, 1, 10, 10, {0, 0}).y == 0, "unknown sizes map to the origin");
+    using atlan::shell::fit_rect;
+    const auto p = to_surface(426, 196.5, fit_rect(852, 393, {1040, 480}), {1040, 480});
+    check(p.x == 520 && p.y == 240, "a surface that fills the view scales both axes");
+    const auto boxed = fit_rect(852, 393, {800, 480});  // 655 x 393 centred, 98.5 on each side
+    check(boxed.width == 655 && boxed.height == 393 && boxed.x == 98.5 && boxed.y == 0, "a narrower surface is centred with its aspect kept");
+    const auto q1 = to_surface(98.5 + 655.0 / 4, 393.0 / 4, boxed, {800, 480});
+    check(q1.x == 200 && q1.y == 120, "points map through the shown rectangle");
+    const auto edge = to_surface(900, -5, boxed, {800, 480});
+    check(edge.x == 799 && edge.y == 0, "points outside the shown rectangle clamp to the surface");
+    check(to_surface(10, 10, boxed, {800, 480}).x == 0, "the bar beside the surface clamps to its edge");
+    const auto tall = fit_rect(400, 800, {800, 480});
+    check(tall.width == 400 && tall.height == 240 && tall.y == 280, "a wider surface is centred vertically");
+    check(fit_rect(852, 393, {1040, 480}).width == 852 && fit_rect(852, 393, {1040, 480}).x == 0, "a mismatch under 1% fills the view");
+    check(fit_rect(852, 393, {0, 0}).width == 852, "an unknown surface covers the view");
+    check(to_surface(1, 1, {0, 0, 0, 0}, {800, 480}).x == 0 && to_surface(1, 1, {0, 0, 10, 10}, {0, 0}).y == 0, "unknown sizes map to the origin");
 }
 
 void bindings_text() {

@@ -51,9 +51,29 @@
     return _surface.get();
 }
 
+// Where the guest surface is shown inside the metal view; touches map through the same rectangle.
+- (atlan::shell::ViewRect)shownRect {
+    const CGSize view = _metalView.bounds.size;
+    return atlan::shell::fit_rect(view.width, view.height, self.touchSurface);
+}
+
+- (void)layoutSurface {
+    if (!_layer) return;
+    const auto shown = self.shownRect;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _layer.frame = CGRectMake(shown.x, shown.y, shown.width, shown.height);
+    [CATransaction commit];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self layoutSurface];
+}
+
 - (void)forward:(NSSet<UITouch*>*)touches phase:(atlan::shell::TouchPhase)phase {
     using atlan::shell::TouchPhase;
-    const CGSize view = _metalView.bounds.size;
+    const auto shown = self.shownRect;
     for (UITouch* touch in touches) {
         std::size_t slot = 0;
         while (slot < _fingers.size() && _fingers[slot] != touch) ++slot;
@@ -65,7 +85,7 @@
             _fingers[slot] = touch;
         }
         const CGPoint at = [touch locationInView:_metalView];
-        const auto point = atlan::shell::to_surface(at.x, at.y, view.width, view.height, self.touchSurface);
+        const auto point = atlan::shell::to_surface(at.x, at.y, shown, self.touchSurface);
         _input.push(atlan::shell::TouchEvent{phase, static_cast<std::uint32_t>(slot), point.x, point.y,
                                              static_cast<std::uint64_t>(touch.timestamp * 1000.0)});
         if (phase == TouchPhase::up || phase == TouchPhase::cancel) _fingers[slot] = nil;
@@ -268,6 +288,7 @@
     _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
                                            self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
     config.surface = &_surface;
+    config.fill_surface = true;
     _guestSurface.store(0);
     (void)_input.drain();
     config.input = &_input;
@@ -285,26 +306,31 @@
     // A CAMetalLayer sublayer sized in native pixels; GL output is presented there.
     {
         const auto size = _surface.get();
+        [_layer removeFromSuperlayer];  // the previous run's layer
         CAMetalLayer* layer = [CAMetalLayer layer];
-        layer.frame = _metalView.bounds;
         layer.drawableSize = CGSizeMake(size.width, size.height);
-        layer.contentsGravity = kCAGravityResizeAspect;
+        layer.contentsGravity = kCAGravityResize;
+        _metalView.backgroundColor = UIColor.blackColor;
         [_metalView.layer addSublayer:layer];
         _layer = layer;
+        [self layoutSurface];
         _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
         _gl->set_log([weakSelf](const std::string& line) {
             NSString* text = [NSString stringWithFormat:@"gl %s", line.c_str()];
             dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf append:text]; });
         });
         config.gl_backend = _gl.get();
-        // The guest sizes its GL surface itself (MainActivity.setSurfaces); render at exactly that size and let the
-        // layer scale it to the view.
+        // The guest sizes its GL surface itself (MainActivity.setSurfaces); render at exactly that size and show
+        // it in the aspect-fitting rectangle of the view.
         std::atomic<std::uint64_t>* guestSurface = &_guestSurface;  // outlives the session (joined in dealloc)
         config.on_set_surfaces = [weakSelf, guestSurface](std::int32_t width, std::int32_t height) {
             if (width > 0 && height > 0)
                 guestSurface->store((std::uint64_t{static_cast<std::uint32_t>(width)} << 32) | static_cast<std::uint32_t>(height));
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (width > 0 && height > 0) [weakSelf metalLayer].drawableSize = CGSizeMake(width, height);
+                if (width > 0 && height > 0) {
+                    [weakSelf metalLayer].drawableSize = CGSizeMake(width, height);
+                    [weakSelf layoutSurface];
+                }
             });
         };
     }

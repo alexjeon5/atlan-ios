@@ -163,6 +163,36 @@ void files() {
     check(f.call("stat", {data + 0x40, data + 0x200}).stop == atlan::Stop::returned && f.r0() == 0xffffffff, "stat of a missing path fails");
     check(f.opened.size() >= 3 && f.opened[0] == "/dir/a.txt+", "open attempts are traced");
 }
+void path_mapping() {
+    Fixture f;
+    std::filesystem::create_directories(f.root / "DATA" / "Sub");
+    std::ofstream(f.root / "DATA" / "Sub" / "b.txt", std::ios::binary) << "W=1\nH=2\n";
+    f.stdio.add_alias("/mnt/card/Data", "DATA");
+    f.stdio.add_anchor("data", "DATA");
+    f.stdio.add_read_filter("DATA/sub/B.TXT", [](std::string text) { return text + "X=3\n"; });
+    put_text(f.runtime.memory, data + 0x80, "r");
+    const auto reads = [&](const char* path, const char* expected) {
+        put_text(f.runtime.memory, data, path);
+        if (f.call("fopen", {data, data + 0x80}).stop != atlan::Stop::returned || f.r0() == 0) return false;
+        const auto file = f.r0();
+        const bool ok = f.call("fread", {data + 0x100, 1, 64, file}).stop == atlan::Stop::returned && f.r0() == std::strlen(expected) &&
+                        std::memcmp(text_at(f.runtime.memory, data + 0x100).data(), expected, std::strlen(expected)) == 0;
+        return f.call("fclose", {file}).stop == atlan::Stop::returned && ok;
+    };
+    check(reads("/mnt/card/Data/Sub/b.txt", "W=1\nH=2\nX=3\n"), "an aliased path reaches the folder and the read filter applies");
+    check(reads("/storage/emulated/0/DATA/Sub/b.txt", "W=1\nH=2\nX=3\n"), "an anchor maps any absolute path through the named folder");
+    check(reads("/x/data/sub/B.TXT", "W=1\nH=2\nX=3\n"), "anchors and filters ignore case");
+    check(reads("/dir/a.txt", "hello world"), "paths without an anchor component are unchanged");
+    put_text(f.runtime.memory, data, "/storage/other/Sub/b.txt");
+    check(f.call("fopen", {data, data + 0x80}).stop == atlan::Stop::returned && f.r0() == 0, "an unanchored path is not redirected");
+    put_text(f.runtime.memory, data, "/x/data/Sub/b.txt");
+    put_text(f.runtime.memory, data + 0x80, "r+");
+    check(f.call("fopen", {data, data + 0x80}).stop == atlan::Stop::returned && f.r0() != 0, "a writable open bypasses the filter");
+    const auto file = f.r0();
+    check(f.call("fread", {data + 0x100, 1, 64, file}).stop == atlan::Stop::returned && f.r0() == 8, "and sees the host file itself");
+    check(f.call("fclose", {file}).stop == atlan::Stop::returned, "fclose");
+    check(f.stdio.host_path("/x/data/sub") == f.root / "DATA" / "Sub" && f.stdio.host_path("/x/data/../..").empty(), "host_path resolves like the guest calls");
+}
 void directories_and_descriptors() {
     Fixture f;
     put_text(f.runtime.memory, data, "/dir");
@@ -455,6 +485,7 @@ int main() {
         printf_family();
         mapping();
         files();
+        path_mapping();
         directories_and_descriptors();
         properties_and_strings();
         tokenizing();

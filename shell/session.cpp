@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
+#include "shell/guest_ini.hpp"
+#include <iterator>
 #include <chrono>
 #include <algorithm>
 #include "atlan/gles.hpp"
@@ -152,9 +154,37 @@ void GuestSession::run() {
             stdio.emplace(config_.data_root, guard_page + 0x200, [this](const std::string& path, const std::string& mode, bool ok) {
                 log_("fopen " + path + " mode=" + mode + (ok ? " ok" : " failed"));
             });
-            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH in system.ini: the map data folder
-            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // NANDPATH/CONFIGPATH/SDIPATH: app-written state
+            // The guest's settings file names its folders by absolute Android paths, which differ per device and may
+            // be edited by the user. Whatever ROOTPATH says is the ATLAN folder beneath the data root; any other
+            // absolute path through a folder named "atlan" (any case) lands in that same folder.
+            const char* settings_file = "ATLAN/APP/system.ini";
+            std::string settings;
+            if (std::ifstream input(stdio->host_path(settings_file), std::ios::binary); input)
+                settings.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+            if (const auto root = ini_value(settings, "ROOTPATH"); root && root->size() > 1 && root->front() == '/') {
+                stdio->add_alias(*root, "ATLAN");
+                log_("data root " + *root);
+            }
+            stdio->add_alias("/storage/sdcard1/Atlan", "ATLAN");  // ROOTPATH of the stock settings: the map data folder
+            stdio->add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // stock NANDPATH/CONFIGPATH/SDIPATH: app-written state
             stdio->add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
+            stdio->add_anchor("atlan", "ATLAN");
+            // Screen size: the guest takes SCREENWIDTH x SCREENHEIGHT from the settings file and reports it back
+            // through setSurfaces. To fill the host surface it is served a copy with the long side adjusted.
+            if (config_.fill_surface && config_.surface) {
+                const PixelSize configured{ini_number(settings, "SCREENWIDTH").value_or(0), ini_number(settings, "SCREENHEIGHT").value_or(0)};
+                const bool fixed = ini_number(settings, "FIXEDSCREENWIDTH").value_or(0) != 0 &&
+                                   ini_number(settings, "FIXEDSCREENHEIGHT").value_or(0) != 0;
+                const auto screen = fixed ? configured : fill_screen(configured, config_.surface->get());
+                if (screen.width != configured.width || screen.height != configured.height) {
+                    stdio->add_read_filter(settings_file, [screen](std::string text) {
+                        return ini_set(ini_set(std::move(text), "SCREENWIDTH", std::to_string(screen.width)),
+                                       "SCREENHEIGHT", std::to_string(screen.height));
+                    });
+                }
+                log_("screen " + std::to_string(configured.width) + "x" + std::to_string(configured.height) +
+                     (fixed ? " fixed" : " -> " + std::to_string(screen.width) + "x" + std::to_string(screen.height)));
+            }
             stdio->install(dispatcher);
         }
         GuestMmap mmap_arena;

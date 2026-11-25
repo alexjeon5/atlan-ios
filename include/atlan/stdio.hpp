@@ -29,6 +29,14 @@ public:
     // Guest paths starting with `guest_prefix` (whole components) are redirected to `host_prefix` beneath the root,
     // e.g. the app's absolute Android paths onto folders the user can reach. First matching alias wins.
     void add_alias(std::string guest_prefix, std::string host_prefix);
+    // Fallback for an absolute guest path that no alias matched: the path up to and including its first component
+    // equal to `component` (ASCII case-insensitive) is replaced by `host_prefix`. First matching anchor wins.
+    void add_anchor(std::string component, std::string host_prefix);
+    // A file opened read-only through fopen whose path beneath the root equals `relative` (ASCII case-insensitive,
+    // after aliases) is served as `transform(its bytes)` from an unnamed temporary file; the host file is untouched.
+    void add_read_filter(std::string relative, std::function<std::string(std::string)> transform);
+    // Host location of a guest path (aliases, anchors, case-insensitive lookup); empty if it escapes the root.
+    [[nodiscard]] std::filesystem::path host_path(const std::string& guest_path) const;
     [[nodiscard]] std::size_t open_files() const noexcept;
     [[nodiscard]] std::size_t open_descriptors() const noexcept;
     // Size of the regular file behind a POSIX descriptor opened through open(), for fstat.
@@ -39,7 +47,10 @@ public:
 private:
     [[nodiscard]] std::string alias(const std::string& path) const;
     [[nodiscard]] std::filesystem::path locate(const std::filesystem::path& relative) const;
+    [[nodiscard]] std::FILE* open_filtered(const std::filesystem::path& relative) const;
     std::vector<std::pair<std::string, std::string>> aliases_;
+    std::vector<std::pair<std::string, std::string>> anchors_;
+    std::vector<std::pair<std::string, std::function<std::string(std::string)>>> read_filters_;
     std::filesystem::path root_;
     std::uint32_t errno_address_;
     std::function<void(const std::string&, const std::string&, bool)> trace_;
