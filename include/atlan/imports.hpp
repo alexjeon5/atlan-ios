@@ -116,6 +116,8 @@ public:
     // for every instruction. Both give the same results; the switch exists for comparison and diagnosis.
     void set_block_cache(bool enabled) noexcept { block_cache_ = enabled; }
     [[nodiscard]] bool block_cache() const noexcept { return block_cache_; }
+    // The block cache of the Runtime last executed (statistics), or nullptr before the first cached run.
+    [[nodiscard]] const BlockRunner* block_runner() const noexcept { return runner_.get(); }
     // Runs ready guest threads other than the caller's thread until `budget` instructions
     // are retired or none can run (all blocked or finished). Returns `returned` when idle.
     // Only valid outside any guest call; the Runtime's CPU state is left unchanged.

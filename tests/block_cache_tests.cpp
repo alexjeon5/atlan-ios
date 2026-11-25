@@ -2,6 +2,7 @@
 // Differential tests: BlockRunner must be indistinguishable from Runtime::step().
 #include "../bench/workloads.hpp"
 #include "atlan/block_cache.hpp"
+#include "atlan/imports.hpp"
 #include "cpu/arm64/aarch32/guest_key.hpp"
 #include <cstdio>
 #include <cstring>
@@ -86,11 +87,18 @@ void workload_slices() {
     }
 }
 
-void randomize(Runtime& r, std::mt19937& random) {
+// With `seams`, pointers cluster around page seams and the ends of the mapping, where the specialised
+// handlers must hand over to the library (page-crossing accesses, faults, partial multiple stores).
+void randomize(Runtime& r, std::mt19937& random, bool seams = false) {
     for (unsigned i = 0; i < 15; ++i) {
         const auto pick = random() % 4;
         r.cpu.registers[i] = pick == 0 ? bench::data_base + ((random() % 0x3f00) & ~3U)
                            : pick == 1 ? random() % 64 : random();
+        if (seams && pick != 1) {
+            const std::uint32_t seam = random() % 3 == 0 ? bench::data_base
+                                     : random() % 2 ? bench::data_base + bench::data_size : bench::data_base + 0x1000;
+            r.cpu.registers[i] = seam - 72 + random() % 144;
+        }
     }
     r.cpu.nzcv = random() & 0xf0000000U;
     r.cpu.a32_q = random() & 1;
@@ -100,7 +108,7 @@ void randomize(Runtime& r, std::mt19937& random) {
 }
 
 // One random instruction, executed through both paths from identical state.
-void random_single(unsigned count, bool thumb, std::uint32_t seed) {
+void random_single(unsigned count, bool thumb, std::uint32_t seed, bool seams = false) {
     std::mt19937 random{seed};
     Runtime a, b;
     for (auto* r : {&a, &b}) {
@@ -123,7 +131,7 @@ void random_single(unsigned count, bool thumb, std::uint32_t seed) {
         const auto state_seed = random();
         for (auto* r : {&a, &b}) {
             std::mt19937 s{state_seed};
-            randomize(*r, s);
+            randomize(*r, s, seams);
             r->cpu.clear_exclusive_monitor();
             if (random() % 8 == 0) r->cpu.exclusive_address = 0;
             r->start(thumb ? at | 1U : at);
@@ -133,8 +141,8 @@ void random_single(unsigned count, bool thumb, std::uint32_t seed) {
         ++events[static_cast<unsigned>(ra.event)];
         expect_same(a, b, ra, rb, std::string(thumb ? "thumb" : "a32") + " word " + std::to_string(word));
     }
-    std::printf("  random %s: retired %u, svc %u, undefined %u, fault %u, unsupported %u, budget %u\n",
-                thumb ? "thumb" : "a32", events[0], events[1], events[3], events[4], events[6], events[7]);
+    std::printf("  random %s%s: retired %u, svc %u, undefined %u, fault %u, unsupported %u, budget %u\n",
+                thumb ? "thumb" : "a32", seams ? " (seams)" : "", events[0], events[1], events[3], events[4], events[6], events[7]);
 }
 
 // Random straight-line and branching programs run for a fixed budget.
@@ -173,6 +181,44 @@ void random_programs(unsigned count, bool thumb, std::uint32_t seed) {
             spent += slice;
             if (ra.event != Event::budget_exhausted) break;
         }
+    }
+}
+
+// The import dispatcher must stop, count and return the same with and without the block cache, for every budget.
+void dispatcher_paths() {
+    const bench::Workload program{"imports", false, 0, {
+        0xe92d4010,  // push {r4, lr}
+        0xe1a04000,  // mov r4, r0
+        0xe0811004,  // loop: add r1, r1, r4
+        0xe1a00004,  // mov r0, r4
+        0xeb1ffffa,  // bl trap (unmapped, code_base + 0x800000)
+        0xe0811000,  // add r1, r1, r0
+        0xe2544001,  // subs r4, r4, #1
+        0x1afffff9,  // bne loop
+        0xe1a00001,  // mov r0, r1
+        0xe8bd8010}};  // pop {r4, pc}
+    std::mt19937 random{31};
+    for (unsigned n = 0; n < 400; ++n) {
+        const std::uint32_t iterations = 1 + random() % 40;
+        const std::uint64_t budget = n % 4 == 0 ? 1000000 : random() % (iterations * 6 + 12);
+        CallOutcome outcomes[2];
+        Runtime runtimes[2] = {bench::make(program, iterations), bench::make(program, iterations)};
+        for (unsigned cached = 0; cached < 2; ++cached) {
+            ImportDispatcher dispatcher;
+            dispatcher.set_block_cache(cached != 0);
+            std::uint32_t calls = 0;
+            check(dispatcher.bind_trap(bench::code_base + 0x800000, "triple"), "bind trap");
+            check(dispatcher.bind("triple", [&](ImportCall& call) -> std::optional<std::string> {
+                call.set_result(call.arg(0) * 3 + calls++);
+                return std::nullopt;
+            }), "bind service");
+            const std::uint32_t arguments[] = {iterations};
+            outcomes[cached] = dispatcher.call(runtimes[cached], bench::code_base, arguments, bench::stack_top, 0xffff0000, budget);
+            check(dispatcher.remaining_budget() == budget - outcomes[cached].retired, "remaining budget");
+        }
+        check(outcomes[0].stop == outcomes[1].stop && outcomes[0].retired == outcomes[1].retired, "dispatcher stop and count");
+        if (n % 4 == 0) check(outcomes[0].stop == Stop::returned, "dispatcher call returns");
+        expect_same(runtimes[0], runtimes[1], outcomes[0].cpu, outcomes[1].cpu, "dispatcher paths");
     }
 }
 
@@ -283,8 +329,11 @@ int main() {
         workload_slices();
         random_single(30000 / scale, false, 11);
         random_single(30000 / scale, true, 12);
+        random_single(30000 / scale, false, 13, true);
+        random_single(30000 / scale, true, 14, true);
         random_programs(1500 / scale, false, 21);
         random_programs(1500 / scale, true, 22);
+        dispatcher_paths();
         invalidation();
         edges();
     } catch (const std::exception& error) {

@@ -10,7 +10,8 @@ add_library(kernarium_aarch32 STATIC
   ${a32}/semantics_memory.cpp
   ${a32}/semantics_control.cpp
   ${a32}/semantics_table.cpp
-  ${a32}/semantics_prepared.cpp)
+  ${a32}/semantics_prepared.cpp
+  ${a32}/semantics_fast.cpp)
 target_include_directories(kernarium_aarch32 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/include)
 target_compile_definitions(kernarium_aarch32 PRIVATE

@@ -24,6 +24,8 @@ struct SessionConfig {
     // Called on the guest thread when the guest reports MainActivity.setSurfaces(a, b). Arguments are passed through
     // unchanged; the embedder decides what they mean.
     std::function<void(std::int32_t, std::int32_t)> on_set_surfaces;
+    bool block_cache{true};  // false: single-step interpreter (comparison and diagnosis)
+    bool perf_log{};         // log instructions, seconds and MIPS per surface/render call, and block cache coverage
 };
 
 // Loads the guest image and runs its constructors on one dedicated thread.

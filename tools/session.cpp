@@ -20,6 +20,8 @@ int main(int argc, char** argv) {
     config.data_root = argv[2];
     if (raw) config.gl_backend = &recorder;
     else config.gl_backend = &context;
+    config.block_cache = std::getenv("ATLAN_NO_BLOCK_CACHE") == nullptr;
+    config.perf_log = std::getenv("ATLAN_PERF") != nullptr;
     if (const char* frames = std::getenv("ATLAN_FRAMES")) config.render_frames = static_cast<std::uint32_t>(std::atoi(frames));
     atlan::shell::GuestSession session(config, [](const std::string& line) { std::cout << line << std::endl; });
     session.start();

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
+#include <chrono>
 #include <algorithm>
 #include "atlan/gles.hpp"
 #include "atlan/elf.hpp"
@@ -128,6 +129,7 @@ void GuestSession::run() {
              " initializers=" + std::to_string(image.initializers.size()));
         Runtime runtime;
         ImportDispatcher dispatcher;
+        dispatcher.set_block_cache(config_.block_cache);
         ObjectLifetime lifetime;
         lifetime.install(dispatcher);
         install_libc_services(dispatcher);
@@ -276,8 +278,23 @@ void GuestSession::run() {
                 std::vector<std::uint32_t> call_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
                 call_args.insert(call_args.end(), extra.begin(), extra.end());
                 dispatcher.reset_import_counts();
+                const auto perf_start = std::chrono::steady_clock::now();
                 const auto r = dispatcher.call(runtime, sym->address, call_args, stack_base + stack_bytes,
                                                return_sentinel, config_.surface_call_budget);
+                if (config_.perf_log) {
+                    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - perf_start).count();
+                    std::string line = std::string("perf ") + name + ": " + std::to_string(r.retired) + " instructions, " +
+                                       std::to_string(seconds) + " s, " + std::to_string(seconds > 0 ? r.retired / seconds / 1e6 : 0.0) + " MIPS";
+                    if (const auto* runner = dispatcher.block_runner()) {
+                        const auto& st = runner->stats();
+                        line += "; blocks built " + std::to_string(st.blocks_built) + ", flushes " + std::to_string(st.flushes) +
+                                ", without fast handler " + std::to_string(st.generic) + ", fallbacks " + std::to_string(st.fallbacks) +
+                                ", single steps " + std::to_string(st.slow_steps) + "; top forms without fast handler:";
+                        const auto forms = runner->generic_forms();
+                        for (std::size_t i = 0; i < forms.size() && i < 24; ++i) line += " " + forms[i].first + "=" + std::to_string(forms[i].second);
+                    }
+                    log_(line);
+                }
                 if (r.stop != Stop::returned) {
                     log_(describe_state(runtime, dispatcher));  // where it stopped: pc, lr, sp, r0-r3, busiest imports
                     fail(describe_stop(name, r));

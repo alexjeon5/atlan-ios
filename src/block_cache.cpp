@@ -3,6 +3,7 @@
 #include "atlan/vfp.hpp"
 #include "cpu/arm64/aarch32/guest_key.hpp"
 #include "cpu/arm64/aarch32/semantics.hpp"
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -32,6 +33,9 @@ struct Link {
 struct Block {
     std::uint64_t key;
     std::uint8_t itstate;
+    // One per instruction, dense for the execution loop. Where `run` is null the instruction has no fast
+    // handler and `imm` indexes `entries`, which holds the full decode of only those instructions.
+    std::vector<a32::FastOp> fast;
     std::vector<Entry> entries;
     std::array<Link, 2> links{};
 };
@@ -76,6 +80,7 @@ struct BlockRunner::Impl {
     std::vector<std::unique_ptr<Block>> store;
     std::vector<Block*> slots;
     std::size_t entries{};  // instructions held by `store`
+    std::vector<std::uint64_t> generic_forms = std::vector<std::uint64_t>(a32::kFormCount);
 
     void flush() noexcept {
         store.clear();
@@ -118,7 +123,15 @@ struct BlockRunner::Impl {
                                           (info.traits & a32::trait::fp_state) != 0 ||
                                           info.check != a32::Check::none);
             const std::uint32_t next = pc + length;
-            block->entries.push_back({insn, a32::prepare_a32(insn), thumb ? a32::t32_key(next) : a32::a32_key(next), pc, word, route});
+            const std::uint64_t next_key = thumb ? a32::t32_key(next) : a32::a32_key(next);
+            a32::FastOp fast{};
+            if (route || !a32::prepare_fast(insn, thumb ? a32::t32_key(pc) : a32::a32_key(pc), fast)) {
+                fast = {};
+                fast.next_key = next_key;
+                fast.imm = static_cast<std::uint32_t>(block->entries.size());
+                block->entries.push_back({insn, a32::prepare_a32(insn), next_key, pc, word, route});
+            }
+            block->fast.push_back(fast);
             // Execution leaves a block as soon as the PC is not the next entry's, so where a block ends here only
             // decides how much is decoded ahead. The traits are per form ("may write the PC"), not per
             // instruction: a conditional branch or an ALU/load form that might target the PC continues, and the
@@ -132,9 +145,9 @@ struct BlockRunner::Impl {
             it = insn.next_it.bits();
             pc = next;
         }
-        if (block->entries.empty()) return nullptr;
-        if (entries + block->entries.size() > max_entries) flush();
-        entries += block->entries.size();
+        if (block->fast.empty()) return nullptr;
+        if (entries + block->fast.size() > max_entries) flush();
+        entries += block->fast.size();
         Block* raw = block.get();
         store.push_back(std::move(block));
         return raw;
@@ -195,9 +208,24 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
             previous = nullptr;
             continue;
         }
-        const Entry* e = block->entries.data();
-        const Entry* const end = e + static_cast<std::size_t>(std::min<std::uint64_t>(block->entries.size(), budget - retired));
-        for (; e != end; ++e) {
+        const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(block->fast.size(), budget - retired));
+        const a32::FastOp* const fast = block->fast.data();
+        for (std::size_t i = 0; i < count; ++i) {
+            if (fast[i].run != nullptr) [[likely]] {
+                const unsigned done = fast[i].run(d.cpu, fast[i], d.memory);
+                if (done == a32::fast_next) [[likely]] { ++retired; continue; }
+                if (done == a32::fast_jump) { ++retired; break; }
+                // fast_fallback: nothing changed. Runtime::step() executes the instruction or reports its event.
+                ++stats_.fallbacks;
+                auto result = runtime_.step();
+                retired += result.retired;
+                if (result.event != Event::retired) { result.retired = retired; return result; }
+                if (d.cpu.pc != fast[i].next_key) break;
+                continue;
+            }
+            const Entry* const e = &block->entries[fast[i].imm];
+            ++stats_.generic;
+            ++d.generic_forms[static_cast<std::size_t>(e->insn.form)];
             if (e->route_vfp) {
                 const auto done = vfp::execute_a32(d.cpu, d.memory, e->word, e->pc);
                 if (done.kind == vfp::Execution::Kind::retired) {
@@ -226,6 +254,13 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
     }
 }
 
+std::vector<std::pair<std::string, std::uint64_t>> BlockRunner::generic_forms() const {
+    std::vector<std::pair<std::string, std::uint64_t>> out;
+    for (std::size_t i = 0; i < impl_->generic_forms.size(); ++i)
+        if (impl_->generic_forms[i] != 0) out.emplace_back(a32::kForms[i].name, impl_->generic_forms[i]);
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    return out;
+}
 Result BlockRunner::step_block(std::uint64_t budget) noexcept { return execute(budget, true); }
 Result BlockRunner::run(std::uint64_t budget) noexcept { return execute(budget, false); }
 }

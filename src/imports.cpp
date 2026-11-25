@@ -92,6 +92,13 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
     };
     if (threaded) threads_->begin_run(runtime, pump);
     std::uint64_t slice = 0;
+    // Whether the checks at the top of the loop act on the current PC (a return or a thread exit).
+    const auto stops_here = [&] {
+        if (runtime.thumb()) return false;
+        if (!threaded) return runtime.pc() == return_target;
+        return threads_->current_is_main() ? !pump && runtime.pc() == return_target
+                                           : runtime.pc() == threads_->exit_sentinel();
+    };
     while (true) {
         if (threaded) {
             if (!threads_->has_current()) {
@@ -118,13 +125,24 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
             return finish(Stop::returned, {Event::function_return, outcome.retired});
         }
         if (remaining_ == 0) return finish(Stop::budget_exhausted, {Event::budget_exhausted, outcome.retired});
-        // A block stops at every PC change, so the return, sentinel and trap checks above see the same PCs as
-        // with single steps; the budget keeps the remaining count and the thread quantum exact.
+        // The runner executes whole chains of blocks. It cannot pass the PCs the checks above look for, because
+        // they are not executable: reaching one ends the run with an execute fault, and the loop goes back to
+        // those checks instead of treating the PC as an import trap. The budget keeps the remaining count and
+        // the thread quantum exact.
         Result result;
         if (runner != nullptr) {
             std::uint64_t limit = remaining_;
             if (threaded && threads_->quantum() - slice < limit) limit = threads_->quantum() - slice;
-            result = runner->step_block(limit);
+            const bool stops_fault = runtime.memory.translate(return_target, MemoryAccess::execute) == nullptr &&
+                (!threaded || runtime.memory.translate(threads_->exit_sentinel(), MemoryAccess::execute) == nullptr);
+            result = stops_fault ? runner->run(limit) : runner->step_block(limit);
+            if (result.event == Event::budget_exhausted) result.event = Event::retired;
+            if (stops_fault && result.event == Event::memory_fault && result.access == MemoryAccess::execute && stops_here()) {
+                outcome.retired += result.retired;
+                remaining_ -= result.retired < remaining_ ? result.retired : remaining_;
+                slice += result.retired;
+                continue;
+            }
         } else {
             result = runtime.step();
         }

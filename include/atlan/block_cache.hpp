@@ -3,6 +3,8 @@
 #include "atlan/runtime.hpp"
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace atlan {
@@ -22,6 +24,8 @@ public:
         std::uint64_t blocks_built{};
         std::uint64_t block_entries{};  // lookups that found a cached block
         std::uint64_t slow_steps{};     // instructions left to Runtime::step()
+        std::uint64_t generic{};        // instructions run by the library handlers (no fast handler)
+        std::uint64_t fallbacks{};      // fast handlers that handed over (fault, page-crossing access)
         std::uint64_t flushes{};
     };
     explicit BlockRunner(Runtime& runtime);
@@ -40,6 +44,8 @@ public:
     [[nodiscard]] Result step_block(std::uint64_t budget) noexcept;
     void flush() noexcept;
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
+    // Diagnostics: how often each instruction form ran without a fast handler, most frequent first.
+    [[nodiscard]] std::vector<std::pair<std::string, std::uint64_t>> generic_forms() const;
 
 private:
     [[nodiscard]] Result execute(std::uint64_t budget, bool single) noexcept;

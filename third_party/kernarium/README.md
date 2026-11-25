@@ -11,5 +11,6 @@
 - `guest_key.hpp`: SME 헤더 의존성을 제거했다. 사용하지 않는 A64 key 헬퍼를 위한 마스크 상수만 남겼다.
 
 - `semantics.hpp`, `semantics_prepared.cpp`: 블록 캐시용 `prepare_a32()`를 추가했다. 가져온 소스가 아니라 이 저장소의 추가 파일이며 `semantics.cpp`의 연산 분배와 같은 대응표를 따른다.
+- `semantics.hpp`, `semantics_fast.cpp`: 블록 캐시용 `FastOp`와 `prepare_fast()`를 추가했다. 가져온 소스가 아니라 이 저장소의 추가 파일이며, 자주 쓰는 연산을 `semantics_integer.cpp`·`semantics_memory.cpp`·`semantics_control.cpp`의 해당 부분과 같은 의미로 특수화한다. 원본 의미론을 바꾸면 함께 바꾼다.
 
 다른 가져온 소스는 원본과 동일하다. 원본의 전체 의미론 커버리지 주장은 이 부분 추출에 적용되지 않는다. 실행 지원 여부는 축소된 `op_info` 테이블이 결정한다. 레거시 ARMv5 명령 중 Armv8 EL0 프로파일에서 빠진 SWP 같은 명령은 현재 undefined로 처리한다.

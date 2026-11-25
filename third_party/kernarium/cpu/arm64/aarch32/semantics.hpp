@@ -167,6 +167,46 @@ struct PreparedInstruction final {
 [[nodiscard]] PreparedInstruction prepare_a32(const Instruction &instruction) noexcept;
 
 /*
+ * A pre-decoded instruction reduced to one specialised handler and the few
+ * operands it reads (semantics_fast.cpp): the block cache's first choice for
+ * the commonest integer, memory and branch instructions. run() returns
+ * fast_next when the instruction retired and the PC is the next instruction,
+ * fast_jump when it retired and wrote the PC, and fast_fallback when it
+ * changed nothing and execute_a32() must run the instruction instead (a
+ * fault, or an access outside the fast path). The handlers reach guest memory
+ * through ::atlan::Memory directly and clear the exclusive monitor after a
+ * store, as the runtime's A32Memory does.
+ */
+inline constexpr unsigned fast_fallback = 0;
+inline constexpr unsigned fast_next = 1;
+inline constexpr unsigned fast_jump = 2;
+struct FastOp final {
+	using Run = unsigned (*)(CpuState &cpu, const FastOp &op,
+		::atlan::Memory &memory) noexcept;
+	Run run{};
+	std::uint64_t next_key{};
+	std::uint64_t key{};
+	std::uint32_t imm{};
+	std::uint32_t imm2{};
+	std::uint16_t cond_mask{};
+	std::uint16_t registers{};
+	std::uint8_t next_it{};
+	std::uint8_t d{};
+	std::uint8_t n{};
+	std::uint8_t m{};
+	std::uint8_t shift_t{};
+	std::uint8_t shift_n{};
+	std::uint8_t carry{};
+	bool add{};
+	bool index{};
+	bool wback{};
+};
+/* Fills `out` for the instruction at PC key `key`; false when the instruction
+ * has no fast handler. */
+[[nodiscard]] bool prepare_fast(const Instruction &instruction, std::uint64_t key,
+	FastOp &out) noexcept;
+
+/*
  * The single-instruction contract: fetches the instruction at the PC key in
  * `cpu.pc` through `memory` (access `execute`), decodes it against `profile`
  * in the ITSTATE in `cpu.a32_itstate`, and executes it. The engines decode
