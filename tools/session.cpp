@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // atlan-session LIBRARY DATA_ROOT [GL_TRACE_FILE] — runs the guest session headless with a GL call recorder.
+// LIBRARY is an ARM32 .so, an APK or an encoded atlan.dat; "" runs the package found in DATA_ROOT/ATLAN.
 #include "atlan/gl_context.hpp"
 #include "atlan/gl_recorder.hpp"
 #include "shell/session.hpp"

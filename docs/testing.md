@@ -6,8 +6,7 @@ CI 가 만든 서명 없는 IPA 를 iPhone/iPad 에 설치해서 앱 셸이 어�
 
 - iOS/iPadOS 15 이상 기기, 가로 모드 전용 앱
 - iloader 같은 사이드로딩 도구 (IPA 서명·설치용)
-- 본인이 가진 ARM32 네이티브 라이브러리 `libatlan3dv5.so`
-- 본인이 가진 지도 데이터 폴더/파일
+- 본인이 가진 아틀란 데이터 폴더 `ATLAN` (안에 `APP/atlan.dat` 이 있으면 따로 준비할 게 없어)
 
 ## 1. IPA 받기
 
@@ -15,11 +14,12 @@ CI 가 만든 서명 없는 IPA 를 iPhone/iPad 에 설치해서 앱 셸이 어�
 2. 아래 Artifacts 에서 `atlan-runtime-ios-unsigned` 를 받는다. zip 안에 `.ipa` 가 들어 있어.
 3. iloader 로 서명하고 기기에 설치한다. 신뢰 설정(설정 → 일반 → VPN 및 기기 관리)이 필요할 수 있어.
 
-## 2. 라이브러리 가져오기
+## 2. 앱 패키지
 
-1. 기기의 파일 앱에 `libatlan3dv5.so` 를 넣어 둔다 (iCloud Drive 든 "내 iPhone" 이든 상관없어).
-2. 앱을 열고 왼쪽 위 첫 번째 버튼(아래 화살표 아이콘)을 눌러 파일 선택기에서 그 `.so` 를 고른다.
-3. 로그에 `library libatlan3dv5.so` 가 뜨면 성공. 앱이 `Application Support/guest.so` 로 복사해 두니까 다시 안 골라도 돼.
+- 앱은 Documents 의 `ATLAN/APP/atlan.dat` 을 그대로 실행해. 안드로이드 아틀란이 데이터 폴더에 넣어 두는 APK 사본이라, `ATLAN` 폴더를 통째로 넣으면 끝이야. APK 파일(`*.apk`)을 `ATLAN/APP` 나 `ATLAN` 에 넣어도 돼. 여러 개면 수정 시각이 가장 새로운 걸 써.
+- 앱을 열면 패키지를 찾아 자동으로 실행해. 로그 첫 줄들이 `ATLAN/APP/atlan.dat`, `package lib/armeabi/libatlan3dv5.so version 1.8.2.35` 처럼 나오면 패키지에서 라이브러리를 꺼낸 거야.
+- 업데이트는 새 `atlan.dat` 이나 APK 로 바꿔 넣고 앱을 다시 열면 돼. 꺼낸 라이브러리를 따로 저장하지 않아서 예전 버전이 남지 않아.
+- 패키지가 없을 때만 예전 방식이 쓰여: 왼쪽 위 첫 번째 버튼으로 `libatlan3dv5.so` 를 고르면 `Application Support/guest.so` 로 복사해 둬.
 
 ## 3. 지도·데이터 넣기
 
@@ -33,13 +33,15 @@ CI 가 만든 서명 없는 IPA 를 iPhone/iPad 에 설치해서 앱 셸이 어�
 
 ## 4. 실행
 
-두 번째 버튼(▶︎)을 누른다. 게스트는 전용 스레드에서 돌고 로그는 화면 아래 텍스트 영역에 쌓여.
+패키지가 있으면 앱을 열 때 자동으로 시작해. 다시 돌리려면 두 번째 버튼(▶︎)을 누른다. 게스트는 전용 스레드에서 돌고 로그는 화면 아래 텍스트 영역에 쌓여.
 
 ## 지금 기대하는 로그
 
 앱을 켜면 먼저 `selftest <숫자>` 가 나와. 실행하면 대략 이런 순서야 (서버에서 같은 코드를 돌린 결과 기준이야).
 
 ```
+ATLAN/APP/atlan.dat
+package lib/armeabi/libatlan3dv5.so version 1.8.2.35
 loaded mapped_bytes=16486400 exports=25963 imports_trapped=262 initializers=415
 initializers_completed=415
 android_log 4 ATLAN30_LOG: JNI_OnLoad called
@@ -76,6 +78,8 @@ audio callbacks=0 players=1
 
 | 로그 | 의미 |
 | --- | --- |
+| `library missing` | `ATLAN/APP/atlan.dat`·APK 도, 가져온 `.so` 도 없음 |
+| `package …` 줄 없이 끝나는 오류(`not an APK …`, `… fails its CRC check`, `package has no 32-bit ARM library …`) | 패키지가 깨졌거나 32비트 ARM 라이브러리가 없음 |
 | `library …` 없이 `import failed: …` | 파일 가져오기 실패 |
 | `load failed: …` | ELF 로드 실패 (잘못된 파일, ARM32 가 아님) |
 | `initializer[N] …` 로 시작하는 줄 | N 번째 생성자에서 멈춤 (뒤에 이유가 붙어) |
