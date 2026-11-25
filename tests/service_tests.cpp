@@ -317,6 +317,13 @@ void libc_extras() {
     check(f.call("fopen", {data + 0x500, data + 0x540}).stop == atlan::Stop::returned && f.r0() != 0, "fopen matches names case-insensitively");
     put_text(f.runtime.memory, data + 0x500, "DIR/missing.txt");
     check(f.call("fopen", {data + 0x500, data + 0x540}).stop == atlan::Stop::returned && f.r0() == 0, "a missing file still fails");
+    // A file created through the services after its directory was listed is found case-insensitively too.
+    put_text(f.runtime.memory, data + 0x500, "DIR/New.txt");
+    put_text(f.runtime.memory, data + 0x540, "w");
+    check(f.call("fopen", {data + 0x500, data + 0x540}).stop == atlan::Stop::returned && f.r0() != 0, "fopen creates a file");
+    put_text(f.runtime.memory, data + 0x500, "dir/NEW.TXT");
+    put_text(f.runtime.memory, data + 0x540, "r");
+    check(f.call("fopen", {data + 0x500, data + 0x540}).stop == atlan::Stop::returned && f.r0() != 0, "a created file is found case-insensitively");
     // qsort calls back into a guest comparator (here a host service standing in for it).
     f.dispatcher.bind("cmp", [&f](atlan::ImportCall& c) -> std::optional<std::string> {
         const auto a = static_cast<std::int32_t>(get32(f.runtime.memory, c.arg(0))), b = static_cast<std::int32_t>(get32(f.runtime.memory, c.arg(1)));

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // atlan-session LIBRARY DATA_ROOT [GL_TRACE_FILE] — runs the guest session headless with a GL call recorder.
+// LIBRARY is an ARM32 .so, an APK or an encoded atlan.dat; "" runs the package found in DATA_ROOT/ATLAN.
 #include "atlan/gl_context.hpp"
 #include "atlan/gl_recorder.hpp"
 #include "shell/session.hpp"
 #include <chrono>
 #include <cstdio>
 #include <thread>
+#include <vector>
 #include <cstdlib>
 #include <iostream>
 
@@ -61,9 +63,31 @@ int main(int argc, char** argv) {
     atlan::shell::GuestSession session(config, [](const std::string& line) { std::cout << line << std::endl; });
     session.start();
     if (interactive) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::atoi(interactive));
-        while (session.state() == atlan::shell::SessionState::running && std::chrono::steady_clock::now() < deadline)
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // ATLAN_TAPS="MS:X,Y;MS:X,Y;...": taps (down, up 80 ms later) at those times after the start, in guest pixels.
+        struct Tap { long ms; float x, y; };
+        std::vector<Tap> taps;
+        if (const char* list = std::getenv("ATLAN_TAPS")) {
+            Tap tap{};
+            int used = 0;
+            while (std::sscanf(list, "%ld:%f,%f%n", &tap.ms, &tap.x, &tap.y, &used) == 3) {
+                taps.push_back(tap);
+                list += used;
+                if (*list == ';') ++list;
+            }
+        }
+        const auto start = std::chrono::steady_clock::now();
+        const auto deadline = start + std::chrono::seconds(std::atoi(interactive));
+        std::size_t next_tap = 0;
+        while (session.state() == atlan::shell::SessionState::running && std::chrono::steady_clock::now() < deadline) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            if (next_tap < taps.size() && elapsed >= taps[next_tap].ms) {
+                const auto& tap = taps[next_tap++];
+                input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed)});
+                std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed + 80)});
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
         session.stop();
     }
     session.join();

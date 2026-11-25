@@ -170,8 +170,10 @@ struct PreparedInstruction final {
  * A pre-decoded instruction reduced to one specialised handler and the few
  * operands it reads (semantics_fast.cpp): the block cache's first choice for
  * the commonest integer, memory and branch instructions. run() returns
- * fast_next when the instruction retired and the PC is the next instruction,
- * fast_jump when it retired and wrote the PC, and fast_fallback when it
+ * fast_next when the instruction retired and the PC is the next instruction
+ * (the handler does not store it: the caller sets the PC and ITSTATE from
+ * next_key and next_it where it needs them), fast_jump when it retired and
+ * wrote the PC and ITSTATE, and fast_fallback when it
  * changed nothing and execute_a32() must run the instruction instead (a
  * fault, or an access outside the fast path). The handlers reach guest memory
  * through ::atlan::Memory directly and clear the exclusive monitor after a
@@ -180,6 +182,8 @@ struct PreparedInstruction final {
 inline constexpr unsigned fast_fallback = 0;
 inline constexpr unsigned fast_next = 1;
 inline constexpr unsigned fast_jump = 2;
+/* Returned by the caller's own marker for an instruction without a handler. */
+inline constexpr unsigned fast_generic = 3;
 struct FastOp final {
 	using Run = unsigned (*)(CpuState &cpu, const FastOp &op,
 		::atlan::Memory &memory) noexcept;

@@ -44,22 +44,31 @@ std::optional<std::pair<int, bool>> GuestStdio::host_descriptor(std::uint32_t fd
     if (fd < 3 || fd - 3 >= fds_.size() || fds_[fd - 3].host < 0 || !fds_[fd - 3].readable) return std::nullopt;
     return std::pair<int, bool>{fds_[fd - 3].host, fds_[fd - 3].writable};
 }
+const GuestStdio::Listing& GuestStdio::listing(const std::filesystem::path& directory) const {
+    const auto [it, added] = listings_.try_emplace(directory.string());
+    if (added) {
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+            auto name = entry.path().filename().string();
+            it->second.lower.try_emplace(ascii_lower(name), name);  // first match in iteration order wins
+            it->second.names.insert(std::move(name));
+        }
+    }
+    return it->second;
+}
 std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) const {
     // The data folder may live on a case-sensitive host while the app was written for Android's case-insensitive
-    // storage: take the exact name when it exists, else the unique-by-iteration case-insensitive match.
+    // storage: take the exact name when it exists, else the unique-by-iteration case-insensitive match. The exact
+    // path costs one host lookup; anything else is answered from cached directory listings.
+    std::error_code ec;
+    if (auto direct = root_ / relative; std::filesystem::exists(direct, ec)) return direct;
     std::filesystem::path current = root_;
-    const auto lower = [](std::string text) { for (auto& c : text) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32); return text; };
     for (const auto& part : relative) {
-        std::error_code ec;
-        if (std::filesystem::exists(current / part, ec)) { current /= part; continue; }
-        bool found = false;
-        if (std::filesystem::is_directory(current, ec)) {
-            const auto wanted = lower(part.string());
-            for (const auto& entry : std::filesystem::directory_iterator(current, ec)) {
-                if (lower(entry.path().filename().string()) == wanted) { current /= entry.path().filename(); found = true; break; }
-            }
-        }
-        if (!found) current /= part;
+        const auto& names = listing(current);
+        const auto name = part.string();
+        if (names.names.contains(name)) { current /= part; continue; }
+        if (const auto match = names.lower.find(ascii_lower(name)); match != names.lower.end()) current /= match->second;
+        else current /= part;
     }
     return current;
 }
@@ -190,6 +199,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         if (!resolve(path, host)) code = guest_eacces;
         else if (!std::filesystem::exists(host, ec)) code = guest_enoent;
         else if (!std::filesystem::remove(host, ec)) code = guest_eacces;
+        changed();
         if (trace_) trace_(path, "remove", code == 0);
         if (code != 0 && !set_errno(call, code)) return "remove could not write errno";
         call.set_result(code == 0 ? 0 : 0xffffffffU);
@@ -209,6 +219,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         else {
             std::filesystem::rename(host_from, host_to, ec);
             if (ec) code = guest_eacces;
+            changed();
         }
         if (trace_) trace_(from + " -> " + to, "rename", code == 0);
         if (code != 0 && !set_errno(call, code)) return "rename could not write errno";
@@ -245,6 +256,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         while (slot < fds_.size() && fds_[slot].host >= 0) ++slot;
         if (slot >= max_open) return fail(call, guest_emfile, "open");
         const int fd = ::open(host.c_str(), host_flags, 0644);
+        if (host_flags & O_CREAT) changed();
         if (trace_) trace_(path, "open flags=" + std::to_string(flags), fd >= 0);
         if (fd < 0) return fail(call, errno == ENOENT ? guest_enoent : errno == EEXIST ? 17 : errno == EISDIR ? 21 : guest_eacces, "open");
         if (fds_.size() <= slot) fds_.resize(slot + 1);
@@ -350,6 +362,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         else if (relative.empty() || std::filesystem::exists(host, ec)) code = 17;  // EEXIST
         else if (!std::filesystem::is_directory(host.parent_path(), ec)) code = guest_enoent;
         else if (!std::filesystem::create_directory(host, ec)) code = guest_eacces;
+        changed();
         if (trace_) trace_(path, "mkdir", code == 0);
         if (code != 0 && !set_errno(call, code)) return "mkdir could not write errno";
         call.set_result(code == 0 ? 0 : 0xffffffffU);
@@ -456,6 +469,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         else if (!relative.empty() && !std::filesystem::is_directory(locate(relative))) {
             if (mode == "r" || mode == "rb") file = open_filtered(relative);
             if (!file) file = std::fopen((locate(relative)).string().c_str(), mode.c_str());
+            if (mode[0] != 'r') changed();  // "w" and "a" create the file
             if (!file) code = errno == ENOENT ? guest_enoent : errno == EACCES ? guest_eacces : guest_einval;
         }
         if (trace_) trace_(path, mode, file != nullptr);
