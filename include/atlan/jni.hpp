@@ -77,6 +77,9 @@ public:
     // A java/lang/String host object with content (UTF-8, no embedded NUL).
     // Returns 0 if the object table is full or the text is unusable.
     [[nodiscard]] std::uint32_t new_string(const std::string& utf8);
+    // Replaces the content of a String object the host created (a reused argument object). False if `handle` is
+    // not a String or the text is unusable.
+    bool set_string_text(std::uint32_t handle, const std::string& utf8);
     // Content of a String object handle, if it is one.
     [[nodiscard]] std::optional<std::string> string_text(std::uint32_t handle) const;
     // byte[] host objects (the only array type modelled so far).

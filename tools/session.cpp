@@ -21,6 +21,19 @@ int main(int argc, char** argv) {
     if (raw) config.gl_backend = &recorder;
     else config.gl_backend = &context;
     if (const char* frames = std::getenv("ATLAN_FRAMES")) config.render_frames = static_cast<std::uint32_t>(std::atoi(frames));
+    // ATLAN_INPUT_CFG: input bindings file (shell/input.hpp). With it, one location fix and one tap at the middle of
+    // an 800x480 surface are queued before the first frame, to exercise the bound native methods headless.
+    atlan::shell::InputQueue input;
+    if (const char* path = std::getenv("ATLAN_INPUT_CFG")) {
+        std::string why;
+        auto bindings = atlan::shell::load_input_bindings(path, why);
+        if (!bindings) { std::cerr << "input bindings: " << why << '\n'; return 2; }
+        config.input_bindings = std::move(*bindings);
+        config.input = &input;
+        input.push(atlan::shell::LocationFix{37.5665, 126.9780, 38.0, 0.0, 0.0, 5.0, 1700000000000ULL});
+        input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, 400, 240, 1000});
+        input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, 400, 240, 1050});
+    }
     atlan::shell::GuestSession session(config, [](const std::string& line) { std::cout << line << std::endl; });
     session.start();
     session.join();

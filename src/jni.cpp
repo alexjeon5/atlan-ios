@@ -122,6 +122,11 @@ std::uint32_t JavaBootstrap::new_string(const std::string& utf8) {
     state_->texts.back() = utf8;
     return cls;
 }
+bool JavaBootstrap::set_string_text(std::uint32_t handle, const std::string& utf8) {
+    if (!string_text(handle) || utf8.find('\0') != std::string::npos || utf8.size() > 1U << 20) return false;
+    state_->texts[(handle - object_handle_base) / 4 - 1] = utf8;
+    return true;
+}
 std::optional<std::string> JavaBootstrap::string_text(std::uint32_t handle) const {
     if (handle < object_handle_base + 4 || (handle - object_handle_base) % 4 != 0 ||
         (handle - object_handle_base) / 4 > state_->objects.size() || !state_->is_string[(handle - object_handle_base) / 4 - 1])

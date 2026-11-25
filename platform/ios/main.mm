@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <UIKit/UIKit.h>
+#import <CoreLocation/CoreLocation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "apple_audio_sink.hpp"
 #include "metal_gl_backend.hpp"
 #import <QuartzCore/CAMetalLayer.h>
 #include "atlan/demo.hpp"
 #include "shell/data_file.hpp"
+#include "shell/input.hpp"
 #include "shell/render_config.hpp"
 #include "shell/session.hpp"
+#include <atomic>
 #include <exception>
 #include <memory>
+#include <vector>
 
-@interface ShellViewController : UIViewController <UIDocumentPickerDelegate>
+@interface ShellViewController : UIViewController <UIDocumentPickerDelegate, CLLocationManagerDelegate>
 @end
 
 @implementation ShellViewController {
@@ -25,6 +29,91 @@
     UIView* _metalView;
     std::unique_ptr<atlan::MetalGlBackend> _gl;
     CAMetalLayer* _layer;
+    UIButton* _logToggle;
+    atlan::shell::InputQueue _input;
+    std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
+    std::vector<UITouch*> _fingers;            // slot index = pointer id; nil when free
+    CLLocationManager* _location;
+}
+
+// Bindings from host input to the guest's native methods: Documents/input.cfg (format in shell/input.hpp).
+- (NSString*)inputBindingsPath {
+    return [self.documentsPath stringByAppendingPathComponent:@"input.cfg"];
+}
+
+- (void)toggleLog {
+    _log.hidden = !_log.hidden;  // the log covers the surface and takes its touches while shown
+}
+
+- (atlan::shell::PixelSize)touchSurface {
+    const auto guest = _guestSurface.load();
+    if (guest != 0) return {static_cast<std::uint32_t>(guest >> 32), static_cast<std::uint32_t>(guest)};
+    return _surface.get();
+}
+
+- (void)forward:(NSSet<UITouch*>*)touches phase:(atlan::shell::TouchPhase)phase {
+    using atlan::shell::TouchPhase;
+    const CGSize view = _metalView.bounds.size;
+    for (UITouch* touch in touches) {
+        std::size_t slot = 0;
+        while (slot < _fingers.size() && _fingers[slot] != touch) ++slot;
+        if (slot == _fingers.size()) {
+            if (phase != TouchPhase::down) continue;  // began before the surface took touches
+            slot = 0;
+            while (slot < _fingers.size() && _fingers[slot] != nil) ++slot;
+            if (slot == _fingers.size()) _fingers.push_back(nil);
+            _fingers[slot] = touch;
+        }
+        const CGPoint at = [touch locationInView:_metalView];
+        const auto point = atlan::shell::to_surface(at.x, at.y, view.width, view.height, self.touchSurface);
+        _input.push(atlan::shell::TouchEvent{phase, static_cast<std::uint32_t>(slot), point.x, point.y,
+                                             static_cast<std::uint64_t>(touch.timestamp * 1000.0)});
+        if (phase == TouchPhase::up || phase == TouchPhase::cancel) _fingers[slot] = nil;
+    }
+}
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    (void)event; [self forward:touches phase:atlan::shell::TouchPhase::down];
+}
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    (void)event; [self forward:touches phase:atlan::shell::TouchPhase::move];
+}
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    (void)event; [self forward:touches phase:atlan::shell::TouchPhase::up];
+}
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    (void)event; [self forward:touches phase:atlan::shell::TouchPhase::cancel];
+}
+
+- (void)startLocation {
+    if (!_location) {
+        _location = [CLLocationManager new];
+        _location.delegate = self;
+        _location.desiredAccuracy = kCLLocationAccuracyBestForNavigation;
+        _location.activityType = CLActivityTypeAutomotiveNavigation;
+        _location.pausesLocationUpdatesAutomatically = NO;
+    }
+    const CLAuthorizationStatus status = _location.authorizationStatus;
+    if (status == kCLAuthorizationStatusNotDetermined) [_location requestWhenInUseAuthorization];
+    else if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) [self append:@"location denied"];
+    else [_location startUpdatingLocation];
+}
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager*)manager {
+    const CLAuthorizationStatus status = manager.authorizationStatus;
+    if (status == kCLAuthorizationStatusAuthorizedWhenInUse || status == kCLAuthorizationStatusAuthorizedAlways)
+        [manager startUpdatingLocation];
+    else if (status != kCLAuthorizationStatusNotDetermined) [self append:@"location denied"];
+}
+- (void)locationManager:(CLLocationManager*)manager didUpdateLocations:(NSArray<CLLocation*>*)locations {
+    (void)manager;
+    CLLocation* fix = locations.lastObject;
+    if (!fix || fix.horizontalAccuracy < 0) return;  // an invalid fix carries no position
+    _input.push(atlan::shell::LocationFix{fix.coordinate.latitude, fix.coordinate.longitude, fix.altitude, fix.speed,
+                                          fix.course, fix.horizontalAccuracy,
+                                          static_cast<std::uint64_t>(fix.timestamp.timeIntervalSince1970 * 1000.0)});
+}
+- (void)locationManager:(CLLocationManager*)manager didFailWithError:(NSError*)error {
+    (void)manager;
+    if (error.code != kCLErrorLocationUnknown) [self append:[NSString stringWithFormat:@"location failed: %@", error.localizedDescription]];
 }
 
 - (NSURL*)libraryURL {
@@ -89,6 +178,10 @@
     [_run setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
     _run.accessibilityLabel = @"실행";
     [_run addTarget:self action:@selector(runGuest) forControlEvents:UIControlEventTouchUpInside];
+    _logToggle = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_logToggle setImage:[UIImage systemImageNamed:@"text.alignleft"] forState:UIControlStateNormal];
+    _logToggle.accessibilityLabel = @"로그";
+    [_logToggle addTarget:self action:@selector(toggleLog) forControlEvents:UIControlEventTouchUpInside];
     _map = [UILabel new];
     _map.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
     _map.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -98,7 +191,9 @@
     _log.backgroundColor = [UIColor.secondarySystemBackgroundColor colorWithAlphaComponent:0.55];
     _metalView = [UIView new];
     _metalView.layer.opaque = YES;
-    auto* bar = [[UIStackView alloc] initWithArrangedSubviews:@[_library, _run, _map]];
+    _metalView.multipleTouchEnabled = YES;
+    self.view.multipleTouchEnabled = YES;
+    auto* bar = [[UIStackView alloc] initWithArrangedSubviews:@[_library, _run, _logToggle, _map]];
     bar.spacing = 20;
     bar.alignment = UIStackViewAlignmentCenter;
     [self.view insertSubview:_metalView atIndex:0];
@@ -157,7 +252,7 @@
 }
 
 - (void)runGuest {
-    if (_session) { _session->join(); _session.reset(); }
+    if (_session) { _session->stop(); _session->join(); _session.reset(); }
     NSString* map = self.mapPath;
     if (map) {
         const auto status = atlan::shell::inspect_data_file(map.UTF8String);
@@ -173,6 +268,20 @@
     _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
                                            self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
     config.surface = &_surface;
+    _guestSurface.store(0);
+    (void)_input.drain();
+    config.input = &_input;
+    config.interactive = true;
+    {
+        std::string why;
+        if (auto bindings = atlan::shell::load_input_bindings(self.inputBindingsPath.UTF8String, why)) {
+            config.input_bindings = std::move(*bindings);
+            [self append:config.input_bindings.empty() ? @"input bindings missing" : @"input bindings ok"];
+        } else {
+            [self append:[NSString stringWithFormat:@"input bindings rejected: %s", why.c_str()]];
+        }
+    }
+    [self startLocation];
     // A CAMetalLayer sublayer sized in native pixels; GL output is presented there.
     {
         const auto size = _surface.get();
@@ -190,7 +299,10 @@
         config.gl_backend = _gl.get();
         // The guest sizes its GL surface itself (MainActivity.setSurfaces); render at exactly that size and let the
         // layer scale it to the view.
-        config.on_set_surfaces = [weakSelf](std::int32_t width, std::int32_t height) {
+        std::atomic<std::uint64_t>* guestSurface = &_guestSurface;  // outlives the session (joined in dealloc)
+        config.on_set_surfaces = [weakSelf, guestSurface](std::int32_t width, std::int32_t height) {
+            if (width > 0 && height > 0)
+                guestSurface->store((std::uint64_t{static_cast<std::uint32_t>(width)} << 32) | static_cast<std::uint32_t>(height));
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (width > 0 && height > 0) [weakSelf metalLayer].drawableSize = CGSizeMake(width, height);
             });

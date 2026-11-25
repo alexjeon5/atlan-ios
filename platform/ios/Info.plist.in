@@ -9,6 +9,7 @@
   <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>UILaunchScreen</key><dict/>
+  <key>NSLocationWhenInUseUsageDescription</key><string>현재 위치를 지도와 길안내에 사용합니다.</string>
   <key>UIFileSharingEnabled</key><true/>
   <key>LSSupportsOpeningDocumentsInPlace</key><true/>
   <key>UISupportedInterfaceOrientations</key>

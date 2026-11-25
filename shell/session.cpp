@@ -19,13 +19,16 @@
 #include "atlan/runtime.hpp"
 #include "atlan/threads.hpp"
 #include <array>
+#include <chrono>
 #include <exception>
 #include <map>
 #include <optional>
 #include <random>
 #include <fstream>
 #include <pthread.h>
+#include <set>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace atlan::shell {
@@ -286,6 +289,58 @@ void GuestSession::run() {
                 log_(std::string(name) + " returned 0x" + hex(runtime.cpu.registers[0]));
                 return true;
             };
+            // Host input -> guest: each queued event becomes one call of the native method bound to it.
+            struct BoundNative { std::uint32_t address{}, receiver{}; };
+            std::map<const NativeBinding*, BoundNative> bound;
+            std::map<std::pair<const NativeBinding*, std::size_t>, std::uint32_t> text_arguments;  // reused String objects
+            std::set<std::string> input_notes;
+            const auto note = [&](const std::string& line) { if (input_notes.insert(line).second) log_(line); };
+            const auto resolve = [&](const NativeBinding& b) -> BoundNative {
+                if (const auto it = bound.find(&b); it != bound.end()) return it->second;
+                BoundNative out;
+                for (const auto& m : java.native_methods())
+                    if (m.class_name == b.class_name && m.name == b.name && m.signature == b.signature) out.address = m.address;
+                if (out.address == 0) {
+                    std::string symbol = "Java_";
+                    for (char c : b.class_name) { if (c == '/') symbol += '_'; else if (c == '_') symbol += "_1"; else symbol += c; }
+                    symbol += '_';
+                    for (char c : b.name) { if (c == '_') symbol += "_1"; else symbol += c; }
+                    if (const auto* sym = image.find(symbol); sym && sym->type == 2) out.address = sym->address;
+                }
+                if (out.address != 0) out.receiver = java.new_object(java.class_handle(b.class_name));
+                else note("input: " + b.class_name + "." + b.name + b.signature + " is neither registered nor exported");
+                return bound[&b] = out;
+            };
+            const auto deliver_input = [&]() -> bool {
+                if (!config_.input) return true;
+                for (const auto& event : config_.input->drain()) {
+                    const bool touch = std::holds_alternative<TouchEvent>(event);
+                    const auto bindings = config_.input_bindings.matching(event);
+                    if (bindings.empty()) note(std::string("input: no binding for ") + (touch ? "touch" : "location") + " events");
+                    for (const auto* binding : bindings) {
+                    const auto target = resolve(*binding);
+                    if (target.address == 0) continue;
+                    std::string why;
+                    const auto words = native_call_words(*binding, event, config_.input_bindings.actions, java.env(), target.receiver, why,
+                                                         [&](std::size_t index, const std::string& text) -> std::uint32_t {
+                        auto& handle = text_arguments[{binding, index}];
+                        if (handle == 0) handle = java.new_string(text);
+                        else if (!java.set_string_text(handle, text)) return 0;
+                        return handle;
+                    });
+                    if (!words) { note("input: " + why); continue; }
+                    note(std::string("input: first ") + (touch ? "touch" : "location") + " event -> " + binding->class_name + "." + binding->name);
+                    const auto r = dispatcher.call(runtime, target.address, *words, stack_base + stack_bytes,
+                                                   return_sentinel, config_.surface_call_budget);
+                    if (r.stop != Stop::returned) {
+                        log_(describe_state(runtime, dispatcher));
+                        fail(describe_stop("input " + binding->name, r));
+                        return false;
+                    }
+                    }
+                }
+                return true;
+            };
             bool surfaces_ok = native_init_address != 0;
             if (surfaces_ok) {
                 const auto surface = java.new_object(java.class_handle("android/view/Surface"));
@@ -293,6 +348,7 @@ void GuestSession::run() {
                               native("Java_com_atlan_AtlanGLSurfaceView_createGLSF", {}) &&
                               native("Java_com_atlan_AtlanUISurfaceView_changedUISF", {});
                 for (std::uint32_t i = 0; surfaces_ok && i < config_.render_frames && !stop_.load(); ++i) {
+                    if (!deliver_input()) return;
                     surfaces_ok = native("Java_com_atlan_AtlanGLSurfaceView_renderGLSF", {});
                     // GLSurfaceView swaps after onDrawFrame; the guest's renderGLSF never calls eglSwapBuffers itself.
                     if (surfaces_ok) {
@@ -313,6 +369,35 @@ void GuestSession::run() {
             const auto delivered = audio->pump(runtime, stack_base + stack_bytes, return_sentinel, config_.initializer_budget);
             if (delivered.error) { fail("audio callback: " + *delivered.error); return; }
             log_("audio callbacks=" + std::to_string(delivered.callbacks) + " players=" + std::to_string(audio->live_players()));
+            // Interactive phase: input, one frame, guest threads and audio, repeated until stopped. Per-frame results
+            // are not logged; a guest stop is reported like in the steps above.
+            if (config_.interactive && surfaces_ok) {
+                const auto* render = image.find("Java_com_atlan_AtlanGLSurfaceView_renderGLSF");
+                if (!render || render->type != 2) { state_.store(SessionState::finished); return; }
+                const std::array<std::uint32_t, 2> render_args{java.env(), java.new_object(java.class_handle("com/atlan/MainActivity"))};
+                log_("interactive");
+                while (!stop_.load()) {
+                    const auto frame_start = std::chrono::steady_clock::now();
+                    if (!deliver_input()) return;
+                    const auto frame = dispatcher.call(runtime, render->address, render_args, stack_base + stack_bytes,
+                                                       return_sentinel, config_.surface_call_budget);
+                    if (frame.stop != Stop::returned) {
+                        log_(describe_state(runtime, dispatcher));
+                        fail(describe_stop("renderGLSF", frame));
+                        return;
+                    }
+                    GlCall swap;
+                    swap.op = GlOp::swap_buffers;
+                    (config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl)).execute(swap);
+                    const auto background = dispatcher.pump(runtime, config_.initializer_budget);
+                    if (background.stop == Stop::unresolved_import) { fail("pump stopped at missing service " + background.import); return; }
+                    if (background.stop != Stop::returned && background.stop != Stop::budget_exhausted) { fail(describe_stop("pump", background)); return; }
+                    const auto sound = audio->pump(runtime, stack_base + stack_bytes, return_sentinel, config_.initializer_budget);
+                    if (sound.error) { fail("audio callback: " + *sound.error); return; }
+                    std::this_thread::sleep_until(frame_start + std::chrono::milliseconds(config_.frame_interval_ms));
+                }
+                log_("stopped");
+            }
         }
         state_.store(SessionState::finished);
     } catch (const std::exception& error) {
