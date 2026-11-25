@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "atlan/sockets.hpp"
 #include "atlan/abi.hpp"
 #include "atlan/android_log.hpp"
 #include "atlan/data_symbols.hpp"
@@ -140,6 +141,12 @@ int main(int argc, char* argv[]) {
         atlan::VirtualFiles files(guard_page + 0x200);
         if (stdio) files.set_regular_file_size([&](std::uint32_t fd) { return stdio->descriptor_size(fd); });
         files.install(dispatcher);
+        atlan::GuestSockets::Config socket_config;
+        socket_config.errno_address = guard_page + 0x200;
+        socket_config.threads = &threads;
+        if (log) socket_config.trace = [](const std::string& line) { std::cout << line << '\n'; };
+        atlan::GuestSockets sockets(socket_config);
+        sockets.install(dispatcher);
         atlan::SemaphoreTable semaphores(&threads);
         semaphores.install(dispatcher);
         atlan::ThreadKeys thread_keys(&threads);
