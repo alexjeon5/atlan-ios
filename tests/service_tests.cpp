@@ -206,6 +206,12 @@ void directories_and_descriptors() {
     put_text(f.runtime.memory, data + 0xc0, "/../x");
     check(f.call("open", {data + 0xc0, 0101, 0644}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 13, "open cannot escape the root");
     check(f.call("open", {data + 0x60, 0x1000000, 0}).stop == atlan::Stop::service_error, "unsupported open flags stop");
+    {   // an aliased folder created up front accepts open(O_CREAT) without a guest mkdir (CLOUDMAPPATH /map/CLOUD_MAP)
+        f.stdio.add_alias("/map/CLOUD_MAP", "cloudmap", true);
+        put_text(f.runtime.memory, data + 0x300, "/map/CLOUD_MAP/mapversion.idx");
+        check(f.call("open", {data + 0x300, 0101, 0644}).stop == atlan::Stop::returned && f.r0() >= 3, "open(O_CREAT) in an aliased folder");
+        check(std::filesystem::exists(f.root / "cloudmap" / "mapversion.idx"), "aliased create lands under the root");
+    }
     check(f.call("umask", {077}).stop == atlan::Stop::returned, "umask call");
     check(f.r0() == 022, "umask returns the default mask first");
     check(f.call("umask", {022}).stop == atlan::Stop::returned, "umask call again");

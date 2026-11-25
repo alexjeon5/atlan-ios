@@ -65,7 +65,7 @@ audio callbacks=0 players=1
 - 정상 종료 지점은 `audio callbacks=… players=1` 줄이야. 이 줄까지 나오면 이번 단계는 성공이고, 그 뒤에 아무것도 안 뜨는 게 **현재 예상 결과**야. (지도 데이터가 없으면 `createGLSF` 가 빨리 끝나고 `players=0` 이야.)
 - 핵심 확인 줄은 `JNI_OnLoad returned 0x10004`, `nativeInit returned 0x0`, 그리고 `createGLSF returned 0x0`(지도 데이터가 있을 때) 이야.
 - `createGLSF` 는 지도 파일을 읽느라 폰에서 몇 분 걸릴 수 있어. 서버(arm64 리눅스)에서는 약 3분이야. 그동안 앱이 멈춘 것처럼 보여도 로그가 늘어나면 정상이야.
-- `guest stdout read error: Bad file descriptor` 줄이 많이 반복되는 것은 알려진 현상이야 (원인 조사 중).
+- 예전에 반복되던 `guest stdout read error: Bad file descriptor` 는 원인을 고쳤어 (system.ini 의 `CLOUDMAPPATH=/map/CLOUD_MAP` 폴더가 없어서 앱이 `open(O_CREAT)` 실패 값 -1 을 그대로 `read` 했던 거야). 이제 `ATLAN/NAND/CLOUD_MAP` 으로 연결돼. 지도 데이터가 있으면 그 뒤 세 번째 `renderGLSF` 에서 `CMapReadThread::enqueue` 가 널 객체로 불려 `memory_fault address=0x15c` 로 멈추는 게 새로 보여 (조사 중).
 - 지도·데이터를 안 넣었으면 `fopen ATLAN/MAP/WAVE/….idx … failed` 가 찍혀. 그래도 `nativeInit returned 0x0` 까지는 가. 데이터를 넣으면 `ok` 로 바뀌는지, 그 뒤에 새로 멈추는 곳이 있는지 보는 게 이번 테스트의 목적이야.
 - `setSurfaces` 는 화면 연결이 아직 없어서 호출만 기록하고 아무 일도 안 해. 화면에는 아직 아무것도 그려지지 않아.
 - 화면에는 아직 아무것도 그려지지 않아 (그래픽 백엔드 연결 전). 시작음 같은 소리가 날 수 있어.
