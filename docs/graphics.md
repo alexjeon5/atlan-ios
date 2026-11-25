@@ -23,7 +23,7 @@
 
 - attribute는 draw 시점에 float로 변환되고 셰이더의 attribute 폭으로 넓혀진다(빠진 성분은 GL처럼 0, 0, 0, 1). 정규화 정수형, VBO, 클라이언트 배열, 비활성 attribute(현재 값 0,0,0,1)를 모두 같은 경로로 처리한다.
 - `GL_LINE_LOOP`와 `GL_TRIANGLE_FAN`은 인덱스로 펼친다. 모든 draw는 인덱스 draw다.
-- 텍스처는 RGBA8로 변환한 불변 스냅샷이다(RGB/LUMINANCE/ALPHA/565/4444/5551, `UNPACK_ALIGNMENT` 반영). 레벨 0만 쓴다. 압축 텍스처와 밉맵 체인은 아직 없다.
+- 텍스처는 RGBA8로 변환한 불변 스냅샷이다(RGB/LUMINANCE/ALPHA/565/4444/5551, `UNPACK_ALIGNMENT` 반영). 레벨별로 보관하고 완전한 밉맵 체인만 샘플링에 쓴다. 압축 텍스처는 아직 없다.
 - 알 수 없는 location(-1)에 대한 `glUniform*`/`glEnableVertexAttribArray`는 GL처럼 조용히 무시한다.
 - 게스트의 `renderGLSF`는 `eglSwapBuffers`를 호출하지 않는다(GLSurfaceView가 대신 한다). 세션이 `renderGLSF`가 끝날 때마다 `swap_buffers`를 보낸다.
 
@@ -36,11 +36,16 @@
 
 ## 아직 없는 것
 
-`glLineWidth`(Metal에 선 굵기가 없다), 스텐실, scissor, FBO, `glReadPixels`(드로어블은 읽기 불가), ETC1/PVRTC 압축 텍스처, 밉맵, `glGetActiveUniform` 계열. 게스트가 쓰는 import 57개 중 위 항목에 해당하는 것은 `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`뿐이다.
+`glLineWidth`(Metal에 선 굵기가 없다), 스텐실, scissor, FBO, `glReadPixels`(드로어블은 읽기 불가), ETC1/PVRTC 압축 텍스처, `glGetActiveUniform` 계열. 게스트가 쓰는 import 57개 중 위 항목에 해당하는 것은 `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`뿐이다.
 
 ## 호출 실측 (게스트가 실제로 부르는 GL)
 
-헤드리스 세션(`atlan-session`, `ATLAN_RAW_GL=1`)으로 createGLSF와 renderGLSF 2회까지(세 번째 renderGLSF는 `CMapReadThread::enqueue` NULL 접근으로 중단) 집계한 결과, `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`는 한 번도 불리지 않았다. 스텐실·scissor·FBO·`glBlendEquation` 계열은 게스트의 import 57개에 아예 없어 직접 호출할 수 없고, `eglGetProcAddress`는 명시적으로 멈추게 되어 있다. 따라서 이 기능들은 지도 3D draw가 실제로 나오기 전까지 구현하지 않고 미룬다. 지도 렌더링이 시작되어 호출이 관측되면 그 순서로 구현한다(넓은 선은 쿼드 확장 방식으로 할 계획).
+`atlan-session`(`ATLAN_RAW_GL=1`)으로 renderGLSF 12회(지도 draw 포함, draw_elements 4013회)를 집계했다.
+
+- draw 모드는 `GL_TRIANGLES`(3601)와 `GL_TRIANGLE_STRIP`(412)뿐이다. 선·점은 없다. 인덱스는 ushort/ubyte, attribute는 float/byte/short/ubyte이고 VBO도 쓴다.
+- 텍스처는 전부 RGBA/UNSIGNED_BYTE이고 레벨 0~10의 밉맵 체인을 올린다. 최소화 필터는 `GL_LINEAR_MIPMAP_NEAREST`(9985)를 쓴다. 그래서 밉맵을 구현했다: 레벨별로 보관하고, 레벨 0부터 1x1까지 크기가 맞는 완전한 체인이면 Metal 밉 텍스처로 올리며, 밉맵 필터인데 체인이 불완전하면 GL처럼 검게 읽힌다.
+- `glLineWidth`, `glReadPixels`, `glCompressedTexImage2D`는 한 번도 불리지 않았다. 스텐실·scissor·FBO·`glBlendEquation` 계열은 import에 없다. 이들은 관측될 때까지 구현하지 않는다(넓은 선은 쿼드 확장으로 할 계획).
+- 확장 문자열(`GL_EXTENSIONS`)을 720회 조회한다.
 
 ## 검증
 

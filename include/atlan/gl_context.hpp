@@ -16,10 +16,15 @@ namespace atlan {
 // and the render state. A GlSink (Metal on Apple hosts, a recorder in tests) only has to execute these.
 enum class GlPrimitive : std::uint8_t { points, lines, line_strip, triangles, triangle_strip };
 
-struct GlTextureImage {          // immutable RGBA8 snapshot of level 0
+struct GlTextureLevel {
     std::uint32_t width{}, height{};
-    std::uint64_t serial{};      // unique per upload; sinks cache device textures by it
     std::vector<std::uint8_t> rgba;
+};
+struct GlTextureImage {          // immutable RGBA8 snapshot: width/height/rgba are level 0
+    std::uint32_t width{}, height{};
+    std::uint64_t serial{};      // unique per snapshot; sinks cache device textures by it
+    std::vector<std::uint8_t> rgba;
+    std::vector<GlTextureLevel> mips;  // levels 1.. of a complete chain down to 1x1; empty when the chain is absent or incomplete
 };
 
 struct GlSamplerParams {
@@ -110,7 +115,9 @@ private:
     };
     struct Buffer { std::vector<std::byte> data; };
     struct Texture {
-        std::shared_ptr<const GlTextureImage> image;
+        std::vector<GlTextureLevel> levels;              // as uploaded, indexed by level
+        std::shared_ptr<const GlTextureImage> image;     // snapshot of `levels`, rebuilt lazily
+        bool dirty{};
         GlSamplerParams sampler;
         bool bound_once{};
     };
@@ -130,6 +137,7 @@ private:
     GlResult query_shader(const GlCall& call) const;
     GlResult query_program(const GlCall& call) const;
     [[nodiscard]] Texture* bound_texture(std::uint32_t unit);
+    void refresh(Texture& texture);
 
     GlSink& sink_;
     std::function<void(const std::string&)> log_;

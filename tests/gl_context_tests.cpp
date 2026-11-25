@@ -220,6 +220,8 @@ int main(int argc, char** argv) {
         // RGBA upload with default alignment 4: width 1 RGB rows are padded to 4 bytes
         gl.op(GlOp::bind_texture, {0x0DE1, second});
         gl.op(GlOp::pixel_store_i, {0x0CF5, 4});
+        filter.a = {0x0DE1, 0x2801, 0x2600};
+        gl.run(filter);
         GlCall rgb; rgb.op = GlOp::tex_image_2d; rgb.a = {0x0DE1, 0, 0x1907, 1, 2, 0, 0x1907, 0x1401};
         rgb.data = {std::byte(1), std::byte(2), std::byte(3), std::byte(0), std::byte(4), std::byte(5), std::byte(6)};
         gl.run(rgb);
@@ -229,7 +231,33 @@ int main(int argc, char** argv) {
         check(p2.size() == 8 && p2[4] == 4 && p2[5] == 5 && p2[6] == 6 && p2[7] == 255, "unpack alignment pads rows");
         const auto old_serial = gl.sink.draws.back().textures[0].image->serial;
         gl.run(rgb);
+        gl.run(d);
         check(gl.sink.forgotten_textures.size() == 1 && gl.sink.forgotten_textures[0] == old_serial, "replacing an image tells the sink to drop the old device texture");
+        {   // mip chains: complete chains are kept, a partial chain with a mipmapped filter reads black
+            const auto mt = gl.gen(GlOp::gen_texture);
+            gl.op(GlOp::bind_texture, {0x0DE1, mt});
+            const auto level = [&](std::uint32_t l, std::uint32_t size, unsigned char v) {
+                GlCall c; c.op = GlOp::tex_image_2d; c.a = {0x0DE1, l, 0x1908, size, size, 0, 0x1908, 0x1401};
+                c.data.assign(std::size_t{size} * size * 4, std::byte(v));
+                gl.run(c);
+            };
+            level(0, 4, 10);
+            gl.run(d);  // default min filter is mipmapped and only level 0 exists
+            check(!gl.sink.draws.back().textures[0].image, "incomplete chain with a mipmapped filter samples black");
+            level(1, 2, 20);
+            level(2, 1, 30);
+            gl.run(d);
+            const auto& mi = gl.sink.draws.back().textures[0].image;
+            check(mi && mi->mips.size() == 2 && mi->mips[0].width == 2 && mi->mips[1].rgba[0] == 30, "complete chain keeps its levels");
+            gl.op(GlOp::bind_texture, {0x0DE1, mt});
+            level(1, 3, 20);  // wrong size for level 1
+            gl.run(d);
+            check(!gl.sink.draws.back().textures[0].image, "a level of the wrong size breaks the chain");
+            filter.a = {0x0DE1, 0x2801, 0x2601};
+            gl.run(filter);
+            gl.run(d);
+            check(gl.sink.draws.back().textures[0].image && gl.sink.draws.back().textures[0].image->mips.empty(), "non-mipmapped filter uses level 0 alone");
+        }
         GlCall odd; odd.op = GlOp::tex_image_2d; odd.a = {0x0DE1, 0, 0x1908, 1, 1, 0, 0x1908, 0x1406};
         gl.run(odd);
         check(gl.error() == 0x0500 && gl.ctx.stats().unsupported == 1, "unsupported pixel type reports INVALID_ENUM");

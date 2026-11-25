@@ -193,24 +193,49 @@ void GlContext::set_uniform(const GlCall& c) {
     }
 }
 
+void GlContext::refresh(Texture& t) {
+    if (!t.dirty) return;
+    t.dirty = false;
+    if (t.image) sink_.forget_texture(t.image->serial);
+    t.image.reset();
+    if (t.levels.empty() || t.levels[0].width == 0) return;
+    auto image = std::make_shared<GlTextureImage>();
+    image->width = t.levels[0].width;
+    image->height = t.levels[0].height;
+    image->rgba = t.levels[0].rgba;
+    // A mip chain counts only when every level down to 1x1 is present with the sizes GL derives from level 0.
+    std::uint32_t w = image->width, h = image->height;
+    std::vector<GlTextureLevel> chain;
+    bool complete = true;
+    for (std::size_t l = 1; (w > 1 || h > 1) && complete; ++l) {
+        w = std::max(1U, w / 2);
+        h = std::max(1U, h / 2);
+        if (l < t.levels.size() && t.levels[l].width == w && t.levels[l].height == h) chain.push_back(t.levels[l]);
+        else complete = false;
+    }
+    if (complete) image->mips = std::move(chain);
+    image->serial = next_serial_++;
+    t.image = std::move(image);
+}
+
 void GlContext::tex_image(const GlCall& c) {
     // a = target level internalformat width height border format type
     if (c.a[0] != 0x0DE1) { fail(gl_invalid_enum); return; }
-    if (c.a[1] != 0) return;  // only level 0 is sampled (no mip chain support)
     const auto id = unit_texture_[active_unit_];
     const auto it = textures_.find(id);
     if (id == 0 || it == textures_.end()) { fail(gl_invalid_operation); return; }
-    const std::uint32_t w = c.a[3], h = c.a[4];
-    if (w == 0 || h == 0 || w > 16384 || h > 16384) { fail(gl_invalid_value); return; }
+    const std::uint32_t level = c.a[1], w = c.a[3], h = c.a[4];
+    if (level > 15 || w == 0 || h == 0 || w > 16384 || h > 16384) { fail(gl_invalid_value); return; }
     bool ok = true;
-    auto image = std::make_shared<GlTextureImage>();
-    image->width = w;
-    image->height = h;
-    image->rgba = to_rgba(c.data, w, h, c.a[6], c.a[7], unpack_alignment_, ok);
+    GlTextureLevel image;
+    image.width = w;
+    image.height = h;
+    image.rgba = to_rgba(c.data, w, h, c.a[6], c.a[7], unpack_alignment_, ok);
     if (!ok) { ++stats_.unsupported; fail(gl_invalid_enum); note("glTexImage2D format/type 0x" + std::to_string(c.a[6]) + "/0x" + std::to_string(c.a[7]) + " is not supported"); return; }
-    image->serial = next_serial_++;
-    if (it->second.image) sink_.forget_texture(it->second.image->serial);
-    it->second.image = std::move(image);
+    auto& t = it->second;
+    if (t.levels.size() <= level) t.levels.resize(level + 1);
+    t.levels[level] = std::move(image);
+    t.dirty = true;
     ++stats_.texture_uploads;
 }
 
@@ -305,8 +330,12 @@ void GlContext::draw(const GlCall& c) {
     draw->textures.resize(linked.samplers.size());
     for (std::size_t s = 0; s < linked.samplers.size(); ++s) {
         const auto unit = static_cast<std::uint32_t>(program.sampler_units[s]);
-        if (const auto* t = bound_texture(unit)) {
-            draw->textures[s].image = t->image;
+        if (auto* t = bound_texture(unit)) {
+            refresh(*t);
+            const bool mipmapped = t->sampler.min_filter >= 0x2700 && t->sampler.min_filter <= 0x2703;
+            // GL: a texture sampled with a mipmapped minification filter and no complete chain is incomplete and reads black.
+            const bool incomplete = mipmapped && t->image && t->image->mips.empty() && (t->image->width > 1 || t->image->height > 1);
+            if (!incomplete) draw->textures[s].image = t->image;
             draw->textures[s].sampler = t->sampler;
         }
     }

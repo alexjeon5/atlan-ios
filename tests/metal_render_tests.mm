@@ -149,6 +149,31 @@ int main() {
         check(near(at(img, 16, 16), 0, 0, 255) && near(at(img, 48, 16), 255, 255, 255), "second texture row is at the top: " + show(at(img, 16, 16)) + show(at(img, 48, 16)));
     }
 
+    // mip chains: an 8x8 pixel viewport showing a 64x64 texture samples level 3
+    {
+        const auto textured = gl.program("attribute vec2 a_xy; attribute vec2 a_uv; varying vec2 v_uv; void main(){ v_uv = a_uv; gl_Position = vec4(a_xy, 0.0, 1.0); }",
+                                         "precision mediump float; uniform sampler2D u_tex; varying vec2 v_uv; void main(){ gl_FragColor = texture2D(u_tex, v_uv); }");
+        const auto tex = gl.gen(GlOp::gen_texture);
+        gl.op(GlOp::bind_texture, {0x0DE1, tex});
+        for (std::uint32_t l = 0; l <= 6; ++l) {
+            const std::uint32_t size = 64U >> l;
+            GlCall c; c.op = GlOp::tex_image_2d; c.a = {0x0DE1, l, 0x1908, size, size, 0, 0x1908, 0x1401};
+            for (std::uint32_t i = 0; i < size * size; ++i)
+                for (unsigned char v : {(unsigned char)(l * 30), (unsigned char)0, (unsigned char)(255 - l * 30), (unsigned char)255}) c.data.push_back(std::byte(v));
+            backend.execute(c);
+        }
+        GlCall f; f.op = GlOp::tex_parameter_i; f.a = {0x0DE1, 0x2801, 0x2700}; backend.execute(f);
+        f.a = {0x0DE1, 0x2800, 0x2600}; backend.execute(f);
+        gl.op(GlOp::use_program, {textured});
+        gl.uniform1i(gl.uniform(textured, "u_tex"), 0);
+        begin(0, 0, 0);
+        gl.op(GlOp::viewport, {0, 0, 8, 8});
+        const std::vector<float> xy = {-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1}, uv = {0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1};
+        gl.draw(4, {{gl.attrib(textured, "a_xy"), {2, xy}}, {gl.attrib(textured, "a_uv"), {2, uv}}}, 6);
+        gl.op(GlOp::viewport, {0, 0, W, H});
+        check(frame() && near(at(img, 4, 60), 90, 0, 165), "minified texture samples mip level 3: got " + show(at(img, 4, 60)));
+    }
+
     // the synthetic scene/blend programs exercise the same constructs as real content: they must build and render
     {
         const std::string dir = ATLAN_TEST_GLSL_DIR;

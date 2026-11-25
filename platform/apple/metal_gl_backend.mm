@@ -39,7 +39,14 @@ MTLCompareFunction compare(std::uint32_t gl) {
         default: return MTLCompareFunctionAlways;
     }
 }
-MTLSamplerMinMagFilter filter(std::uint32_t gl) {  // mip chains are not uploaded, so mipmapped filters reduce to their base filter
+MTLSamplerMipFilter mip_filter(std::uint32_t gl) {
+    switch (gl) {
+        case 0x2700: case 0x2701: return MTLSamplerMipFilterNearest;
+        case 0x2702: case 0x2703: return MTLSamplerMipFilterLinear;
+        default: return MTLSamplerMipFilterNotMipmapped;
+    }
+}
+MTLSamplerMinMagFilter filter(std::uint32_t gl) {  
     switch (gl) {
         case 0x2600: case 0x2700: case 0x2702: return MTLSamplerMinMagFilterNearest;
         default: return MTLSamplerMinMagFilterLinear;
@@ -281,6 +288,7 @@ struct MetalGlBackend::Impl final : GlSink {
         if (const auto it = samplers.find(key); it != samplers.end()) return it->second;
         MTLSamplerDescriptor* d = [MTLSamplerDescriptor new];
         d.minFilter = filter(p.min_filter);
+        d.mipFilter = mip_filter(p.min_filter);
         d.magFilter = filter(p.mag_filter);
         d.sAddressMode = wrap(p.wrap_s);
         d.tAddressMode = wrap(p.wrap_t);
@@ -299,10 +307,15 @@ struct MetalGlBackend::Impl final : GlSink {
             return black;
         }
         if (const auto it = textures.find(image->serial); it != textures.end()) return it->second;
-        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:image->width height:image->height mipmapped:NO];
+        const bool chain = !image->mips.empty();
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:image->width height:image->height mipmapped:chain];
         d.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> t = [device newTextureWithDescriptor:d];
         [t replaceRegion:MTLRegionMake2D(0, 0, image->width, image->height) mipmapLevel:0 withBytes:image->rgba.data() bytesPerRow:image->width * 4];
+        for (std::size_t l = 0; l < image->mips.size(); ++l) {
+            const auto& m = image->mips[l];
+            [t replaceRegion:MTLRegionMake2D(0, 0, m.width, m.height) mipmapLevel:l + 1 withBytes:m.rgba.data() bytesPerRow:m.width * 4];
+        }
         textures[image->serial] = t;
         return t;
     }
