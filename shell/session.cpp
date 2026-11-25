@@ -16,6 +16,7 @@
 #include "atlan/libc_services.hpp"
 #include "atlan/libc_extra.hpp"
 #include "atlan/mmap.hpp"
+#include "atlan/native_functions.hpp"
 #include "atlan/opensles.hpp"
 #include "atlan/profiler.hpp"
 #include "atlan/string_services.hpp"
@@ -271,6 +272,24 @@ void GuestSession::run() {
             if (delivered.callbacks != 0) return MutexTable::Idle::progressed;
             return delivered.pending != 0 ? MutexTable::Idle::waiting : MutexTable::Idle::none;
         });
+        if (config_.native_functions) {
+            NativeOptions native_options;
+            native_options.stack_top = stack_base + stack_bytes;
+            native_options.return_target = return_sentinel;
+            native_options.code_base = image.load_bias;
+            native_options.code_bytes = image.mapped_bytes;
+            native_options.log = log_;
+            native_options.skip = config_.native_skip;
+            if (std::ifstream file(config_.native_signatures); file) {
+                std::string why;
+                const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                if (auto parsed = parse_native_signatures(text, why)) native_options.signatures = std::move(*parsed);
+                else log_("native signatures rejected: " + why);
+            }
+            install_native_functions(dispatcher, runtime, image.exports, runtime_library_sets(), native_options);
+            dispatcher.reset_import_counts();
+            if (profiler) profiler->reset();
+        }
         for (std::size_t i = 0; i < initializers.size(); ++i) {
             if (stop_.load()) { log_("stopped before initializer " + std::to_string(i)); state_.store(SessionState::finished); return; }
             const auto outcome = dispatcher.call(runtime, initializers[i], {}, stack_base + stack_bytes,

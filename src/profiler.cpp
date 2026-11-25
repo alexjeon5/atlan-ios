@@ -30,7 +30,8 @@ namespace {
 }
 
 GuestProfiler::GuestProfiler() : first_ticks_(ticks()), first_time_(std::chrono::steady_clock::now()) {
-    functions_.push_back({0, "?"});  // code below every known start, and the host as a caller
+    functions_.emplace_back();  // address 0: code below every known start, and the host as a caller
+    functions_.back().name = "?";
     starts_.emplace_back(0, 0);
 }
 
@@ -38,7 +39,8 @@ std::uint32_t GuestProfiler::intern(std::uint32_t address) {
     const auto at = std::lower_bound(starts_.begin(), starts_.end(), std::pair<std::uint32_t, std::uint32_t>{address, 0});
     if (at != starts_.end() && at->first == address) return at->second;
     const auto index = static_cast<std::uint32_t>(functions_.size());
-    functions_.push_back({address, {}});
+    functions_.emplace_back();
+    functions_.back().address = address;
     starts_.insert(at, {address, index});
     ++version_;
     return index;

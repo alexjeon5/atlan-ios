@@ -2,6 +2,7 @@
 #include "atlan/imports.hpp"
 #include "atlan/profiler.hpp"
 #include "atlan/threads.hpp"
+#include <array>
 #include <stdexcept>
 
 namespace atlan {
@@ -18,6 +19,34 @@ void ImportDispatcher::attach(const elf::Image& image) {
     resolved_.clear();
     for (const auto& import : image.trapped_imports)
         if (import.type != 1) traps_[import.address] = import.name;  // not STT_OBJECT
+}
+namespace {
+constexpr std::uint32_t undefined_arm = 0xe7f000f0;  // UDF #0
+constexpr std::uint32_t undefined_thumb = 0xde00;    // UDF #0
+}
+bool ImportDispatcher::patch(Runtime& runtime, std::uint32_t address, std::uint32_t value, unsigned size) {
+    // Code pages are never writable for the guest; the host rewrites one through a short permission change,
+    // which also invalidates every cache of decoded code.
+    const std::uint32_t page = address & ~(Memory::page_size - 1U);
+    std::array<std::byte, 4> bytes{};
+    for (unsigned i = 0; i < size; ++i) bytes[i] = std::byte((value >> (8 * i)) & 255U);
+    runtime.memory.protect(page, Memory::page_size, Permissions::read_write);
+    const bool written = runtime.memory.write(address, std::span<const std::byte>(bytes.data(), size));
+    runtime.memory.protect(page, Memory::page_size, Permissions::read_execute);
+    return written;
+}
+bool ImportDispatcher::replace_function(Runtime& runtime, std::uint32_t address, std::string name, ImportService service) {
+    const bool thumb = (address & 1U) != 0;
+    address &= ~1U;
+    const unsigned size = thumb ? 2 : 4;
+    if (address % size != 0 || hooks_.count(address) != 0) return false;
+    const std::byte* host = runtime.memory.translate(address, MemoryAccess::execute);
+    if (host == nullptr) return false;
+    Hook hook{std::move(name), std::move(service), nullptr, 0, thumb};
+    for (unsigned i = 0; i < size; ++i) hook.original |= std::to_integer<std::uint32_t>(host[i]) << (8 * i);
+    if (!patch(runtime, address, thumb ? undefined_thumb : undefined_arm, size)) return false;
+    hooks_.emplace(address, std::move(hook));
+    return true;
 }
 CallOutcome ImportDispatcher::call(Runtime& runtime, std::uint32_t target,
                                    std::span<const std::uint32_t> arguments,
@@ -173,10 +202,19 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
         slice += result.retired;
         if (result.event == Event::retired) continue;
         result.retired = outcome.retired;
-        if (result.event != Event::memory_fault || result.access != MemoryAccess::execute) return finish(Stop::cpu_event, result);
         const std::uint32_t trap_address = runtime.pc() & ~1U;
         Resolved target;
-        if (const auto known = resolved_.find(trap_address); known != resolved_.end()) {
+        Hook* hook = nullptr;
+        if (result.event == Event::undefined_instruction) {
+            // The undefined instruction a replaced guest function starts with.
+            const auto found = hooks_.find(trap_address);
+            if (found == hooks_.end() || found->second.thumb != runtime.thumb()) return finish(Stop::cpu_event, result);
+            hook = &found->second;
+            if (hook->count == nullptr) hook->count = &counts_[hook->name];
+            target = {&hook->name, &hook->service, hook->count};
+        } else if (result.event != Event::memory_fault || result.access != MemoryAccess::execute) {
+            return finish(Stop::cpu_event, result);
+        } else if (const auto known = resolved_.find(trap_address); known != resolved_.end()) {
             target = known->second;
         } else {
             const auto trap = traps_.find(trap_address);
@@ -197,6 +235,26 @@ CallOutcome ImportDispatcher::run_to_return(Runtime& runtime, std::uint32_t retu
             outcome.import = name;
             outcome.message = std::move(*error);
             return finish(Stop::service_error, result);
+        }
+        if (call.declined()) {
+            if (hook == nullptr) {
+                outcome.import = name;
+                outcome.message = name + " declined a call, which only a replaced guest function can";
+                return finish(Stop::service_error, result);
+            }
+            // Run the instruction the hook displaced in place, then put the hook back.
+            const unsigned size = hook->thumb ? 2 : 4;
+            --*target.count;
+            ++counts_[name + " (declined)"];
+            (void)patch(runtime, trap_address, hook->original, size);
+            Result step = runtime.step();
+            (void)patch(runtime, trap_address, hook->thumb ? undefined_thumb : undefined_arm, size);
+            outcome.retired += step.retired;
+            remaining_ -= step.retired < remaining_ ? step.retired : remaining_;
+            slice += step.retired;
+            if (step.event == Event::retired) continue;
+            step.retired = outcome.retired;
+            return finish(Stop::cpu_event, step);
         }
         if (call.blocked()) {
             if (!threaded) {

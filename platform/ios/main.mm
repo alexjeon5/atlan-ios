@@ -309,6 +309,8 @@
     config.interactive = true;
     config.render_on_demand = true;
     config.perf_log = true;  // the 10-second frame report also lists block cache coverage and the busiest imports
+    // Optional byte signatures for run-time library functions the guest image does not export.
+    config.native_signatures = [self.documentsPath stringByAppendingPathComponent:@"native.sig"].UTF8String;
     {
         // A folder named "profile" in Documents turns the per-function profiler on; its files are written there.
         NSString* profileFolder = [self.documentsPath stringByAppendingPathComponent:@"profile"];

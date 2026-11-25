@@ -51,6 +51,7 @@ x86-64 클라우드 VM(4 vCPU), GCC 13.3 Release, 반복 3회 중 최고값, 합
 - 디스패처가 블록 하나씩 실행하게 되어 체이닝이 꺼진다. 명령 수는 정확하지만 시간에는 측정 비용이 섞이므로 함수끼리 비교하는 용도로만 쓴다. 실행 결과는 바뀌지 않는다.
 - `ATLAN_PROFILE=접두사 atlan-session …`은 단계별로 `접두사.<단계>.tsv`를 쓴다: `init`(생성자·`JNI_OnLoad`·`nativeInit`), surface 호출별, `render`(처음 `ATLAN_FRAMES` 프레임), `frames`(대화형 10초 구간마다, 반복되면 번호가 붙음). iOS 앱은 Documents에 `profile` 폴더가 있으면 그 안에 같은 파일을 쓴다.
 - `tools/profile_report.py 파일.tsv [--frames N] [--top N]`이 self 명령 수, inclusive 명령 수, self 시간 순의 표와 함수별 주요 호출자를 출력한다. 프로파일 파일에는 원본 라이브러리의 심볼과 주소가 들어 있으므로 저장소에 넣지 않는다.
+- 프로파일로 고른 함수를 호스트 구현으로 바꾸는 방법은 [네이티브 대체](native.md)에 있다.
 - `guest-profiler`(`tests/profiler_tests.cpp`)가 합성 게스트(루프 안 직접 호출, 레지스터를 통한 import 호출, 꼬리 호출)로 호출 수·self·inclusive·호출 관계를 확인한다.
 
 ## 차분 테스트

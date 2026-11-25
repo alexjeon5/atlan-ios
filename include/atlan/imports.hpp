@@ -48,6 +48,11 @@ public:
     }
     // The service already set the guest PC (for example thread exit); do not return to LR.
     void transfer() noexcept { transferred_ = true; }
+    // Only for a service that replaces a guest function (ImportDispatcher::replace_function): run the guest's
+    // own code for this call instead. The service must not have changed any guest state. Meant for rare inputs,
+    // because each use drops the block cache.
+    void decline() noexcept { declined_ = true; }
+    [[nodiscard]] bool declined() const noexcept { return declined_; }
     [[nodiscard]] bool blocked() const noexcept { return blocked_; }
     [[nodiscard]] bool transferred() const noexcept { return transferred_; }
     [[nodiscard]] std::uint32_t block_key() const noexcept { return block_key_; }
@@ -59,7 +64,7 @@ private:
     ImportDispatcher& dispatcher_;
     Runtime& runtime_;
     std::string_view name_;
-    bool blocked_{}, transferred_{};
+    bool blocked_{}, transferred_{}, declined_{};
     std::uint32_t block_key_{};
     std::uint64_t block_deadline_{};
 };
@@ -93,6 +98,13 @@ public:
     bool bind_trap(std::uint32_t address, std::string name);
     // Maps an image's trap addresses to symbol names. Function imports only.
     void attach(const elf::Image& image);
+    // Replaces the guest function at `address` (bit 0: Thumb) by a host service: its first instruction becomes a
+    // permanently undefined one, and executing it runs the service with the function's arguments, then returns
+    // to LR as for an import. The service may decline a call (ImportCall::decline), which runs the original
+    // code. Calls are counted under `name` with the imports. False if the address is not executable guest code
+    // or already replaced.
+    bool replace_function(Runtime& runtime, std::uint32_t address, std::string name, ImportService service);
+    [[nodiscard]] bool replaces(std::uint32_t address) const noexcept { return hooks_.count(address & ~1U) != 0; }
 
     // Scalar AAPCS32 call with import dispatch. `budget` bounds every instruction
     // retired, including nested guest callbacks made by services.
@@ -107,7 +119,11 @@ public:
     [[nodiscard]] std::uint64_t remaining_budget() const noexcept { return remaining_; }
     // Diagnostics: how often each import ran since the last reset (for telling a spin/wait loop from long work).
     [[nodiscard]] const std::unordered_map<std::string, std::uint64_t>& import_counts() const noexcept { return counts_; }
-    void reset_import_counts() { counts_.clear(); resolved_.clear(); }
+    void reset_import_counts() {
+        counts_.clear();
+        resolved_.clear();
+        for (auto& [address, hook] : hooks_) hook.count = nullptr;
+    }
 
     // Attaches the guest thread scheduler (optional). Without one the dispatcher runs a
     // single guest thread and blocking services report a deadlock diagnostic instead.
@@ -146,6 +162,15 @@ private:
         std::uint64_t* count{};
     };
     std::unordered_map<std::uint32_t, Resolved> resolved_;
+    struct Hook {
+        std::string name;
+        ImportService service;
+        std::uint64_t* count{};   // into counts_, looked up again after a reset
+        std::uint32_t original{};  // the instruction the undefined one replaced
+        bool thumb{};
+    };
+    std::unordered_map<std::uint32_t, Hook> hooks_;  // function address without bit 0
+    [[nodiscard]] static bool patch(Runtime& runtime, std::uint32_t address, std::uint32_t value, unsigned size);
     std::uint32_t return_target_{};
     std::uint64_t remaining_{};
     unsigned depth_{};
