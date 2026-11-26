@@ -48,6 +48,19 @@ private:
     std::uint64_t dropped_{};
 };
 
+// Notices when location fixes stop coming. After the last real fix, once `silence_ms` has passed without another, lost()
+// returns a "no fix" copy of it (accuracy_m = -1, time advanced by the elapsed host time) every `period_ms`, as a GPS
+// receiver goes on reporting each second without a position. A fix with a negative accuracy is itself a lost fix.
+class LocationWatch {
+public:
+    static constexpr std::uint64_t silence_ms = 3000, period_ms = 1000;
+    void observe(const LocationFix& fix, std::uint64_t now_ms);
+    [[nodiscard]] std::optional<LocationFix> lost(std::uint64_t now_ms);
+private:
+    std::optional<LocationFix> last_;
+    std::uint64_t last_ms_{}, next_ms_{};
+};
+
 // View point (origin top-left) to guest surface pixels, for a surface shown in `shown` (see fit_rect). Points outside
 // `shown` clamp to the surface edge.
 struct SurfacePoint { float x{}, y{}; };
@@ -96,10 +109,20 @@ struct InputBindings {
 [[nodiscard]] std::optional<InputBindings> load_input_bindings(const std::string& path, std::string& error);
 
 // NMEA 0183 sentences for a fix, with checksum and trailing CR LF, as a GPS receiver reports them through Android's
-// NMEA listener (one sentence per message). CoreLocation gives no satellite data, so all of them describe the same
-// nominal sky of 8 GPS satellites in use: GGA fix quality 1 with 8 satellites, GSA a 3D fix with their numbers, GSV
-// their positions and signal strengths (two sentences). HDOP is estimated as accuracy / 5 m (0.5 to 50). Unknown
-// speed is 0, unknown course is an empty field. Time is the fix time in UTC.
+// NMEA listener (one sentence per message). CoreLocation gives no satellite data, so the sky is derived from the
+// fix's horizontal accuracy (see sky_for): the smaller the error, the more satellites in use and the stronger their
+// signals. All four sentences describe the same sky. HDOP is accuracy / 5 m (0.5 to 50). A fix with an accuracy
+// above 100 m reports no position fix (GGA quality 0, GSA fix type 1, RMC status V) with a few weak satellites in
+// view; a negative accuracy (signal lost) reports no satellites at all. Without a fix the last position stays in the
+// fields. Unknown speed is 0, unknown course is an empty field. Time is the fix time in UTC.
+struct SkySatellite { int prn, elevation, azimuth, snr; bool used; };
+struct Sky {
+    bool fix{};                       // a position fix
+    double hdop{};
+    std::vector<SkySatellite> view;   // satellites in view, those in use first
+    [[nodiscard]] int used() const noexcept;
+};
+[[nodiscard]] Sky sky_for(const LocationFix& fix);
 [[nodiscard]] std::string nmea_gga(const LocationFix& fix);
 [[nodiscard]] std::string nmea_gsa(const LocationFix& fix);
 [[nodiscard]] std::vector<std::string> nmea_gsv(const LocationFix& fix);

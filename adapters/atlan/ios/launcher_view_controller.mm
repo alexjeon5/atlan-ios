@@ -6,6 +6,8 @@
 #import "launcher_text.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "adapters/atlan/data_status.hpp"
+#include "shell/coordinate.hpp"
+#include <cmath>
 #include <algorithm>
 #include <initializer_list>
 #include <memory>
@@ -32,6 +34,15 @@ NSString* dates(std::initializer_list<const std::string*> values) {
     std::string joined;
     for (const auto& value : distinct) joined += (joined.empty() ? "" : " / ") + value;
     return ns(joined);
+}
+
+// The developer setting's fixed position and heading, as the fields show them.
+NSString* pinnedCoordinate() {
+    LauncherSettings* settings = LauncherSettings.shared;
+    return [NSString stringWithFormat:@"%.6f, %.6f", settings.pinnedLatitude, settings.pinnedLongitude];
+}
+NSString* pinnedCourse() {
+    return [NSString stringWithFormat:@"%g°", LauncherSettings.shared.pinnedCourse];
 }
 
 NSString* launcherVersion() {
@@ -130,6 +141,12 @@ std::string fingerprint(const AtlanDataStatus& s) {
     }
     _top.constant = portrait ? 0 : 16;  // upright the status bar's safe area already leaves room
     if (portrait != _shownPortrait) [self render];
+}
+
+- (void)setStopped:(BOOL)stopped {
+    if (_stopped == stopped) return;
+    _stopped = stopped;
+    if (self.isViewLoaded) [self render];
 }
 
 - (void)setRunning:(BOOL)running {
@@ -269,6 +286,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
 - (UIView*)buildScreen {
     LauncherSettings* settings = LauncherSettings.shared;
     if (_shown == Screen::settings) return [self settingsScreen];
+    if (_stopped) return [self startScreen];
     if (!_running && settings.needsFolderChoice) return [self chooseScreen];
     if (!_running && !settings.setupDone && !_status.ready()) return [self welcomeScreen];
     if (!_running && _status.ready() && !settings.autoStartAsked) return [self autoStartScreen];
@@ -526,8 +544,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                             radius:m.cardRadius];
     [card addAction:[UIAction actionWithHandler:^(UIAction*) { [weakSelf openSettings:Tab::map]; }]
    forControlEvents:UIControlEventTouchUpInside];
-    LKStartButton* start = [[LKStartButton alloc] initWithTitle:_running ? text::resume : text::start];
-    start.enabled = ready || _running;
+    LKStartButton* start = [[LKStartButton alloc] initWithTitle:_stopped ? text::reopen : _running ? text::resume : text::start];
+    start.enabled = ready || _running || _stopped;
     [start addAction:[UIAction actionWithHandler:^(UIAction*) { [weakSelf startNavigation]; }]
     forControlEvents:UIControlEventTouchUpInside];
     UIButton* gear = LKButton(text::settings, @"slider.horizontal.3", LKButtonSecondary, m.settingsButton,
@@ -784,11 +802,33 @@ std::string fingerprint(const AtlanDataStatus& s) {
 - (UIView*)developerPane {
     const auto& m = LauncherMetrics::current();
     LauncherSettings* settings = LauncherSettings.shared;
-    return LKScroll(LKGroup(@[
-        LKSwitchRow(text::session_log, text::session_log_detail, settings.sessionLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.sessionLog = on; }),
-        LKSwitchRow(text::perf_log, text::perf_log_detail, settings.perfLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.perfLog = on; }),
-        LKSwitchRow(text::net_log, text::net_log_detail, settings.networkLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.networkLog = on; }),
-        LKSwitchRow(text::profiler, text::profiler_detail, settings.profiler, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.profiler = on; }),
-    ]));
+    return LKScroll(LKColumn(@[
+        [self sectionCaption:text::section_logs top:0],
+        LKGroup(@[
+            LKSwitchRow(text::session_log, text::session_log_detail, settings.sessionLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.sessionLog = on; }),
+            LKSwitchRow(text::perf_log, text::perf_log_detail, settings.perfLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.perfLog = on; }),
+            LKSwitchRow(text::net_log, text::net_log_detail, settings.networkLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.networkLog = on; }),
+            LKSwitchRow(text::profiler, text::profiler_detail, settings.profiler, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.profiler = on; }),
+        ]),
+        [self sectionCaption:text::section_location top:12],
+        LKGroup(@[
+            LKSwitchRow(text::pin_location, text::pin_location_detail, settings.pinLocation, m.settingsRow,
+                        ^(BOOL on) { LauncherSettings.shared.pinLocation = on; }),
+            LKListRow(text::coordinate, text::coordinate_detail, LKField(pinnedCoordinate(), m.value * 14, UIKeyboardTypeNumbersAndPunctuation,
+                                                                        ^NSString*(NSString* typed) {
+                if (const auto point = atlan::shell::parse_coordinate(typed.UTF8String ?: ""))
+                    [LauncherSettings.shared setPinnedLatitude:point->latitude longitude:point->longitude];
+                return pinnedCoordinate();
+            }), m.settingsRow, NO, nil),
+            LKListRow(text::course, text::course_detail, LKField(pinnedCourse(), m.value * 5, UIKeyboardTypeNumbersAndPunctuation,
+                                                                ^NSString*(NSString* typed) {
+                NSScanner* scanner = [NSScanner scannerWithString:typed];
+                double degrees = 0;
+                if ([scanner scanDouble:&degrees] && std::isfinite(degrees) && degrees >= 0 && degrees <= 360)
+                    LauncherSettings.shared.pinnedCourse = degrees == 360 ? 0 : degrees;
+                return pinnedCourse();
+            }), m.settingsRow, NO, nil),
+        ]),
+    ], 0));
 }
 @end
