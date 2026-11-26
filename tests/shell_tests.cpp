@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "adapters/atlan/quad_geometry.hpp"
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/guest_ini.hpp"
@@ -225,8 +226,29 @@ void adapter_sessions() {
     check(adapter->deliveries >= 3, "deliveries run before every frame");
 }
 }
+// The app's geometry as the host computes it (the comparison with the guest's own code runs at install).
+void quad_geometry() {
+    using namespace atlan::shell::geometry;
+    check(orientation({0, 0}, {1, 0}, {0, 1}) == 1 && orientation({0, 0}, {0, 1}, {1, 0}) == -1, "orientation sign");
+    check(orientation({0, 0}, {2, 2}, {5, 5}) == 0, "collinear points");
+    check(orientation({0, 0}, {65536, 0}, {0, 65536}) == 0, "the cross product wraps at 32 bits");
+    check(segment_relation({0, 0}, {2, 2}, {0, 2}, {2, 0}) == 1, "crossing segments");
+    check(segment_relation({0, 0}, {1, 0}, {0, 1}, {1, 1}) == -1, "parallel segments apart");
+    check(segment_relation({0, 0}, {2, 0}, {2, 0}, {3, 1}) == 0, "segments touching at an end");
+    check(segment_relation({2, 0}, {0, 0}, {3, 1}, {2, 0}) == 0, "ends given in either order");
+    check(segment_relation({0, 0}, {1, 0}, {5, 0}, {6, 0}) == 0, "collinear segments compare one end only, as the app does");
+    const std::array<Point, 4> square{Point{0, 0}, Point{10, 0}, Point{10, 10}, Point{0, 10}};
+    check(inside_polygon(square, {5, 5}) == 1 && inside_polygon(square, {15, 5}) == 0 && inside_polygon(square, {5, -1}) == 0, "point in polygon");
+    auto o = rectangle_overlap(square, {2, 2}, {4, 4});
+    check(o.any && o.corners && o.low == Point{2, 2} && o.high == Point{4, 4}, "a rectangle inside the quad");
+    o = rectangle_overlap(square, {5, 5}, {15, 15});
+    check(o.any && !o.corners && o.low == Point{5, 5} && o.high == Point{10, 10} && o.points.size() == 4, "the overlap of a corner of the rectangle");
+    o = rectangle_overlap(square, {20, 20}, {30, 30});
+    check(!o.any && o.points.empty(), "no overlap");
+}
 int main() {
     try {
+        quad_geometry();
         scratch = fs::temp_directory_path() / ("atlan-shell-" + std::to_string(::getpid()));
         fs::create_directories(scratch);
         {
