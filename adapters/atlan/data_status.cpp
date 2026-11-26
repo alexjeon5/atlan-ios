@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/data_status.hpp"
 #include "shell/app_package.hpp"
+#include "shell/sha256.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <tuple>
 
 namespace atlan::shell {
 namespace {
 namespace fs = std::filesystem;
 
-constexpr std::array<VerifiedApp, 2> verified{{{"Atlan5", "8.2.35"}, {"Atlan3DA", "6.4.21"}}};
 constexpr std::string_view trailer_tag = "ATLANVERINFO";
 constexpr std::size_t trailer_size = 48, trailer_tag_size = 32;
 
@@ -129,11 +132,32 @@ std::vector<std::string> find_atlan_folders(const std::string& parent) {
     return found;
 }
 
-std::span<const VerifiedApp> verified_apps() noexcept { return verified; }
-
-bool is_verified(const AtlanDataStatus& status) noexcept {
-    return std::any_of(verified.begin(), verified.end(), [&](const VerifiedApp& app) {
-        return app.name == status.app_name && app.version == status.app_version;
-    });
+std::string package_library_sha256(const std::string& folder) {
+    const auto path = find_package_in(folder);
+    if (path.empty()) return {};
+    std::error_code error;
+    const auto size = fs::file_size(path, error);
+    if (error) return {};
+    const auto modified = fs::last_write_time(path, error);
+    if (error) return {};
+    static std::mutex lock;
+    static std::map<std::string, std::tuple<std::uintmax_t, fs::file_time_type, std::string>> known;
+    {
+        std::lock_guard guard(lock);
+        if (const auto it = known.find(path); it != known.end() && std::get<0>(it->second) == size && std::get<1>(it->second) == modified)
+            return std::get<2>(it->second);
+    }
+    std::string digest;
+    try {
+        std::ifstream input(path, std::ios::binary);
+        std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+        if (input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+            digest = sha256_hex(open_package(bytes).library);
+    } catch (const std::exception&) {
+        digest.clear();  // a damaged package has no digest; the session reports what is wrong with it
+    }
+    std::lock_guard guard(lock);
+    known[path] = {size, modified, digest};
+    return digest;
 }
 }

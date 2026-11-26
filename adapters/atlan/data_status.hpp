@@ -41,10 +41,8 @@ struct AtlanDataStatus {
 // The date in a data file's version trailer as YY.MM.DD; empty when the file or its trailer is missing.
 [[nodiscard]] std::string read_data_version(const std::string& path);
 
-// App builds this launcher has been run with.
-struct VerifiedApp {
-    std::string_view name, version;
-};
-[[nodiscard]] std::span<const VerifiedApp> verified_apps() noexcept;
-[[nodiscard]] bool is_verified(const AtlanDataStatus& status) noexcept;
+// SHA-256 of the native library in the ATLAN folder's app package (the one the session would run); empty when there
+// is no readable package. The package is read and unpacked in full, so the result is kept per path, size and
+// modification time and checking the same package again costs only finding it.
+[[nodiscard]] std::string package_library_sha256(const std::string& folder);
 }

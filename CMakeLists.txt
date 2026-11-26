@@ -34,12 +34,12 @@ target_link_libraries(atlan_runtime PRIVATE kernarium_aarch32)
 target_compile_options(atlan_runtime PRIVATE -Wall -Wextra -Werror)
 
 # Engine side of the embedding: the guest session and app-neutral host plumbing (docs/engine-adapter.md).
-add_library(atlan_shell STATIC shell/data_file.cpp shell/log_file.cpp shell/input.cpp shell/session.cpp shell/http_client.cpp)
+add_library(atlan_shell STATIC shell/data_file.cpp shell/json.cpp shell/sha256.cpp shell/log_file.cpp shell/input.cpp shell/session.cpp shell/http_client.cpp)
 target_include_directories(atlan_shell PUBLIC .)
 target_link_libraries(atlan_shell PUBLIC atlan_runtime)
 target_compile_options(atlan_shell PRIVATE -Wall -Wextra -Werror)
 # The Atlan app adapter. Some of its files still live under shell/ until the directory move (engine-adapter.md step 5).
-add_library(atlan_adapter STATIC adapters/atlan/atlan_adapter.cpp adapters/atlan/charset_conversion.cpp adapters/atlan/data_status.cpp adapters/atlan/quad_geometry.cpp adapters/atlan/speed_readout.cpp shell/app_package.cpp shell/guest_ini.cpp shell/java_services.cpp)
+add_library(atlan_adapter STATIC adapters/atlan/atlan_adapter.cpp adapters/atlan/charset_conversion.cpp adapters/atlan/data_status.cpp adapters/atlan/quad_geometry.cpp adapters/atlan/speed_readout.cpp adapters/atlan/verified_versions.cpp shell/app_package.cpp shell/guest_ini.cpp shell/java_services.cpp)
 target_link_libraries(atlan_adapter PUBLIC atlan_shell)
 target_compile_options(atlan_adapter PRIVATE -Wall -Wextra -Werror)
 
@@ -204,6 +204,7 @@ if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT ANDROID)
   add_executable(package-tests tests/package_tests.cpp)
   target_link_libraries(package-tests PRIVATE atlan_adapter)
   target_compile_options(package-tests PRIVATE -Wall -Wextra -Werror)
+  target_compile_definitions(package-tests PRIVATE ATLAN_VERIFIED_LIST="${CMAKE_CURRENT_SOURCE_DIR}/adapters/atlan/verified_versions.json")
   add_test(NAME guest-package-correctness COMMAND package-tests)
   add_executable(input-tests tests/input_tests.cpp)
   target_link_libraries(input-tests PRIVATE atlan_shell)

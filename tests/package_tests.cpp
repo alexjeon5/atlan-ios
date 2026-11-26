@@ -3,6 +3,9 @@
 // launcher's view of a synthetic data folder.
 #include "shell/app_package.hpp"
 #include "adapters/atlan/data_status.hpp"
+#include "adapters/atlan/verified_versions.hpp"
+#include "shell/json.hpp"
+#include "shell/sha256.hpp"
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -244,7 +247,9 @@ void data_status(const fs::path& scratch) {
     status = inspect_atlan_data(atlan.string());
     check(status.ready(), "all four folders and a package make a ready folder");
     check(status.app_name == "Atlan3DA" && status.app_version == "6.4.21" && status.app_label() == "Atlan3DA 6.4.21", "the app's name and version");
-    check(is_verified(status), "a listed build is verified");
+    const auto digest = package_library_sha256(atlan.string());
+    check(digest == atlan::shell::sha256_hex(elf_like(3)), "the digest is the native library's, not the package's");
+    check(package_library_sha256(atlan.string()) == digest, "a package checked again gives the same digest");
     check(status.map == "26.10.20", "a data file's trailer date");
     check(status.route.empty() && status.search.empty() && status.safety_main.empty() && status.safety_sub.empty(),
           "a wrong tag, a missing file, a short date and a short file give no version");
@@ -253,8 +258,84 @@ void data_status(const fs::path& scratch) {
     const auto sets = find_atlan_folders(picked.string());
     check(sets.size() == 2 && sets[0] == (picked / "ATLAN_RTA").string() && sets[1] == atlan.string(),
           "several data sets side by side are found by their top folders, other folders are not");
-    write(atlan / "app" / "Atlan3d.inf", bytes("Atlan5 (9.9.9)"));
-    check(!is_verified(inspect_atlan_data(atlan.string())), "an unlisted build is not verified");
+    write(atlan / "app" / "atlan.dat", encode_dat(zip({{"lib/armeabi/libatlan3dv5.so", elf_like(4), {}}}), bytes({1, 2, 3, 4}), bytes({1, 6, 4, 21})));
+    fs::last_write_time(atlan / "app" / "atlan.dat", fs::last_write_time(atlan / "app" / "atlan.dat") + std::chrono::seconds(5));
+    check(package_library_sha256(atlan.string()) == atlan::shell::sha256_hex(elf_like(4)), "a replaced package is hashed again");
+    write(atlan / "app" / "atlan.dat", bytes("not a package at all"));
+    check(package_library_sha256(atlan.string()).empty(), "a broken package has no digest");
+    check(package_library_sha256((picked / "ATLAN_RTA").string()).empty(), "a folder without a package has no digest");
+}
+}
+
+// FIPS 180-4 example vectors, and a long input fed in uneven pieces.
+void digests() {
+    using atlan::shell::sha256_hex;
+    check(sha256_hex({}) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "empty input");
+    check(sha256_hex(bytes(std::string("abc"))) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "abc");
+    check(sha256_hex(bytes(std::string("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))) ==
+              "248d6a61d20638b8e5c0262693c936e2fa7ead2b1ab95c4e76b2d15a8e6cd8c1", "two blocks");
+    const Bytes million(1000000, std::byte{'a'});
+    atlan::shell::Sha256 pieces;
+    for (std::size_t at = 0; at < million.size();) {
+        const auto n = std::min<std::size_t>(million.size() - at, 1 + at % 97);
+        pieces.update(std::span(million).subspan(at, n));
+        at += n;
+    }
+    check(pieces.hex() == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", "a million a's in pieces");
+}
+
+void json() {
+    using atlan::shell::JsonValue;
+    using atlan::shell::parse_json;
+    std::string why;
+    const auto doc = parse_json(R"( {"a": [1, -2.5e1, true, false, null], "s": "\u00e9\ud83d\ude00\n\"", "o": {}} )", why);
+    check(doc && doc->kind == JsonValue::Kind::object, "an object");
+    const auto* a = doc->find("a");
+    check(a && a->array.size() == 5 && a->array[0].number == 1 && a->array[1].number == -25 && a->array[2].boolean &&
+          a->array[3].kind == JsonValue::Kind::boolean && !a->array[3].boolean && a->array[4].kind == JsonValue::Kind::null, "array members");
+    check(doc->find("s")->string == "\xc3\xa9\xf0\x9f\x98\x80\n\"", "escapes and surrogate pairs become UTF-8");
+    check(doc->find("o")->kind == JsonValue::Kind::object && !doc->find("missing") && !a->find("a"), "lookups");
+    for (const char* bad : {"", "{", "[1,]", "{\"a\":1,}", "{\"a\":1 \"b\":2}", "{\"a\":1,\"a\":2}", "01", "1.", "-", "tru",
+                            "\"\\x\"", "\"\\ud800\"", "\"a\nb\"", "[1] 2", "// c\n1", "1e999"}) {
+        why.clear();
+        check(!parse_json(bad, why) && !why.empty(), "malformed JSON is rejected with a reason");
+    }
+    check(!parse_json(std::string(40, '[') + std::string(40, ']'), why), "deep nesting is rejected");
+}
+
+void verified_lists() {
+    using atlan::shell::parse_verified_list;
+    const std::string a(64, 'a'), b(64, 'b');
+    std::string why;
+    const auto list = parse_verified_list(R"({"format": 1, "updated": "2026-11-26", "builds": [
+        {"name": "AppA", "version": "1.2.3", "sha256": ")" + a + R"("},
+        {"name": "AppB", "version": "4.5", "sha256": ")" + b + R"("}]})", why);
+    check(list && list->updated == "2026-11-26" && list->builds.size() == 2, "a list");
+    check(list->find(b) && list->find(b)->name == "AppB" && list->find(b)->version == "4.5" && !list->find(std::string(64, 'c')),
+          "builds are found by digest");
+    check(parse_verified_list(R"({"format": 1, "updated": "2026-01-01", "builds": []})", why).has_value(), "an empty list is a list");
+    const auto rejects = [&](const std::string& doc, const char* message) {
+        why.clear();
+        check(!parse_verified_list(doc, why) && !why.empty(), message);
+    };
+    const auto entry = [](const std::string& fields) { return R"({"format": 1, "updated": "2026-11-26", "builds": [{)" + fields + "}]}"; };
+    rejects(R"({"format": 2, "updated": "2026-11-26", "builds": []})", "a newer format");
+    rejects(R"({"format": 1, "updated": "26.11.26", "builds": []})", "a malformed date");
+    rejects(R"({"format": 1, "updated": "2026-11-26", "builds": {}})", "builds that are no array");
+    rejects(R"({"format": 1, "updated": "2026-11-26", "builds": [], "url": "x"})", "an unknown top-level key");
+    rejects(entry(R"("name": "A", "version": "1", "sha256": ")" + a + R"(", "url": "https://example.invalid/a.apk")"), "a download address");
+    rejects(entry(R"("name": "A", "version": "1", "sha256": ")" + std::string(64, 'A') + R"(")"), "an upper-case digest");
+    rejects(entry(R"("name": "A", "version": "1", "sha256": "abc")"), "a short digest");
+    rejects(entry(R"("version": "1", "sha256": ")" + a + R"(")"), "a build without a name");
+    rejects(R"({"format": 1, "updated": "2026-11-26", "builds": [{"name": "A", "version": "1", "sha256": ")" + a +
+                R"("}, {"name": "B", "version": "2", "sha256": ")" + a + R"("}]})", "a repeated digest");
+    // The file the launcher fetches from this repository must stay valid (and so free of any other key).
+    std::ifstream file(ATLAN_VERIFIED_LIST);
+    const std::string published((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    why.clear();
+    const auto repository = parse_verified_list(published, why);
+    if (!repository) throw std::runtime_error("adapters/atlan/verified_versions.json: " + why);
+    check(!repository->builds.empty(), "the published list names at least one build");
 }
 }
 
@@ -266,6 +347,9 @@ int main() {
         packages();
         discovery(scratch);
         data_status(scratch);
+        digests();
+        json();
+        verified_lists();
         fs::remove_all(scratch);
         std::cout << "package tests passed: " << checks << " checks\n";
     } catch (const std::exception& error) {
