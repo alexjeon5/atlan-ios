@@ -448,6 +448,7 @@ void GuestSession::run() {
             std::map<const NativeBinding*, BoundNative> bound;
             std::map<std::pair<const NativeBinding*, std::size_t>, std::uint32_t> text_arguments;  // reused String objects
             std::set<std::string> input_notes;
+            LocationWatch location_watch;
             const auto note = [&](const std::string& line) { if (input_notes.insert(line).second) log_(line); };
             const auto resolve = [&](const NativeBinding& b) -> BoundNative {
                 if (const auto it = bound.find(&b); it != bound.end()) return it->second;
@@ -462,7 +463,17 @@ void GuestSession::run() {
             const auto deliver_input = [&]() -> bool {
                 if (!adapter.deliver(host)) return false;  // what the app's Java side delivers (replies, state)
                 if (!config_.input) return true;
-                for (const auto& event : config_.input->drain()) {
+                auto events = config_.input->drain();
+                // A receiver keeps reporting once a second after it loses the sky (tunnels, garages): when fixes stop
+                // arriving, the guest is told so instead of seeing the last fix frozen.
+                const auto now_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                bool fresh_fix = false;
+                for (const auto& event : events)
+                    if (const auto* fix = std::get_if<LocationFix>(&event)) { location_watch.observe(*fix, now_ms); fresh_fix = true; }
+                if (!fresh_fix && !config_.input_bindings.location.empty())
+                    if (const auto lost = location_watch.lost(now_ms)) events.emplace_back(*lost);
+                for (const auto& event : events) {
                     const bool touch = std::holds_alternative<TouchEvent>(event);
                     const auto bindings = config_.input_bindings.matching(event);
                     if (bindings.empty()) note(std::string("input: no binding for ") + (touch ? "touch" : "location") + " events");

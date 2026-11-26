@@ -159,22 +159,63 @@ void nmea() {
     };
     const auto gga = nmea_gga(fix), rmc = nmea_rmc(fix);
     check(valid(gga) && valid(rmc), "sentences carry a correct checksum and CR LF");
-    check(gga.starts_with("$GPGGA,221320.12,3733.9900,N,12658.6800,E,1,08,1.0,38.3,M,0.0,M,,*"), "GGA fields");
+    check(gga.starts_with("$GPGGA,221320.12,3733.9900,N,12658.6800,E,1,11,1.0,38.3,M,0.0,M,,*"), "GGA fields: 5 m uses 11 satellites");
     check(rmc.starts_with("$GPRMC,221320.12,A,3733.9900,N,12658.6800,E,19.44,271.60,141123,,,A*"), "RMC fields");
-    const LocationFix south{-33.999999999, -0.5, 0, -1, -1, 500, 951782400000ULL};  // 2000-02-29 00:00:00 UTC
-    check(nmea_gga(south).starts_with("$GPGGA,000000.00,3400.0000,S,00030.0000,W,1,08,50.0,0.0,M"), "minutes carry into degrees; hemispheres; HDOP bound");
+    const LocationFix south{-33.999999999, -0.5, 0, -1, -1, 50, 951782400000ULL};  // 2000-02-29 00:00:00 UTC
+    check(nmea_gga(south).starts_with("$GPGGA,000000.00,3400.0000,S,00030.0000,W,1,05,10.0,0.0,M"), "minutes carry into degrees; hemispheres; 50 m uses 5");
     check(nmea_rmc(south).starts_with("$GPRMC,000000.00,A,3400.0000,S,00030.0000,W,0.00,,290200,,,A*"), "unknown speed and course; leap day");
 
-    // Satellites: the same 8 in GGA, GSA (3D fix, NMEA 4.1 system id) and GSV (two sentences of four).
+    // The sky follows the accuracy: fewer satellites and weaker signals as the error grows.
+    const auto sky_at = [&](double accuracy) { LocationFix f = fix; f.accuracy_m = accuracy; return sky_for(f); };
+    int previous = 99;
+    for (double accuracy : {2.0, 5.0, 8.0, 12.0, 17.0, 24.0, 34.0, 49.0, 69.0, 99.0}) {
+        const auto sky = sky_at(accuracy);
+        check(sky.fix && sky.used() >= 3 && sky.used() < previous && sky.view.size() == static_cast<std::size_t>(sky.used() + 2),
+              "a fix keeps at least 3 satellites in use, fewer as the error grows");
+        previous = sky.used();
+    }
+    check(sky_at(3).view[0].snr > sky_at(40).view[0].snr, "signals weaken as the error grows");
+    const auto weak = sky_at(150);
+    check(!weak.fix && weak.used() == 0 && weak.view.size() == 4, "beyond 100 m: no fix, a few weak satellites in view");
+    const auto lost = sky_at(-1);
+    check(!lost.fix && lost.view.empty() && lost.hdop == 99.9, "a negative accuracy is a lost signal");
+
+    // GSA, GSV and GGA agree on the satellites.
     const auto gsa = nmea_gsa(fix);
-    check(valid(gsa) && gsa.starts_with("$GPGSA,A,3,02,05,12,15,18,21,24,29,,,,,1.5,1.0,1.2,1*"), "GSA fields");
+    check(valid(gsa) && gsa.starts_with("$GPGSA,A,3,15,02,10,21,05,26,29,12,18,08,24,,1.5,1.0,1.2,1*"), "GSA lists the satellites in use");
     const auto fields = [](const std::string& s) { return 1 + std::count(s.begin(), s.end(), ','); };
     check(fields(gsa) == 19, "GSA has 18 fields after its name");
     const auto gsv = nmea_gsv(fix);
-    check(gsv.size() == 2 && valid(gsv[0]) && valid(gsv[1]), "GSV is two valid sentences");
-    check(gsv[0].starts_with("$GPGSV,2,1,08,02,62,040,44,05,45,110,42,12,30,200,38,15,72,300,45*"), "first GSV sentence");
-    check(gsv[1].starts_with("$GPGSV,2,2,08,18,25,330,35,21,50,160,41,24,15,080,32,29,38,250,39*"), "second GSV sentence");
-    check(nmea_gsa(south).find(",75.0,50.0,60.0,1*") != std::string::npos, "GSA dilutions follow the HDOP bound");
+    check(gsv.size() == 4 && valid(gsv[0]) && valid(gsv[3]), "13 satellites in view take four GSV sentences");
+    check(gsv[0].starts_with("$GPGSV,4,1,13,15,72,300,46,02,62,040,45,10,55,020,44,21,50,160,43*"), "first GSV sentence");
+    check(gsv[3].starts_with("$GPGSV,4,4,13,31,08,060,19*"), "last GSV sentence holds the rest; unused satellites are weaker");
+
+    LocationFix far = fix;
+    far.accuracy_m = 150;
+    check(nmea_gga(far).find(",E,0,00,30.0,") != std::string::npos, "no fix: GGA quality 0 and no satellites in use");
+    check(nmea_gsa(far).starts_with("$GPGSA,A,1,,,,,,,,,,,,,99.9,99.9,99.9,1*"), "no fix: GSA fix type 1");
+    check(nmea_rmc(far).starts_with("$GPRMC,221320.12,V,3733.9900,N,12658.6800,E,,,141123,,,N*"), "no fix: RMC status V keeps the last position");
+    LocationFix gone = fix;
+    gone.accuracy_m = -1;
+    check(nmea_gsv(gone) == std::vector<std::string>{nmea_gsv(gone)[0]} && nmea_gsv(gone)[0].starts_with("$GPGSV,1,1,00*"), "lost: one empty GSV sentence");
+    check(nmea_gga(gone).find(",E,0,00,99.9,") != std::string::npos, "lost: GGA without satellites");
+}
+
+void location_watch() {
+    LocationWatch watch;
+    check(!watch.lost(100000), "nothing to report before the first fix");
+    const LocationFix fix{37.5, 127.0, 30, 10, 90, 5, 1700000000000ULL};
+    watch.observe(fix, 1000);
+    check(!watch.lost(3999), "quiet for less than 3 s is not a loss");
+    const auto first = watch.lost(4000);
+    check(first && first->accuracy_m < 0 && first->latitude == 37.5 && first->time_ms == 1700000003000ULL && first->speed_mps < 0,
+          "after 3 s the last position is reported without a fix, its time moving on");
+    check(!watch.lost(4500) && watch.lost(5000) && !watch.lost(5999) && watch.lost(6000), "then once a second");
+    check(watch.lost(20000) && !watch.lost(20999) && watch.lost(21000), "a long stall brings one report, not a burst");
+    watch.observe(*first, 21500);
+    check(watch.lost(22000).has_value(), "its own lost fixes do not count as fixes");
+    watch.observe(fix, 22100);
+    check(!watch.lost(25000) && watch.lost(25100), "a new fix restarts the wait");
 }
 
 void delivery() {
@@ -249,6 +290,7 @@ int main() {
         queue();
         bindings_text();
         nmea();
+        location_watch();
         delivery();
         std::cout << "input tests passed: " << checks << " checks\n";
     } catch (const std::exception& error) {

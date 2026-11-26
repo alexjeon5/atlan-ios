@@ -213,45 +213,85 @@ std::string clock(const UtcTime& t) {
     return out;
 }
 
-// The nominal sky every sentence describes (see nmea_gga): PRN, elevation and azimuth in degrees, C/N0 in dB-Hz.
-struct Satellite { int prn, elevation, azimuth, snr; };
-constexpr Satellite sky[] = {{2, 62, 40, 44},  {5, 45, 110, 42},  {12, 30, 200, 38}, {15, 72, 300, 45},
-                             {18, 25, 330, 35}, {21, 50, 160, 41}, {24, 15, 80, 32},  {29, 38, 250, 39}};
-constexpr int sky_size = static_cast<int>(sizeof sky / sizeof sky[0]);
-double hdop(const LocationFix& fix) { return std::clamp(fix.accuracy_m / 5.0, 0.5, 50.0); }
+// Satellites a receiver might see, strongest first: PRN, elevation and azimuth in degrees, clear-sky C/N0 in dB-Hz.
+struct Orbit { int prn, elevation, azimuth, snr; };
+constexpr Orbit orbits[] = {{15, 72, 300, 47}, {2, 62, 40, 46},   {10, 55, 20, 45},  {21, 50, 160, 44}, {5, 45, 110, 43},
+                            {26, 35, 280, 42}, {29, 38, 250, 41}, {12, 30, 200, 40}, {18, 25, 330, 38}, {8, 20, 140, 36},
+                            {24, 15, 80, 34},  {13, 12, 220, 32}, {31, 8, 60, 28},   {20, 5, 310, 25}};
+constexpr int orbit_count = static_cast<int>(sizeof orbits / sizeof orbits[0]);
+constexpr double no_fix_accuracy_m = 100.0;
+constexpr double no_dop = 99.9;
+std::string dop(double value) {
+    char out[16];
+    std::snprintf(out, sizeof out, "%.1f", value);
+    return out;
+}
+}
+
+int Sky::used() const noexcept {
+    return static_cast<int>(std::count_if(view.begin(), view.end(), [](const SkySatellite& s) { return s.used; }));
+}
+
+Sky sky_for(const LocationFix& fix) {
+    Sky sky;
+    const double accuracy = fix.accuracy_m;
+    if (!(accuracy >= 0)) { sky.hdop = no_dop; return sky; }  // signal lost: nothing in view
+    sky.hdop = std::clamp(accuracy / 5.0, 0.5, 50.0);
+    // Satellites in use for a horizontal error: open sky (a few metres) uses about 12, an urban canyon or the edge of a
+    // tunnel 3 to 5; beyond 100 m there is no satellite fix at all, only a few weak signals.
+    static constexpr std::pair<double, int> in_use[] = {{4, 12}, {6, 11}, {9, 10}, {13, 9}, {18, 8},
+                                                        {25, 7}, {35, 6}, {50, 5}, {70, 4}, {no_fix_accuracy_m, 3}};
+    int used = 0;
+    for (const auto& [limit, count] : in_use) if (accuracy <= limit) { used = count; break; }
+    sky.fix = used > 0;
+    const int penalty = sky.fix ? std::clamp(static_cast<int>(std::lround((accuracy - 3.0) * 0.5)), 0, 20) : 30;
+    const int in_view = sky.fix ? std::min(orbit_count, used + 2) : 4;
+    for (int i = 0; i < in_view; ++i) {
+        const auto& o = orbits[i];
+        const bool in_use_now = i < used;
+        sky.view.push_back({o.prn, o.elevation, o.azimuth, std::max(10, o.snr - penalty - (in_use_now ? 0 : 8)), in_use_now});
+    }
+    return sky;
 }
 
 std::string nmea_gga(const LocationFix& fix) {
     const auto t = utc(fix.time_ms);
+    const auto sky = sky_for(fix);
     char rest[128];
-    std::snprintf(rest, sizeof rest, ",1,%02d,%.1f,%.1f,M,0.0,M,,", sky_size, hdop(fix), fix.altitude_m);
+    std::snprintf(rest, sizeof rest, ",%d,%02d,%s,%.1f,M,0.0,M,,", sky.fix ? 1 : 0, sky.used(), dop(sky.hdop).c_str(), fix.altitude_m);
     return sentence("GPGGA," + clock(t) + "," + angle(fix.latitude, 2, 'N', 'S') + "," + angle(fix.longitude, 3, 'E', 'W') + rest);
 }
 
 std::string nmea_gsa(const LocationFix& fix) {
-    // Auto mode, 3D fix, the 12 satellite slots, PDOP, HDOP, VDOP and the NMEA 4.1 system id (1: GPS).
-    std::string body = "GPGSA,A,3";
+    // Auto mode, fix type (3D or none), the 12 satellite slots, PDOP, HDOP, VDOP and the NMEA 4.1 system id (1: GPS).
+    const auto sky = sky_for(fix);
+    std::string body = sky.fix ? "GPGSA,A,3" : "GPGSA,A,1";
     char field[32];
-    for (int i = 0; i < 12; ++i) {
-        if (i < sky_size) std::snprintf(field, sizeof field, ",%02d", sky[i].prn);
-        else std::snprintf(field, sizeof field, ",");
+    int slots = 0;
+    for (const auto& s : sky.view) {
+        if (!s.used || slots == 12) continue;
+        std::snprintf(field, sizeof field, ",%02d", s.prn);
         body += field;
+        ++slots;
     }
-    const double h = hdop(fix);
-    std::snprintf(field, sizeof field, ",%.1f,%.1f,%.1f,1", std::min(99.0, h * 1.5), h, std::min(99.0, h * 1.2));
-    return sentence(body + field);
+    for (; slots < 12; ++slots) body += ",";
+    if (sky.fix) body += "," + dop(std::min(no_dop, sky.hdop * 1.5)) + "," + dop(sky.hdop) + "," + dop(std::min(no_dop, sky.hdop * 1.2)) + ",1";
+    else body += "," + dop(no_dop) + "," + dop(no_dop) + "," + dop(no_dop) + ",1";
+    return sentence(body);
 }
 
-std::vector<std::string> nmea_gsv(const LocationFix&) {
-    constexpr int per_sentence = 4;
-    const int count = (sky_size + per_sentence - 1) / per_sentence;
+std::vector<std::string> nmea_gsv(const LocationFix& fix) {
+    constexpr std::size_t per_sentence = 4;
+    const auto sky = sky_for(fix);
+    const std::size_t count = std::max<std::size_t>(1, (sky.view.size() + per_sentence - 1) / per_sentence);
     std::vector<std::string> out;
-    for (int n = 0; n < count; ++n) {
+    for (std::size_t n = 0; n < count; ++n) {
         char field[64];
-        std::snprintf(field, sizeof field, "GPGSV,%d,%d,%02d", count, n + 1, sky_size);
+        std::snprintf(field, sizeof field, "GPGSV,%zu,%zu,%02zu", count, n + 1, sky.view.size());
         std::string body = field;
-        for (int i = n * per_sentence; i < std::min(sky_size, (n + 1) * per_sentence); ++i) {
-            std::snprintf(field, sizeof field, ",%02d,%02d,%03d,%02d", sky[i].prn, sky[i].elevation, sky[i].azimuth, sky[i].snr);
+        for (std::size_t i = n * per_sentence; i < std::min(sky.view.size(), (n + 1) * per_sentence); ++i) {
+            const auto& s = sky.view[i];
+            std::snprintf(field, sizeof field, ",%02d,%02d,%03d,%02d", s.prn, s.elevation, s.azimuth, s.snr);
             body += field;
         }
         out.push_back(sentence(body));
@@ -261,12 +301,32 @@ std::vector<std::string> nmea_gsv(const LocationFix&) {
 
 std::string nmea_rmc(const LocationFix& fix) {
     const auto t = utc(fix.time_ms);
-    char speed[64], course[64] = "", date[64];
-    std::snprintf(speed, sizeof speed, "%.2f", std::max(0.0, fix.speed_mps) * 3600.0 / 1852.0);  // knots
-    if (fix.course_deg >= 0) std::snprintf(course, sizeof course, "%.2f", fix.course_deg);
+    const bool valid = sky_for(fix).fix;
+    char speed[64] = "", course[64] = "", date[64];
+    if (valid) std::snprintf(speed, sizeof speed, "%.2f", std::max(0.0, fix.speed_mps) * 3600.0 / 1852.0);  // knots
+    if (valid && fix.course_deg >= 0) std::snprintf(course, sizeof course, "%.2f", fix.course_deg);
     std::snprintf(date, sizeof date, "%02d%02d%02d", t.day, t.month, t.year % 100);
-    return sentence("GPRMC," + clock(t) + ",A," + angle(fix.latitude, 2, 'N', 'S') + "," + angle(fix.longitude, 3, 'E', 'W') + "," +
-                    speed + "," + course + "," + date + ",,,A");
+    return sentence(std::string("GPRMC,") + clock(t) + (valid ? ",A," : ",V,") + angle(fix.latitude, 2, 'N', 'S') + "," +
+                    angle(fix.longitude, 3, 'E', 'W') + "," + speed + "," + course + "," + date + ",,," + (valid ? "A" : "N"));
+}
+
+void LocationWatch::observe(const LocationFix& fix, std::uint64_t now_ms) {
+    if (!(fix.accuracy_m >= 0)) return;  // a lost fix of our own making, or one the embedder reports
+    last_ = fix;
+    last_ms_ = now_ms;
+    next_ms_ = now_ms + silence_ms;
+}
+
+std::optional<LocationFix> LocationWatch::lost(std::uint64_t now_ms) {
+    if (!last_ || now_ms < next_ms_) return std::nullopt;
+    LocationFix out = *last_;
+    out.accuracy_m = -1;
+    out.speed_mps = -1;
+    out.course_deg = -1;
+    out.time_ms += now_ms - last_ms_;
+    next_ms_ += period_ms;
+    if (next_ms_ <= now_ms) next_ms_ = now_ms + period_ms;  // a long stall does not bring a burst
+    return out;
 }
 
 namespace {
