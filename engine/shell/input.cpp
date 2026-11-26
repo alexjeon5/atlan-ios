@@ -236,7 +236,10 @@ Sky sky_for(const LocationFix& fix) {
     Sky sky;
     const double accuracy = fix.accuracy_m;
     if (!(accuracy >= 0)) { sky.hdop = no_dop; return sky; }  // signal lost: nothing in view
-    sky.hdop = std::clamp(accuracy / 5.0, 0.5, 50.0);
+    // A receiver's HDOP for that error. CoreLocation reports a cautious radius (5-16 m on an open road) where a phone's
+    // GPS chip shows HDOP 0.7-1.3; receivers rarely go above 2 while they hold a fix. Apps lean on HDOP: above 2 they
+    // may stop trusting changes of course, so dividing the radius by a nominal 5 m error made the heading lag in bends.
+    sky.hdop = std::clamp(0.5 + accuracy * 0.045, 0.6, 9.9);
     // Satellites in use for a horizontal error: open sky (a few metres) uses about 12, an urban canyon or the edge of a
     // tunnel 3 to 5; beyond 100 m there is no satellite fix at all, only a few weak signals.
     static constexpr std::pair<double, int> in_use[] = {{4, 12}, {6, 11}, {9, 10}, {13, 9}, {18, 8},

@@ -159,10 +159,10 @@ void nmea() {
     };
     const auto gga = nmea_gga(fix), rmc = nmea_rmc(fix);
     check(valid(gga) && valid(rmc), "sentences carry a correct checksum and CR LF");
-    check(gga.starts_with("$GPGGA,221320.12,3733.9900,N,12658.6800,E,1,11,1.0,38.3,M,0.0,M,,*"), "GGA fields: 5 m uses 11 satellites");
+    check(gga.starts_with("$GPGGA,221320.12,3733.9900,N,12658.6800,E,1,11,0.7,38.3,M,0.0,M,,*"), "GGA fields: 5 m uses 11 satellites");
     check(rmc.starts_with("$GPRMC,221320.12,A,3733.9900,N,12658.6800,E,19.44,271.60,141123,,,A*"), "RMC fields");
     const LocationFix south{-33.999999999, -0.5, 0, -1, -1, 50, 951782400000ULL};  // 2000-02-29 00:00:00 UTC
-    check(nmea_gga(south).starts_with("$GPGGA,000000.00,3400.0000,S,00030.0000,W,1,05,10.0,0.0,M"), "minutes carry into degrees; hemispheres; 50 m uses 5");
+    check(nmea_gga(south).starts_with("$GPGGA,000000.00,3400.0000,S,00030.0000,W,1,05,2.8,0.0,M"), "minutes carry into degrees; hemispheres; 50 m uses 5");
     check(nmea_rmc(south).starts_with("$GPRMC,000000.00,A,3400.0000,S,00030.0000,W,0.00,,290200,,,A*"), "unknown speed and course; leap day");
 
     // The sky follows the accuracy: fewer satellites and weaker signals as the error grows.
@@ -175,6 +175,8 @@ void nmea() {
         previous = sky.used();
     }
     check(sky_at(3).view[0].snr > sky_at(40).view[0].snr, "signals weaken as the error grows");
+    check(sky_at(5).hdop < 1.0 && sky_at(16).hdop < 1.5 && sky_at(33).hdop <= 2.0 && sky_at(100).hdop <= 5.0,
+          "HDOP stays where a receiver holding a fix reports it");
     const auto weak = sky_at(150);
     check(!weak.fix && weak.used() == 0 && weak.view.size() == 4, "beyond 100 m: no fix, a few weak satellites in view");
     const auto lost = sky_at(-1);
@@ -182,7 +184,7 @@ void nmea() {
 
     // GSA, GSV and GGA agree on the satellites.
     const auto gsa = nmea_gsa(fix);
-    check(valid(gsa) && gsa.starts_with("$GPGSA,A,3,15,02,10,21,05,26,29,12,18,08,24,,1.5,1.0,1.2,1*"), "GSA lists the satellites in use");
+    check(valid(gsa) && gsa.starts_with("$GPGSA,A,3,15,02,10,21,05,26,29,12,18,08,24,,1.1,0.7,0.9,1*"), "GSA lists the satellites in use");
     const auto fields = [](const std::string& s) { return 1 + std::count(s.begin(), s.end(), ','); };
     check(fields(gsa) == 19, "GSA has 18 fields after its name");
     const auto gsv = nmea_gsv(fix);
@@ -192,7 +194,7 @@ void nmea() {
 
     LocationFix far = fix;
     far.accuracy_m = 150;
-    check(nmea_gga(far).find(",E,0,00,30.0,") != std::string::npos, "no fix: GGA quality 0 and no satellites in use");
+    check(nmea_gga(far).find(",E,0,00,7.2,") != std::string::npos, "no fix: GGA quality 0 and no satellites in use");
     check(nmea_gsa(far).starts_with("$GPGSA,A,1,,,,,,,,,,,,,99.9,99.9,99.9,1*"), "no fix: GSA fix type 1");
     check(nmea_rmc(far).starts_with("$GPRMC,221320.12,V,3733.9900,N,12658.6800,E,,,141123,,,N*"), "no fix: RMC status V keeps the last position");
     LocationFix gone = fix;
