@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/atlan_adapter.hpp"
 #include "adapters/atlan/charset_conversion.hpp"
+#include "adapters/atlan/poi_lookup.hpp"
 #include "adapters/atlan/quad_geometry.hpp"
 #include "adapters/atlan/app_package.hpp"
 #include "adapters/atlan/guest_ini.hpp"
@@ -187,6 +188,7 @@ std::vector<NativeSet> AtlanAdapter::native_sets() const {
     for (auto& set : charset::conversion_sets(config_.exhaustive_native_checks)) sets.push_back(std::move(set));
     for (auto& set : speed::speed_readout_sets(fix_speed_)) sets.push_back(std::move(set));
     for (auto& set : cached_lookup::cached_lookup_sets(map_mode_)) sets.push_back(std::move(set));
+    for (auto& set : poi::poi_lookup_sets()) sets.push_back(std::move(set));
     return sets;
 }
 

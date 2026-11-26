@@ -39,7 +39,7 @@ target_include_directories(atlan_shell PUBLIC engine .)  # "shell/..." from engi
 target_link_libraries(atlan_shell PUBLIC atlan_runtime)
 target_compile_options(atlan_shell PRIVATE -Wall -Wextra -Werror)
 # The Atlan app adapter (adapters/atlan): everything that names the app, its files or its Java classes.
-add_library(atlan_adapter STATIC adapters/atlan/atlan_adapter.cpp adapters/atlan/cached_lookup.cpp adapters/atlan/charset_conversion.cpp adapters/atlan/data_status.cpp adapters/atlan/quad_geometry.cpp adapters/atlan/speed_readout.cpp adapters/atlan/verified_versions.cpp adapters/atlan/app_package.cpp adapters/atlan/guest_ini.cpp adapters/atlan/java_services.cpp)
+add_library(atlan_adapter STATIC adapters/atlan/atlan_adapter.cpp adapters/atlan/cached_lookup.cpp adapters/atlan/charset_conversion.cpp adapters/atlan/data_status.cpp adapters/atlan/poi_lookup.cpp adapters/atlan/quad_geometry.cpp adapters/atlan/speed_readout.cpp adapters/atlan/verified_versions.cpp adapters/atlan/app_package.cpp adapters/atlan/guest_ini.cpp adapters/atlan/java_services.cpp)
 target_link_libraries(atlan_adapter PUBLIC atlan_shell)
 target_compile_options(atlan_adapter PRIVATE -Wall -Wextra -Werror)
 
