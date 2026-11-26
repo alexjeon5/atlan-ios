@@ -242,8 +242,7 @@ UIView* LKSwitchRow(NSString* title, NSString* detail, BOOL on, CGFloat height, 
     return LKListRow(title, detail, toggle, height, NO, nil);
 }
 
-UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* options, NSInteger selected, CGFloat height,
-                     void (^changed)(NSInteger)) {
+UISegmentedControl* LKSegments(NSArray<NSString*>* options, NSInteger selected, void (^changed)(NSInteger)) {
     const auto& m = LauncherMetrics::current();
     UISegmentedControl* control = [[UISegmentedControl alloc] initWithItems:options];
     control.selectedSegmentIndex = selected;
@@ -256,7 +255,14 @@ UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* opti
     [control addAction:[UIAction actionWithHandler:^(UIAction* action) {
         changed(((UISegmentedControl*)action.sender).selectedSegmentIndex);
     }] forControlEvents:UIControlEventValueChanged];
-    LKSize(control, 64.0 * options.count + 8, 40);
+    LKSize(control, 0, 40);
+    return control;
+}
+
+UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* options, NSInteger selected, CGFloat height,
+                     void (^changed)(NSInteger)) {
+    UISegmentedControl* control = LKSegments(options, selected, changed);
+    [control.widthAnchor constraintEqualToConstant:64.0 * options.count + 8].active = YES;
     return LKListRow(title, detail, control, height, NO, nil);
 }
 

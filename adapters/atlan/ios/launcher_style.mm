@@ -43,6 +43,8 @@ const LauncherMetrics& LauncherMetrics::current() {
         .settingsButton = 48,
         .introColumn = 288, .tabColumn = 168, .sideColumn = 208,
         .container = CGSizeZero,
+        .portraitContainer = CGSizeZero,
+        .portraitStart = 132,
     };
     static const LauncherMetrics pad{
         .caption = 14, .body = 16, .value = 20, .head = 20, .title = 40,
@@ -52,6 +54,8 @@ const LauncherMetrics& LauncherMetrics::current() {
         .settingsButton = 56,
         .introColumn = 360, .tabColumn = 200, .sideColumn = 260,
         .container = CGSizeMake(1000, 560),
+        .portraitContainer = CGSizeMake(720, 960),
+        .portraitStart = 200,
     };
     return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? pad : phone;
 }

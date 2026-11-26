@@ -38,6 +38,7 @@ UILabel* LKValue(NSString* text);
 // A dot and a word, as used for "ready" and verification states.
 UIView* LKStatus(UIColor* color, NSString* text);
 UIView* LKSwitchRow(NSString* title, NSString* detail, BOOL on, CGFloat height, void (^changed)(BOOL));
+UISegmentedControl* LKSegments(NSArray<NSString*>* options, NSInteger selected, void (^changed)(NSInteger));
 UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* options, NSInteger selected, CGFloat height,
                      void (^changed)(NSInteger));
 // Small grey heading above a block, e.g. "방법 1".

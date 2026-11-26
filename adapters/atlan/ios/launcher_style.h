@@ -32,6 +32,8 @@ struct LauncherMetrics {
     CGFloat button, iconButton, startColumn, startPadding, startIcon, startTitle, settingsButton;
     CGFloat introColumn, tabColumn, sideColumn;
     CGSize container;  // zero: the whole safe area
+    CGSize portraitContainer;  // the same in portrait
+    CGFloat portraitStart;     // height of the start button when the screen stands upright
     static const LauncherMetrics& current();
 };
 
