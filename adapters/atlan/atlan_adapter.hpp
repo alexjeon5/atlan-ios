@@ -16,6 +16,9 @@ public:
         // Called on the guest thread when the guest reports MainActivity.setSurfaces(a, b). Arguments are passed
         // through unchanged; the embedder decides what they mean.
         std::function<void(std::int32_t, std::int32_t)> on_set_surfaces;
+        // Called on the guest thread when the user presses the app's own home button. The car units the app was
+        // made for answer it with their launcher's home screen; the embedder shows its own. nullptr: logged only.
+        std::function<void()> on_home;
         // Network for the Java side (shell/java_services.hpp): HTTP requests (nullptr: plain http:// only) and
         // whether a network is available (nullptr: always). Called from host threads and the guest thread.
         HttpFetch http;

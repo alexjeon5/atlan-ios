@@ -3,6 +3,8 @@
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/guest_ini.hpp"
+#include "shell/java_services.hpp"
+#include "atlan/jni.hpp"
 #include "shell/log_file.hpp"
 #include "shell/log_filter.hpp"
 #include "shell/session.hpp"
@@ -226,6 +228,51 @@ void adapter_sessions() {
     check(adapter->deliveries >= 3, "deliveries run before every frame");
 }
 }
+// The app's home button reaches the host as message 5 of MainActivity.SendMsgFromAtlan; other messages do not.
+void home_button() {
+    constexpr std::uint32_t data = 0x4000, stack = 0x80000, sentinel = 0xffff0000;
+    atlan::Runtime runtime;
+    atlan::ImportDispatcher dispatcher;
+    runtime.memory.map(data, 0x1000, atlan::Permissions::read_write);
+    runtime.memory.map(stack - 0x1000, 0x1000, atlan::Permissions::read_write);
+    dispatcher.attach(atlan::elf::Image{});
+    atlan::JavaBootstrap java(runtime, dispatcher, {});
+    unsigned homes = 0;
+    atlan::shell::JavaServices::Config config;
+    config.use_connection_manager = false;
+    config.on_home = [&homes] { ++homes; };
+    atlan::shell::JavaServices services(config);
+    services.install(java, [](const std::string&, const std::string&, const std::string&) { return 0u; });
+    const auto text = [&](std::uint32_t at, const std::string& value) {
+        std::vector<std::byte> bytes(value.size() + 1);
+        for (std::size_t i = 0; i < value.size(); ++i) bytes[i] = std::byte(static_cast<unsigned char>(value[i]));
+        check(runtime.memory.write(at, bytes), "string written to guest memory");
+    };
+    text(data, "SendMsgFromAtlan");
+    text(data + 0x40, "(III[B)V");
+    std::array<std::byte, 4> word{};
+    const auto read32 = [&](std::uint32_t at) {
+        check(runtime.memory.read(at, word), "guest word read");
+        return std::to_integer<std::uint32_t>(word[0]) | std::to_integer<std::uint32_t>(word[1]) << 8 |
+               std::to_integer<std::uint32_t>(word[2]) << 16 | std::to_integer<std::uint32_t>(word[3]) << 24;
+    };
+    const auto table = read32(java.env());
+    const auto invoke = [&](std::size_t slot, std::vector<std::uint32_t> args) {
+        args.insert(args.begin(), java.env());
+        const auto outcome = dispatcher.call(runtime, read32(table + 4 * static_cast<std::uint32_t>(slot)), args, stack, sentinel, 1000);
+        check(outcome.stop == atlan::Stop::returned, "JNI call returns");
+        return static_cast<std::uint32_t>(runtime.cpu.registers[0]);
+    };
+    const auto cls = java.class_handle("com/atlan/MainActivity");
+    const auto activity = java.new_object(cls);
+    const auto method = invoke(33, {cls, data, data + 0x40});  // GetMethodID
+    (void)invoke(61, {activity, method, 17, 0, 0, 0});        // CallVoidMethod: navigation start
+    check(homes == 0, "other messages do not press home");
+    (void)invoke(61, {activity, method, 5, 1, 0, 0});
+    check(homes == 1, "message 5 presses home");
+    (void)invoke(61, {activity, method, 5, 1, 0, 0});
+    check(homes == 2, "every press is delivered");
+}
 // The app's geometry as the host computes it (the comparison with the guest's own code runs at install).
 void quad_geometry() {
     using namespace atlan::shell::geometry;
@@ -254,6 +301,7 @@ void quad_geometry() {
 int main() {
     try {
         quad_geometry();
+        home_button();
         scratch = fs::temp_directory_path() / ("atlan-shell-" + std::to_string(::getpid()));
         fs::create_directories(scratch);
         {

@@ -5,6 +5,7 @@
 #include "apple_audio_sink.hpp"
 #include "apple_network.hpp"
 #include "metal_gl_backend.hpp"
+#import "landing_view_controller.h"
 #import <QuartzCore/CAMetalLayer.h>
 #include "adapters/atlan/atlan_adapter.hpp"
 #include "atlan/demo.hpp"
@@ -337,6 +338,12 @@ static constexpr bool kWriteSessionLog = true;
 
 - (CAMetalLayer*)metalLayer { return _layer; }
 
+// The guest's home button: show the host's home screen over the guest, which keeps running underneath.
+- (void)showLanding {
+    if (self.presentedViewController) return;
+    [self presentViewController:[LandingViewController new] animated:YES completion:nil];
+}
+
 - (void)importLibrary {
     auto* picker = [[UIDocumentPickerViewController alloc]
         initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
@@ -459,6 +466,9 @@ static constexpr bool kWriteSessionLog = true;
             });
         };
     }
+    app.on_home = [weakSelf] {
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showLanding]; });
+    };
     config.adapter = std::make_shared<atlan::shell::AtlanAdapter>(std::move(app));
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,

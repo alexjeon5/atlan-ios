@@ -116,6 +116,7 @@ void AtlanAdapter::install_java(AppHost& host, bool frame_requests) {
     services.network_available = config_.network_available;
     services.use_connection_manager = use_connection_manager_;
     services.log = log;
+    services.on_home = config_.on_home;
     java_services_ = std::make_unique<JavaServices>(services);
     java_services_->install(java, [&host](const std::string& cls, const std::string& name, const std::string& signature) {
         return host.native_method(cls, name, signature);

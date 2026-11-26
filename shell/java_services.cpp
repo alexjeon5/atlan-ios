@@ -11,6 +11,7 @@
 namespace atlan::shell {
 namespace {
 constexpr std::uint32_t msg_navi_start = 17;         // SendMsgFromAtlan: the guest's navigation has started
+constexpr std::uint32_t msg_home = 5;                // SendMsgFromAtlan: the home button was pressed (param: its mode)
 constexpr std::uint32_t msg_online_state = 0x429;    // nativeReceiveMsgData: REC_ONLINE_STATE, param 1 connected
 constexpr std::uint64_t java_timeout_cap_ms = 13000;  // AtlanNetService caps every timeout at 13 s
 constexpr char net_class[] = "com/atlan/AtlanNetService";
@@ -111,6 +112,10 @@ void JavaServices::install(JavaBootstrap& java, FindNative find_native) {
         if (!m.args.empty() && m.args[0] == msg_navi_start) {
             state->navi_started = true;
             if (state->config.use_connection_manager) state->queue_online_state();
+        }
+        if (!m.args.empty() && m.args[0] == msg_home) {
+            state->log("java home button");
+            if (state->config.on_home) state->config.on_home();
         }
         m.result = 0;
         return std::nullopt;
