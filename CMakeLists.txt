@@ -27,15 +27,15 @@ if(ATLAN_SANITIZERS)
 endif()
 
 add_subdirectory(third_party/kernarium)
-add_library(atlan_runtime STATIC src/memory.cpp src/runtime.cpp src/demo.cpp src/elf.cpp src/imports.cpp src/lifetime.cpp src/libc_services.cpp src/vfp.cpp src/heap.cpp src/threads.cpp src/files.cpp src/abi.cpp src/android_log.cpp src/jni.cpp src/mmap.cpp src/string_services.cpp src/stdio.cpp src/opensles.cpp src/audio.cpp src/wav.cpp src/block_cache.cpp src/profiler.cpp src/inflate.cpp src/native_functions.cpp src/native_runtime.cpp src/native_images.cpp src/libc_extra.cpp src/data_symbols.cpp src/text_codec.cpp src/gles.cpp src/gl_recorder.cpp src/glsl.cpp src/gl_context.cpp src/sockets.cpp src/scanf.cpp src/system_services.cpp)
-set_source_files_properties(src/vfp.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
-target_include_directories(atlan_runtime PUBLIC include)
+add_library(atlan_runtime STATIC engine/src/memory.cpp engine/src/runtime.cpp engine/src/demo.cpp engine/src/elf.cpp engine/src/imports.cpp engine/src/lifetime.cpp engine/src/libc_services.cpp engine/src/vfp.cpp engine/src/heap.cpp engine/src/threads.cpp engine/src/files.cpp engine/src/abi.cpp engine/src/android_log.cpp engine/src/jni.cpp engine/src/mmap.cpp engine/src/string_services.cpp engine/src/stdio.cpp engine/src/opensles.cpp engine/src/audio.cpp engine/src/wav.cpp engine/src/block_cache.cpp engine/src/profiler.cpp engine/src/inflate.cpp engine/src/native_functions.cpp engine/src/native_runtime.cpp engine/src/native_images.cpp engine/src/libc_extra.cpp engine/src/data_symbols.cpp engine/src/text_codec.cpp engine/src/gles.cpp engine/src/gl_recorder.cpp engine/src/glsl.cpp engine/src/gl_context.cpp engine/src/sockets.cpp engine/src/scanf.cpp engine/src/system_services.cpp)
+set_source_files_properties(engine/src/vfp.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+target_include_directories(atlan_runtime PUBLIC engine/include)
 target_link_libraries(atlan_runtime PRIVATE kernarium_aarch32)
 target_compile_options(atlan_runtime PRIVATE -Wall -Wextra -Werror)
 
 # Engine side of the embedding: the guest session and app-neutral host plumbing (docs/engine-adapter.md).
-add_library(atlan_shell STATIC shell/data_file.cpp shell/json.cpp shell/sha256.cpp shell/log_file.cpp shell/input.cpp shell/session.cpp shell/http_client.cpp)
-target_include_directories(atlan_shell PUBLIC .)
+add_library(atlan_shell STATIC engine/shell/data_file.cpp engine/shell/json.cpp engine/shell/sha256.cpp engine/shell/log_file.cpp engine/shell/input.cpp engine/shell/session.cpp engine/shell/http_client.cpp)
+target_include_directories(atlan_shell PUBLIC engine .)  # "shell/..." from engine/, "adapters/..." and "platform/..." from the root
 target_link_libraries(atlan_shell PUBLIC atlan_runtime)
 target_compile_options(atlan_shell PRIVATE -Wall -Wextra -Werror)
 # The Atlan app adapter (adapters/atlan): everything that names the app, its files or its Java classes.

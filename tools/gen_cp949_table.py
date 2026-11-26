@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Regenerates src/cp949_table.inc from Python's cp949 codec (public Unicode mapping data)."""
+"""Regenerates engine/src/cp949_table.inc from Python's cp949 codec (public Unicode mapping data)."""
 import sys
 
 LEAD = range(0x81, 0xFF)
@@ -26,6 +26,6 @@ out = ["// SPDX-License-Identifier: GPL-2.0-or-later",
        f"// Mapped double-byte entries: {count}"]
 for lead, row in zip(LEAD, rows):
     out.append("{" + ",".join(f"0x{v:04X}" if v else "0" for v in row) + "},")
-path = sys.argv[1] if len(sys.argv) > 1 else "src/cp949_table.inc"
+path = sys.argv[1] if len(sys.argv) > 1 else "engine/src/cp949_table.inc"
 open(path, "w").write("\n".join(out) + "\n")
 print(count)

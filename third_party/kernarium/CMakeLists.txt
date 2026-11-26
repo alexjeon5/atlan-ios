@@ -13,7 +13,7 @@ add_library(kernarium_aarch32 STATIC
   ${a32}/semantics_prepared.cpp
   ${a32}/semantics_fast.cpp)
 target_include_directories(kernarium_aarch32 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-  ${PROJECT_SOURCE_DIR}/include)
+  ${PROJECT_SOURCE_DIR}/engine/include)
 target_compile_definitions(kernarium_aarch32 PRIVATE
   DARWIN_UML_GUEST_PAGE_SIZE=4096 UML_A32_LIBRARY_EXIT_COUNTERS=0)
 target_compile_options(kernarium_aarch32 PRIVATE -Wall -Wextra -Werror)
