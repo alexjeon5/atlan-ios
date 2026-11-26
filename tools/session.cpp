@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <thread>
 #include <vector>
 #include <cstdlib>
@@ -147,6 +148,8 @@ int main(int argc, char** argv) {
         const auto start = std::chrono::steady_clock::now();
         const auto deadline = start + std::chrono::seconds(std::atoi(interactive));
         std::size_t next_tap = 0;
+        const char* tap_file = std::getenv("ATLAN_TAP_FILE");
+        long tap_file_read = 0;
         while (session.state() == atlan::shell::SessionState::running && std::chrono::steady_clock::now() < deadline) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
             if (drive.on && elapsed >= next_fix_ms && (drive.to_ms < 0 || next_fix_ms < drive.to_ms)) {
@@ -163,6 +166,24 @@ int main(int argc, char** argv) {
                 input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed)});
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
                 input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed + hold_ms)});
+            }
+            // ATLAN_TAP_FILE=PATH: every complete "X,Y[,HOLD_MS]" line appended to PATH while the session runs is one more tap.
+            if (tap_file) {
+                if (std::FILE* f = std::fopen(tap_file, "r")) {
+                    std::fseek(f, tap_file_read, SEEK_SET);
+                    char line[128];
+                    while (std::fgets(line, sizeof line, f) && std::strchr(line, '\n')) {
+                        tap_file_read += static_cast<long>(std::strlen(line));
+                        float x{}, y{};
+                        long hold = hold_ms;
+                        if (std::sscanf(line, "%f,%f,%ld", &x, &y, &hold) < 2) continue;
+                        std::cout << "tap " << x << "," << y << " at " << elapsed << " ms" << std::endl;
+                        input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, x, y, static_cast<std::uint64_t>(elapsed)});
+                        std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                        input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, x, y, static_cast<std::uint64_t>(elapsed + hold)});
+                    }
+                    std::fclose(f);
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }

@@ -84,6 +84,8 @@ CoreLocation은 위성 정보를 공개하지 않는다. 그래서 위치 값의
 
 `ATLAN_INPUT_CFG=파일 atlan-session LIBRARY DATA_ROOT`는 바인딩을 읽고 첫 프레임 전에 위치 값 하나와 탭(down, up) 하나를 넣는다. 탭 위치는 `ATLAN_TAP=X,Y`(게스트 화면 픽셀, 기본 400,240)이고 `ATLAN_TAP=none`이면 탭을 넣지 않는다. 로그의 `input: first … event -> …` 줄과 그 뒤 게스트 동작으로 바인딩을 확인한다.
 
+`ATLAN_INTERACTIVE_SECONDS`로 오래 돌릴 때는 `ATLAN_TAP_FILE=파일`을 주면 실행 중에 그 파일 끝에 붙인 `X,Y[,누름ms]` 줄마다 탭을 하나씩 넣는다(누름 기본 `ATLAN_TAP_HOLD_MS`, 80). 화면을 보면서 다음 탭을 고를 때 쓴다.
+
 주행은 `ATLAN_INTERACTIVE_SECONDS`와 함께 `ATLAN_DRIVE=위도,경도,방위,시속[,시작ms[,끝ms]]`로 흉내 낸다. 시작ms(기본 0)부터 끝ms(기본 끝까지)까지 1초마다 그 방위로 직진한 위치 값(정확도 8m)을 벽시계 시각으로 넣는다. 끝ms에서 멈추면 신호가 끊긴 것처럼 보인다.
 
 ## 검증 상태
