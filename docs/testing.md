@@ -42,13 +42,16 @@ CI 가 만든 서명 없는 IPA 를 iPhone/iPad 에 설치해서 앱 셸이 어�
 ```
 ATLAN/APP/atlan.dat
 package lib/armeabi/libatlan3dv5.so version 1.8.2.35
+library sha256=<64자리 16진수>
 loaded mapped_bytes=16486400 exports=25963 imports_trapped=262 initializers=415
+compat imports trapped=262 missing=0
 initializers_completed=415
 android_log 4 ATLAN30_LOG: JNI_OnLoad called
 android_log 4 ATLAN30_LOG: JNI_OnLoad called 2
 android_log 4 ATLAN30_LOG: JNI_OnLoad: registerNatives function is success
 jni class ... / jni native ... (여러 줄)
 JNI_OnLoad returned 0x10004
+compat entries=... missing=0
 android_log 3 atlan MainActivity: nativeInit()
 opensles ... / fopen ... / property ... (여러 줄)
 java MainActivity.setSurfaces(800,480)
@@ -67,6 +70,7 @@ audio callbacks=0 players=1
 ```
 
 - 정상 종료 지점은 `audio callbacks=… players=1` 줄이야. 이 줄까지 나오면 이번 단계는 성공이고, 그 뒤에 아무것도 안 뜨는 게 **현재 예상 결과**야. (지도 데이터가 없으면 `createGLSF` 가 빨리 끝나고 `players=0` 이야.)
+- `compat` 줄은 앱 업데이트 대응(M10) 점검이야. 런타임에 없는 import는 `compat missing_import 이름`(데이터면 `missing_data`), 어댑터가 부르는 진입점이나 입력 바인딩의 네이티브가 이미지에 없으면 `compat missing_entry`/`compat missing_native`, 게스트가 찾았지만 호스트가 답하지 않는 Java 메서드는 `compat jni_unhandled`로 나와. 모두 실행 전에(또는 `JNI_OnLoad`·init 직후에) 목록으로 나오고, 실제로 불리면 그 이름으로 멈춰(`missing_service=`, `missing_data=`, `no host implementation for`). 검증된 빌드는 `missing=0`이 정상이야.
 - 핵심 확인 줄은 `JNI_OnLoad returned 0x10004`, `nativeInit returned 0x0`, 그리고 `createGLSF returned 0x0`(지도 데이터가 있을 때) 이야.
 - `createGLSF` 는 지도 파일을 읽느라 폰에서 몇 분 걸릴 수 있어. 서버(arm64 리눅스)에서는 약 3분이야. 그동안 앱이 멈춘 것처럼 보여도 로그가 늘어나면 정상이야.
 - `guest stdout read error: Bad file descriptor` 줄이 많이 반복되는 건 앱 자신의 동작이야. system.ini 의 `CLOUDMAPPATH=/map/CLOUD_MAP` 은 클라우드 지도 저장 폴더인데, 쓸 수 있는 폴더가 없으면 앱이 `open` 실패 값 -1 을 확인하지 않고 그대로 `read` 해서 `perror` 가 찍혀. 이 줄은 해롭지 않아. 실제 안드로이드 기기에서 `/map` 이 없을 때도 똑같이 나와. 일부러 이 폴더를 만들어 주지 않아: 만들어 주면 앱이 클라우드 지도 받기 스레드를 살리는데, 앱 안에서 그 스레드 초기화와 다른 스레드의 첫 요청이 경합해서 세 번째 `renderGLSF` 부근에서 널 접근으로 멈춰. 클라우드 받기에는 소켓도 필요해서 지금은 쓸모가 없어. 그래서 ini 에 `CLOUDMAPPATH` 가 없거나 다른 값으로 바뀌어 있어도 앱에는 항상 `CLOUDMAPPATH=/map/CLOUD_MAP` 인 사본을 읽혀 줘.

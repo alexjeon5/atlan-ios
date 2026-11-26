@@ -25,7 +25,7 @@
 | `src/demo.cpp`, `tools/`, `tests/` | 엔진 | 합성 입력만 사용 |
 | `shell/session.*` | 엔진 | 스레드·예산·중지·프레임 루프. 앱 고유 값과 시작 순서는 `AppAdapter`로만 받음 |
 | `shell/app_adapter.hpp` | 엔진 | 엔진이 앱에 묻는 인터페이스(`AppAdapter`, `AppHost`, `AppStartup`) |
-| `shell/input.*`, `http_client.*`, `log_file.*` | 엔진 | 입력 큐·바인딩 해석, HTTP, 로그 파일. 바인딩 값은 어댑터 쪽 파일 |
+| `shell/input.*`, `http_client.*`, `log_file.*`, `json.*`, `sha256.*` | 엔진 | 입력 큐·바인딩 해석, HTTP, 로그 파일, 작은 JSON 읽기, SHA-256. 바인딩 값은 어댑터 쪽 파일 |
 | `adapters/atlan/` | 어댑터 | 패키지 위치, 설정 파일·폴더 별칭, Java 쪽 응답, 시작·프레임 진입점, 프레임 요청 규약 |
 | `adapters/atlan/java_services.*`, `app_package.*`, `guest_ini.*` | 어댑터 | Java 쪽 네트워크, 앱 패키지(포장 해제와 라이브러리 선택), 설정 파일 형식. APK(ZIP) 읽기 자체는 범용이라 나중에 엔진 쪽으로 나눌 수 있음 |
 | `shell/data_file.*` | **경계** | 부분 읽기·교체·거부 메커니즘은 엔진, 헤더 형식 검증은 어댑터 |
