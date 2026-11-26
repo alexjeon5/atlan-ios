@@ -42,7 +42,9 @@ pick() {
     local name="$1" override="$2"
     if [ -n "$override" ]; then echo "$override"; return; fi
     if [ -x "$tools/$name" ] && runs "$tools/$name" version; then echo "$tools/$name"; return; fi
-    if [ -x "$tools/$name" ] && [ "$name" = zipalign ] && "$tools/$name" 2>&1 | grep -q Zip; then echo "$tools/$name"; return; fi
+    if [ -x "$tools/$name" ] && [ "$name" = zipalign ]; then
+        case "$("$tools/$name" 2>&1 || true)" in *Zip*) echo "$tools/$name"; return ;; esac  # no version option; usage exits 1
+    fi
     command -v "$name" || { echo "no usable $name" >&2; exit 2; }
 }
 aapt="$(pick aapt "${AAPT:-}")"
