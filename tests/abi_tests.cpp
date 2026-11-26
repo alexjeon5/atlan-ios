@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <algorithm>
 #include "atlan/abi.hpp"
 #include "atlan/android_log.hpp"
 #include "atlan/jni.hpp"
@@ -263,9 +264,15 @@ void jni_bootstrap() {
     auto run_id = [&]() { check(f.call(slot(33), {java.env(), cls, data + 0x180, data + 0x1a0}).stop == atlan::Stop::returned, "run id"); return static_cast<std::uint32_t>(f.runtime.cpu.registers[0]); }();
     r = f.call(slot(61), {java.env(), thing, run_id, 5});
     check(r.stop == atlan::Stop::service_error && r.message.find("no host implementation for pkg/Thing.run(I)V") != std::string::npos, "unregistered method stops by name");
+    const auto unhandled = [&](const std::string& name) {
+        const auto list = java.unhandled_methods();
+        return std::any_of(list.begin(), list.end(), [&](const auto& m) { return m.class_name == "pkg/Thing" && m.name == name; });
+    };
+    check(unhandled("run") && !unhandled("<init>"), "a looked-up method without a host implementation is listed, a constructor is not");
     std::uint64_t seen{};
     check(java.register_method("pkg/Thing", "run", "(I)V", [&](atlan::JavaBootstrap::MethodCall& c) -> std::optional<std::string> { seen = c.args.at(0) + 1000ULL * c.receiver; return std::nullopt; }), "register method");
     check(!java.register_method("pkg/Thing", "run", "(I)V", [](atlan::JavaBootstrap::MethodCall&) { return std::nullopt; }), "duplicate registration refused");
+    check(!unhandled("run"), "a registered method is no longer listed");
     r = f.call(slot(61), {java.env(), thing, run_id, 5});
     check(r.stop == atlan::Stop::returned && seen == 5 + 1000ULL * thing, "CallVoidMethod runs the host method with its arguments");
     put32(f.runtime.memory, data + 0x700, 9);

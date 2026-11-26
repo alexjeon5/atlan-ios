@@ -97,6 +97,17 @@ bool JavaBootstrap::register_method(std::string class_name, std::string name, st
     if (!handler) return false;
     return state_->methods.emplace(class_name + '\x1f' + name + '\x1f' + signature, std::move(handler)).second;
 }
+std::vector<JavaBootstrap::Member> JavaBootstrap::unhandled_methods() const {
+    std::vector<Member> out;
+    for (const auto& member : state_->members) {
+        if (member.kind != Member::Kind::method && member.kind != Member::Kind::static_method) continue;
+        if (member.name == "<init>") continue;  // constructors run through NewObject without a host method
+        if (state_->methods.count(member.class_name + '\x1f' + member.name + '\x1f' + member.signature)) continue;
+        const auto same = [&](const Member& m) { return m.class_name == member.class_name && m.name == member.name && m.signature == member.signature; };
+        if (std::none_of(out.begin(), out.end(), same)) out.push_back(member);
+    }
+    return out;
+}
 std::uint32_t JavaBootstrap::class_handle(const std::string& class_name) {
     auto& classes = state_->classes;
     for (std::size_t i = 0; i < classes.size(); ++i)

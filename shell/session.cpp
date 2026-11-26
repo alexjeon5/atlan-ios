@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
 #include "shell/app_adapter.hpp"
+#include "shell/sha256.hpp"
 #include <iterator>
 #include <chrono>
 #include <algorithm>
@@ -73,9 +74,12 @@ std::string hex(std::uint64_t value) {
     do { out.insert(out.begin(), digits[value & 15]); value >>= 4; } while (value);
     return out;
 }
-std::string describe_stop(const std::string& label, const CallOutcome& outcome) {
+// `image`, when given, names a data import nobody provides: the guest reads it at its unmapped trap address.
+std::string describe_stop(const std::string& label, const CallOutcome& outcome, const elf::Image* image = nullptr) {
     std::string line = label + " stopped after " + std::to_string(outcome.retired) + " instructions";
+    const auto* data = image && outcome.stop == Stop::cpu_event && outcome.cpu.event == Event::memory_fault ? image->import_at(outcome.cpu.address) : nullptr;
     if (outcome.stop == Stop::unresolved_import) line += " missing_service=" + outcome.import;
+    else if (data) line += " missing_data=" + data->name;
     else if (outcome.stop == Stop::service_error) line += " failing_service=" + outcome.import + " " + outcome.message;
     else if (outcome.stop == Stop::budget_exhausted) line += " budget_exhausted";
     else line += std::string(" event=") + event_name(outcome.cpu.event) + " address=0x" + hex(outcome.cpu.address) +
@@ -159,11 +163,13 @@ void GuestSession::run() {
         if (library_path.empty()) throw std::runtime_error(adapter.missing_library());
         auto library = read_library(library_path);
         adapter.unpack_library(library, log_);
+        log_("library sha256=" + sha256_hex(library));  // identifies the build (a list of verified builds is keyed by it)
         auto image = elf::load(library, options);
         log_("loaded mapped_bytes=" + std::to_string(image.mapped_bytes) +
              " exports=" + std::to_string(image.exports.size()) +
              " imports_trapped=" + std::to_string(image.trapped_imports.size()) +
              " initializers=" + std::to_string(image.initializers.size()));
+        const auto stopped = [&image](const std::string& label, const CallOutcome& outcome) { return describe_stop(label, outcome, &image); };
         Runtime runtime;
         ImportDispatcher dispatcher;
         dispatcher.set_block_cache(config_.block_cache);
@@ -274,6 +280,19 @@ void GuestSession::run() {
             audio_config.trace = [this](const std::string& line) { log_("opensles " + line); };
             audio.emplace(runtime, dispatcher, audio_config);
         }
+        // Every host service is bound now. An import still without one is listed before anything runs: a call of it
+        // stops there by name (missing_service), a read of a data import stops at its trap address (missing_data).
+        // A new build of the app that needs more of the runtime shows up here instead of somewhere in the middle.
+        {
+            std::size_t missing = 0;
+            for (const auto& import : image.trapped_imports) {
+                const bool data = import.type == 1;  // STT_OBJECT; everything else is called (ImportDispatcher::attach)
+                if (!data && dispatcher.service(import.name)) continue;
+                log_(std::string(data ? "compat missing_data " : "compat missing_import ") + import.name);
+                ++missing;
+            }
+            log_("compat imports trapped=" + std::to_string(image.trapped_imports.size()) + " missing=" + std::to_string(missing));
+        }
         // A thread that waits on its own mutex for a buffer-queue callback to unlock it (synchronous sound playback):
         // deliver due callbacks while it waits, and keep waiting while the sink still has buffers to play.
         mutexes.set_idle_wait([&audio, this](ImportCall& call) {
@@ -311,7 +330,7 @@ void GuestSession::run() {
             if (stop_.load()) { log_("stopped before initializer " + std::to_string(i)); state_.store(SessionState::finished); return; }
             const auto outcome = dispatcher.call(runtime, initializers[i], {}, stack_base + stack_bytes,
                                                  return_sentinel, config_.initializer_budget);
-            if (outcome.stop != Stop::returned) { fail(describe_stop("initializer[" + std::to_string(i) + "]", outcome)); return; }
+            if (outcome.stop != Stop::returned) { fail(stopped("initializer[" + std::to_string(i) + "]", outcome)); return; }
         }
         log_("initializers_completed=" + std::to_string(initializers.size()));
         if (on_load_address != 0 && !stop_.load()) {
@@ -344,7 +363,7 @@ void GuestSession::run() {
                                                    session.config_.surface_call_budget);
                     if (r.stop != Stop::returned) {
                         session.log_(describe_state(runtime, dispatcher));
-                        fail(describe_stop(label, r));
+                        fail(describe_stop(label, r, &image));
                         return std::nullopt;
                     }
                     return static_cast<std::uint32_t>(runtime.cpu.registers[0]);
@@ -370,8 +389,38 @@ void GuestSession::run() {
                                                  return_sentinel, config_.initializer_budget);
             for (const auto& cls : java.classes()) log_("jni class " + cls);
             for (const auto& m : java.native_methods()) log_("jni native " + m.class_name + "." + m.name + m.signature);
-            if (outcome.stop != Stop::returned) { fail(describe_stop("JNI_OnLoad", outcome)); return; }
+            // Java methods the guest looked up that nobody answers (calling one stops by name), each listed once.
+            std::set<std::string> reported_methods;
+            const auto report_java = [&] {
+                for (const auto& m : java.unhandled_methods())
+                    if (const auto line = m.class_name + "." + m.name + m.signature; reported_methods.insert(line).second)
+                        log_("compat jni_unhandled " + line);
+            };
+            report_java();
+            if (outcome.stop != Stop::returned) { fail(stopped("JNI_OnLoad", outcome)); return; }
             log_("JNI_OnLoad returned 0x" + hex(runtime.cpu.registers[0]));
+            // The adapter's entry points and the natives its input bindings call: a build that renamed or dropped one
+            // is listed now (the session would otherwise only note it where the call is due).
+            {
+                std::size_t missing = 0;
+                std::vector<std::string> entries;
+                if (!startup.init.empty()) entries.push_back(startup.init);
+                for (const auto& call : startup.surface_calls) entries.push_back(call.symbol);
+                for (const auto* entry : {&startup.render, &startup.exit_poll}) if (!entry->empty()) entries.push_back(*entry);
+                for (const auto& entry : entries)
+                    if (host.function(entry) == 0) { log_("compat missing_entry " + entry); ++missing; }
+                std::vector<const NativeBinding*> bindings;
+                for (const auto& touch : config_.input_bindings.touch) if (touch) bindings.push_back(&*touch);
+                for (const auto& location : config_.input_bindings.location) bindings.push_back(&location);
+                std::set<std::string> seen;
+                for (const auto* b : bindings) {
+                    const auto line = b->class_name + "." + b->name + b->signature;
+                    if (!seen.insert(line).second || host.native_method(b->class_name, b->name, b->signature) != 0) continue;
+                    log_("compat missing_native " + line);
+                    ++missing;
+                }
+                log_("compat entries=" + std::to_string(entries.size() + seen.size()) + " missing=" + std::to_string(missing));
+            }
             // Block cache coverage since the start and the busiest imports since the last reset_import_counts().
             const auto perf_details = [&]() -> std::string {
                 std::string line;
@@ -409,9 +458,10 @@ void GuestSession::run() {
                     log_("perf " + method_label(startup.init, "init") + ": " + std::to_string(started.retired) + " instructions, " +
                          std::to_string(seconds) + " s" + perf_details());
                 }
+                report_java();
                 if (started.stop != Stop::returned) {
                     if (started.stop == Stop::budget_exhausted) log_(describe_state(runtime, dispatcher));
-                    fail(describe_stop(method_label(startup.init, "init"), started));
+                    fail(stopped(method_label(startup.init, "init"), started));
                     return;
                 }
                 log_(method_label(startup.init, "init") + " returned 0x" + hex(runtime.cpu.registers[0]));
@@ -437,7 +487,7 @@ void GuestSession::run() {
                     write_profile(std::string(full.substr(full.rfind('_') + 1)));
                 if (r.stop != Stop::returned) {
                     log_(describe_state(runtime, dispatcher));  // where it stopped: pc, lr, sp, r0-r3, busiest imports
-                    fail(describe_stop(name, r));
+                    fail(stopped(name, r));
                     return false;
                 }
                 log_(std::string(name) + " returned 0x" + hex(runtime.cpu.registers[0]));
@@ -497,7 +547,7 @@ void GuestSession::run() {
                                                    return_sentinel, config_.surface_call_budget);
                     if (r.stop != Stop::returned) {
                         log_(describe_state(runtime, dispatcher));
-                        fail(describe_stop("input " + binding->name, r));
+                        fail(stopped("input " + binding->name, r));
                         return false;
                     }
                     }
@@ -535,7 +585,7 @@ void GuestSession::run() {
                  (pumped.message.empty() ? "" : " message=" + pumped.message));
             if (pumped.stop == Stop::unresolved_import) { fail("pump stopped at missing service " + pumped.import); return; }
             // Guest threads still busy when the budget ends are not a failure: the interactive loop keeps pumping them.
-            if (pumped.stop != Stop::returned && pumped.stop != Stop::budget_exhausted) { fail(describe_stop("pump", pumped)); return; }
+            if (pumped.stop != Stop::returned && pumped.stop != Stop::budget_exhausted) { fail(stopped("pump", pumped)); return; }
             const auto delivered = audio->pump(runtime, stack_base + stack_bytes, return_sentinel, config_.initializer_budget);
             if (delivered.error) { fail("audio callback: " + *delivered.error); return; }
             log_("audio callbacks=" + std::to_string(delivered.callbacks) + " players=" + std::to_string(audio->live_players()));
@@ -576,7 +626,7 @@ void GuestSession::run() {
                                                            return_sentinel, config_.surface_call_budget);
                         if (asked.stop != Stop::returned) {
                             log_(describe_state(runtime, dispatcher));
-                            fail(describe_stop(method_label(startup.exit_poll, "exit poll"), asked));
+                            fail(stopped(method_label(startup.exit_poll, "exit poll"), asked));
                             return;
                         }
                         if ((runtime.cpu.registers[0] & 0xff) == 1) { guest_exit = true; break; }
@@ -601,7 +651,7 @@ void GuestSession::run() {
                                                 return_sentinel, config_.surface_call_budget);
                         if (frame.stop != Stop::returned) {
                             log_(describe_state(runtime, dispatcher));
-                            fail(describe_stop(method_label(startup.render, "render"), frame));
+                            fail(stopped(method_label(startup.render, "render"), frame));
                             return;
                         }
                         GlCall swap;
@@ -612,7 +662,7 @@ void GuestSession::run() {
                     const auto pump_start = std::chrono::steady_clock::now();
                     const auto background = dispatcher.pump(runtime, config_.initializer_budget);
                     if (background.stop == Stop::unresolved_import) { fail("pump stopped at missing service " + background.import); return; }
-                    if (background.stop != Stop::returned && background.stop != Stop::budget_exhausted) { fail(describe_stop("pump", background)); return; }
+                    if (background.stop != Stop::returned && background.stop != Stop::budget_exhausted) { fail(stopped("pump", background)); return; }
                     // When the earliest guest timer is due; none pending: no bound from the guest.
                     std::optional<std::chrono::steady_clock::time_point> guest_timer;
                     if (const auto wake = threads.next_wake_ns(); wake != 0) {

@@ -100,7 +100,10 @@ static NSString* const verified = @"검증된 버전";
 static NSString* const unverified = @"검증되지 않은 버전";
 static NSString* const in_use = @"사용 중";
 static NSString* const versions_footnote = @"목록에 없는 버전도 실행할 수 있지만 지원하지 않는 기능에서 중단될 수 있습니다.";
-static NSString* const verified_footnote = @"%@ %@에서 실행을 확인한 버전입니다";
+static NSString* const cannot_check = @"확인 불가";
+static NSString* const list_unavailable = @"목록을 받지 못했습니다. 인터넷에 연결되면 다시 받습니다.";
+static NSString* const list_date = @"%@ 기준 목록";
+static NSString* const list_date_saved = @"%@ 기준 목록 · 저장된 사본";
 
 // Developer
 static NSString* const section_logs = @"로그";

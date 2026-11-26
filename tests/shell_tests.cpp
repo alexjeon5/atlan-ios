@@ -12,6 +12,7 @@
 #include "shell/log_file.hpp"
 #include "shell/log_filter.hpp"
 #include "shell/session.hpp"
+#include "shell/sha256.hpp"
 #include "shell/surface.hpp"
 #include <algorithm>
 #include <array>
@@ -177,14 +178,19 @@ void sessions() {
     Collector good;
     const auto image = fixture();
     check(run(write("ok.so", image), good) == SessionState::finished, "synthetic library completes");
-    check(good.lines.size() == 2 && good.lines.back().starts_with("initializers_completed="),
+    check(good.lines.size() == 5 && good.lines.back().starts_with("initializers_completed="),
           "completion is logged");
+    check(good.lines[0] == "library sha256=" + atlan::shell::sha256_hex(image), "the library's digest is logged first");
+    // The fixture imports "external", which no host service provides: listed before anything runs.
+    check(good.lines[2] == "compat missing_import external" && good.lines[3] == "compat imports trapped=1 missing=1",
+          "an import without a service is listed at load");
 }
 // The session drives an app only through its adapter: entry points, Java phase and deliveries.
 struct TestAdapter final : atlan::shell::AppAdapter {
     std::string library;
     unsigned installs{}, uninstalls{}, deliveries{}, unpacks{};
     bool asked_for_requests{};
+    bool extra_entry{};  // also names a surface call the image does not export
     std::string find_library(const std::string&) const override { return library; }
     void unpack_library(std::vector<std::byte>&, const atlan::shell::SessionLog&) override { ++unpacks; }
     void install_java(atlan::shell::AppHost& host, bool frame_requests) override {
@@ -200,6 +206,7 @@ struct TestAdapter final : atlan::shell::AppAdapter {
         startup.receiver_class = "test/App";
         startup.init = "init";
         startup.surface_calls = {{"surf", true}};
+        if (extra_entry) startup.surface_calls.push_back({"gone", false});
         startup.render = "draw";
         startup.exit_poll = "quit";
         return startup;
@@ -225,6 +232,7 @@ void adapter_sessions() {
     const auto has = [&](const std::string& line) {
         return std::find(collector.lines.begin(), collector.lines.end(), line) != collector.lines.end();
     };
+    check(has("compat imports trapped=0 missing=0") && has("compat entries=4 missing=0"), "a build with everything in place lists nothing");
     check(has("JNI_OnLoad returned 0x6") && has("init returned 0x0") && has("surf returned 0x0"), "startup runs the adapter's entry points");
     check(std::count(collector.lines.begin(), collector.lines.end(), std::string("draw returned 0x1")) == 2, "first frames use the adapter's frame call");
     check(has("frames every interval"), "an adapter without frame requests draws every interval");
@@ -232,6 +240,20 @@ void adapter_sessions() {
     check(adapter->unpacks == 1 && adapter->installs == 1 && adapter->uninstalls == 1 && adapter->asked_for_requests,
           "the Java phase is installed once and torn down");
     check(adapter->deliveries >= 3, "deliveries run before every frame");
+    // A build that dropped an entry point and a native an input binding calls: both listed right after JNI_OnLoad.
+    Collector dropped;
+    auto older = std::make_shared<TestAdapter>();
+    older->library = adapter->library;
+    older->extra_entry = true;
+    atlan::shell::SessionConfig older_config;
+    older_config.adapter = older;
+    older_config.input_bindings.location.push_back({"test/App", "onFix", "(D)V", {}});
+    atlan::shell::GuestSession older_session(older_config, dropped.log());
+    check(older_session.start(), "second adapter session starts");
+    older_session.join();
+    const auto logged = [&](const std::string& line) { return std::find(dropped.lines.begin(), dropped.lines.end(), line) != dropped.lines.end(); };
+    check(logged("compat missing_entry gone") && logged("compat missing_native test/App.onFix(D)V") && logged("compat entries=6 missing=2"),
+          "entry points and input natives the build lacks are listed");
 }
 }
 // The app's home button reaches the host as message 5 of MainActivity.SendMsgFromAtlan, the end of its splash as

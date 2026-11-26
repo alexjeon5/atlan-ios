@@ -69,6 +69,9 @@ public:
     // methods can be called by the guest; any other call stops by name.
     // False if (class, name, signature) is already registered.
     bool register_method(std::string class_name, std::string name, std::string signature, MethodHandler handler);
+    // Method ids the guest obtained (Get[Static]MethodID) for which no host method is registered: calling one of
+    // them stops by name. Constructors are left out (NewObject needs no host method). Lets a new app build's needs be listed before it reaches such a call.
+    [[nodiscard]] std::vector<Member> unhandled_methods() const;
     // Host-side handle minting, for calling registered natives from the embedder:
     // the class handle for a name (created if unseen), and a new opaque object of
     // that class. 0 means the reference tables are full.

@@ -8,6 +8,7 @@ set(ATLAN_LAUNCHER_SOURCES
   ../../adapters/atlan/ios/launcher_kit.mm
   ../../adapters/atlan/ios/launcher_settings.mm
   ../../adapters/atlan/ios/launcher_style.mm
+  ../../adapters/atlan/ios/launcher_verified.mm
   ../../adapters/atlan/ios/launcher_view_controller.mm)
 # The design's fonts (OFL-1.1, adapters/atlan/ios/fonts/README.md), copied into the app and listed in UIAppFonts.
 set(ATLAN_LAUNCHER_FONTS

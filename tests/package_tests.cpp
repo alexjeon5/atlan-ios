@@ -265,7 +265,6 @@ void data_status(const fs::path& scratch) {
     check(package_library_sha256(atlan.string()).empty(), "a broken package has no digest");
     check(package_library_sha256((picked / "ATLAN_RTA").string()).empty(), "a folder without a package has no digest");
 }
-}
 
 // FIPS 180-4 example vectors, and a long input fed in uneven pieces.
 void digests() {
@@ -273,7 +272,7 @@ void digests() {
     check(sha256_hex({}) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "empty input");
     check(sha256_hex(bytes(std::string("abc"))) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "abc");
     check(sha256_hex(bytes(std::string("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))) ==
-              "248d6a61d20638b8e5c0262693c936e2fa7ead2b1ab95c4e76b2d15a8e6cd8c1", "two blocks");
+              "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "two blocks");
     const Bytes million(1000000, std::byte{'a'});
     atlan::shell::Sha256 pieces;
     for (std::size_t at = 0; at < million.size();) {

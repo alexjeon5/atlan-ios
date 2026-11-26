@@ -4,6 +4,7 @@
 #import "launcher_settings.h"
 #import "launcher_style.h"
 #import "launcher_text.h"
+#import "launcher_verified.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "adapters/atlan/data_status.hpp"
 #include "shell/coordinate.hpp"
@@ -79,6 +80,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
     Screen _shown;
     Tab _tab;
     AtlanDataStatus _status;
+    std::string _digest;  // SHA-256 of the chosen folder's native library; empty without a readable package
     std::vector<std::pair<std::string, AtlanDataStatus>> _choices;  // every ATLAN folder in Documents
     std::size_t _pending;  // the folder marked on the first-run choice screen
     std::string _fingerprint;
@@ -202,6 +204,9 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                                name:UIApplicationDidBecomeActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(check)
                                                name:LauncherSettingsDidChange object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(listChanged)
+                                               name:VerifiedListDidChange object:nil];
+    (void)VerifiedListStore.shared;  // fetches the list when first used
     [self render];
 }
 
@@ -234,25 +239,31 @@ std::string fingerprint(const AtlanDataStatus& s) {
     __weak LauncherViewController* weakSelf = self;
     dispatch_async(_queue, ^{
         auto status = std::make_shared<AtlanDataStatus>(atlan::shell::inspect_atlan_data(folder.UTF8String ?: ""));
+        auto digest = std::make_shared<std::string>(atlan::shell::package_library_sha256(folder.UTF8String ?: ""));
         auto choices = std::make_shared<std::vector<std::pair<std::string, AtlanDataStatus>>>();
         for (NSString* each in folders)
             choices->emplace_back(each.UTF8String ?: "", atlan::shell::inspect_atlan_data(each.UTF8String ?: ""));
-        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf checked:*status choices:*choices folder:folder]; });
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf checked:*status digest:*digest choices:*choices folder:folder]; });
     });
 }
 
-- (void)checked:(const AtlanDataStatus&)status choices:(const std::vector<std::pair<std::string, AtlanDataStatus>>&)choices
-         folder:(NSString*)folder {
+- (void)checked:(const AtlanDataStatus&)status digest:(const std::string&)digest
+        choices:(const std::vector<std::pair<std::string, AtlanDataStatus>>&)choices folder:(NSString*)folder {
     _checking = NO;
-    std::string print = fingerprint(status) + (LauncherSettings.shared.atlanFolderIsPicked ? "p" : "d") + (folder.UTF8String ?: "");
+    std::string print = fingerprint(status) + digest + (LauncherSettings.shared.atlanFolderIsPicked ? "p" : "d") + (folder.UTF8String ?: "");
     for (const auto& [path, each] : choices) print += "\n" + path + fingerprint(each);
     if (_known && print == _fingerprint) return;
     _known = YES;
     _status = status;
+    _digest = digest;
     _choices = choices;
     _fingerprint = print;
     if (status.ready() && !LauncherSettings.shared.setupDone) LauncherSettings.shared.setupDone = YES;
     [self render];
+}
+
+- (void)listChanged {
+    if (_known) [self render];
 }
 
 - (void)pickFolder {
@@ -766,10 +777,12 @@ std::string fingerprint(const AtlanDataStatus& s) {
 
 - (UIView*)versionsPane {
     const auto& m = LauncherMetrics::current();
-    const bool known = !_status.app_name.empty();
-    const bool verified = atlan::shell::is_verified(_status);
-    UIView* state = known ? LKStatus(verified ? LauncherColor.positive : LauncherColor.muted, verified ? text::verified : text::unverified)
-                          : LKValue(text::unknown);
+    VerifiedListStore* store = VerifiedListStore.shared;
+    const atlan::shell::VerifiedList* list = store.list;
+    const atlan::shell::VerifiedBuild* build = list && !_digest.empty() ? list->find(_digest) : nullptr;
+    UIView* state = _digest.empty() ? LKValue(text::unknown)
+                  : !list           ? LKValue(text::cannot_check)
+                  : LKStatus(build ? LauncherColor.positive : LauncherColor.muted, build ? text::verified : text::unverified);
     UIView* rows = LKColumn(@[
         LKListRow(text::app_name, nil, LKValue(launcherVersion()), m.row, NO, nil),
         LKListRow(text::nav_software, nil, LKValue(ns(_status.app_label())), m.row, YES, nil),
@@ -781,20 +794,26 @@ std::string fingerprint(const AtlanDataStatus& s) {
         LKLabel(text::versions_footnote, m.caption, UIFontWeightRegular, LauncherColor.muted)], 12)
                                            padding:UIEdgeInsetsMake(4, m.cardPadding, m.cardPadding, m.cardPadding) radius:m.cardRadius];
 
-    NSMutableArray<UIView*>* list = [NSMutableArray arrayWithObject:LKLabel(text::verified, m.caption, UIFontWeightRegular, LauncherColor.muted)];
-    BOOL first = YES;
-    for (const auto& app : atlan::shell::verified_apps()) {
-        const bool used = app.name == _status.app_name && app.version == _status.app_version;
-        NSString* label = ns(std::string(app.name) + " " + std::string(app.version));
-        UILabel* name = LKLabel(label, m.body, UIFontWeightMedium, LauncherColor.ink);
-        UIView* trailing = used ? LKLabel(text::in_use, m.caption, UIFontWeightRegular, LauncherColor.ink2) : nil;
-        UIStackView* row = LKRow(trailing ? @[name, LKSpacer(), trailing] : @[name, LKSpacer()], 8);
-        [row.heightAnchor constraintEqualToConstant:m.row].active = YES;
-        [list addObject:first ? row : LKColumn(@[LKLine(), row], 0)];
-        first = NO;
+    NSMutableArray<UIView*>* entries = [NSMutableArray array];
+    if (list) {
+        for (const auto& each : list->builds) {
+            const bool used = &each == build;
+            UILabel* name = LKLabel(ns(each.name + " " + each.version), m.body, UIFontWeightMedium, LauncherColor.ink);
+            UIView* trailing = used ? LKLabel(text::in_use, m.caption, UIFontWeightRegular, LauncherColor.ink2) : nil;
+            UIStackView* row = LKRow(trailing ? @[name, LKSpacer(), trailing] : @[name, LKSpacer()], 8);
+            [row.heightAnchor constraintEqualToConstant:m.row].active = YES;
+            [entries addObject:entries.count ? LKColumn(@[LKLine(), row], 0) : row];
+        }
+    } else {
+        [entries addObject:LKLabel(text::list_unavailable, m.body, UIFontWeightRegular, LauncherColor.muted)];
     }
-    LKCard* right = [[LKCard alloc] initWithContent:LKColumn(@[LKColumn(list, 0), LKSpacer(),
-        LKLabel([NSString stringWithFormat:text::verified_footnote, text::app_name, launcherVersion()], m.caption, UIFontWeightRegular, LauncherColor.muted)], 12)
+    NSMutableArray<UIView*>* column = [NSMutableArray arrayWithObject:LKLabel(text::verified, m.caption, UIFontWeightRegular, LauncherColor.muted)];
+    [column addObject:LKColumn(entries, 0)];
+    [column addObject:LKSpacer()];
+    if (list)
+        [column addObject:LKLabel([NSString stringWithFormat:store.fresh ? text::list_date : text::list_date_saved, ns(list->updated)],
+                                  m.caption, UIFontWeightRegular, LauncherColor.muted)];
+    LKCard* right = [[LKCard alloc] initWithContent:LKColumn(column, 12)
                                             padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding) radius:m.cardRadius];
     return [self cards:left with:right secondWidth:m.sideColumn];
 }

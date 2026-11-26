@@ -10,7 +10,9 @@ public:
     explicit Reader(std::string_view text) : text_(text) {}
     std::optional<JsonValue> document(std::string& why) {
         JsonValue value;
-        if (!parse(value, 0) || (space(), pos_ != text_.size() && fail("trailing characters"))) {
+        bool ok = parse(value, 0);
+        if (ok) { space(); if (pos_ != text_.size()) ok = fail("trailing characters"); }
+        if (!ok) {
             why = error_ + " at byte " + std::to_string(pos_);
             return std::nullopt;
         }
