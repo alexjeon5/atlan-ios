@@ -23,16 +23,32 @@ bool put_word(ImportCall& call, std::uint32_t address, std::uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) bytes[i] = std::byte((value >> (8 * i)) & 255);
     return call.runtime().memory.write(address, bytes);
 }
-double double_arg(ImportCall& call, unsigned index) {  // soft-float: low word in the first register
-    return std::bit_cast<double>(std::uint64_t{call.arg(index)} | std::uint64_t{call.arg(index + 1)} << 32);
-}
 float float_arg(ImportCall& call, unsigned index) { return std::bit_cast<float>(call.arg(index)); }
 void double_result(ImportCall& call, double value) {
     const auto bits = std::bit_cast<std::uint64_t>(value);
     call.runtime().cpu.registers[0] = static_cast<std::uint32_t>(bits);
     call.runtime().cpu.registers[1] = static_cast<std::uint32_t>(bits >> 32);
 }
-void float_result(ImportCall& call, float value) { call.set_result(std::bit_cast<std::uint32_t>(value)); }
+// libm calls under the soft-float ABI: doubles in r0:r1 and r2:r3 (low word first), floats in r0 and r1, the result in
+// r0[:r1]. The `_service` forms serve the dispatcher, the `_inline` forms the block loop; both compute `f(x, y)`.
+double reg_double(const CpuState& cpu, unsigned index) noexcept {
+    return std::bit_cast<double>((cpu.registers[index] & 0xffffffffULL) | (cpu.registers[index + 1] & 0xffffffffULL) << 32);
+}
+float reg_float(const CpuState& cpu, unsigned index) noexcept { return std::bit_cast<float>(static_cast<std::uint32_t>(cpu.registers[index])); }
+void set_double(CpuState& cpu, double value) noexcept {
+    const auto bits = std::bit_cast<std::uint64_t>(value);
+    cpu.registers[0] = static_cast<std::uint32_t>(bits);
+    cpu.registers[1] = static_cast<std::uint32_t>(bits >> 32);
+}
+void set_float(CpuState& cpu, float value) noexcept { cpu.registers[0] = std::bit_cast<std::uint32_t>(value); }
+template <class F> bool unary_d_inline(CpuState& cpu, F f) noexcept { set_double(cpu, f(reg_double(cpu, 0), 0.0)); return true; }
+template <class F> bool binary_d_inline(CpuState& cpu, F f) noexcept { set_double(cpu, f(reg_double(cpu, 0), reg_double(cpu, 2))); return true; }
+template <class F> bool unary_f_inline(CpuState& cpu, F f) noexcept { set_float(cpu, f(reg_float(cpu, 0), 0.0F)); return true; }
+template <class F> bool binary_f_inline(CpuState& cpu, F f) noexcept { set_float(cpu, f(reg_float(cpu, 0), reg_float(cpu, 1))); return true; }
+template <class F> void unary_d_service(ImportCall& call, F f) { unary_d_inline(call.runtime().cpu, f); }
+template <class F> void binary_d_service(ImportCall& call, F f) { binary_d_inline(call.runtime().cpu, f); }
+template <class F> void unary_f_service(ImportCall& call, F f) { unary_f_inline(call.runtime().cpu, f); }
+template <class F> void binary_f_service(ImportCall& call, F f) { binary_f_inline(call.runtime().cpu, f); }
 bool get_word(Memory& memory, std::uint32_t address, std::uint32_t& out) {
     std::array<std::byte, 4> bytes{};
     if (!memory.read(address, bytes)) return false;
@@ -185,21 +201,21 @@ void install_libc_extra(ImportDispatcher& dispatcher) {
     };
     for (const auto& [name, test] : wide_classes)
         dispatcher.bind(name, [test = test](ImportCall& call) -> std::optional<std::string> { call.set_result(test(call.arg(0)) ? 1 : 0); return std::nullopt; });
-    // libm: one-argument and two-argument forms, double (r0:r1[, r2:r3]) and float (r0[, r1]).
-    const std::pair<const char*, double (*)(double)> unary_d[] = {
-        {"sin", std::sin}, {"cos", std::cos}, {"tan", std::tan}, {"acos", std::acos}, {"atan", std::atan},
-        {"sqrt", std::sqrt}, {"floor", std::floor}};
-    for (const auto& [name, fn] : unary_d)
-        dispatcher.bind(name, [fn = fn](ImportCall& call) -> std::optional<std::string> { double_result(call, fn(double_arg(call, 0))); return std::nullopt; });
-    const std::pair<const char*, float (*)(float)> unary_f[] = {
-        {"sinf", std::sin}, {"cosf", std::cos}, {"tanf", std::tan}, {"acosf", std::acos}, {"asinf", std::asin},
-        {"atanf", std::atan}, {"sqrtf", std::sqrt}, {"floorf", std::floor}, {"ceilf", std::ceil}, {"log10f", std::log10}};
-    for (const auto& [name, fn] : unary_f)
-        dispatcher.bind(name, [fn = fn](ImportCall& call) -> std::optional<std::string> { float_result(call, fn(float_arg(call, 0))); return std::nullopt; });
-    dispatcher.bind("atan2", [](ImportCall& call) -> std::optional<std::string> { double_result(call, std::atan2(double_arg(call, 0), double_arg(call, 2))); return std::nullopt; });
-    dispatcher.bind("pow", [](ImportCall& call) -> std::optional<std::string> { double_result(call, std::pow(double_arg(call, 0), double_arg(call, 2))); return std::nullopt; });
-    dispatcher.bind("atan2f", [](ImportCall& call) -> std::optional<std::string> { float_result(call, std::atan2(float_arg(call, 0), float_arg(call, 1))); return std::nullopt; });
-    dispatcher.bind("powf", [](ImportCall& call) -> std::optional<std::string> { float_result(call, std::pow(float_arg(call, 0), float_arg(call, 1))); return std::nullopt; });
+    // libm: one-argument and two-argument forms, double (r0:r1[, r2:r3]) and float (r0[, r1]). Each also runs inline
+    // in the block loop (a guidance screen calls sqrt, sin, cos, acos and atan2f over a million times in ten seconds).
+#define ATLAN_LIBM(name, kind, expr) \
+    dispatcher.bind(name, [](ImportCall& call) -> std::optional<std::string> { kind##_service(call, [](auto x, auto y) { (void)y; return expr; }); return std::nullopt; }); \
+    dispatcher.bind_inline(name, [](CpuState& cpu, Memory&) noexcept { return kind##_inline(cpu, [](auto x, auto y) { (void)y; return expr; }); });
+    ATLAN_LIBM("sin", unary_d, std::sin(x)) ATLAN_LIBM("cos", unary_d, std::cos(x)) ATLAN_LIBM("tan", unary_d, std::tan(x))
+    ATLAN_LIBM("acos", unary_d, std::acos(x)) ATLAN_LIBM("atan", unary_d, std::atan(x)) ATLAN_LIBM("sqrt", unary_d, std::sqrt(x))
+    ATLAN_LIBM("floor", unary_d, std::floor(x))
+    ATLAN_LIBM("sinf", unary_f, std::sin(x)) ATLAN_LIBM("cosf", unary_f, std::cos(x)) ATLAN_LIBM("tanf", unary_f, std::tan(x))
+    ATLAN_LIBM("acosf", unary_f, std::acos(x)) ATLAN_LIBM("asinf", unary_f, std::asin(x)) ATLAN_LIBM("atanf", unary_f, std::atan(x))
+    ATLAN_LIBM("sqrtf", unary_f, std::sqrt(x)) ATLAN_LIBM("floorf", unary_f, std::floor(x)) ATLAN_LIBM("ceilf", unary_f, std::ceil(x))
+    ATLAN_LIBM("log10f", unary_f, std::log10(x))
+    ATLAN_LIBM("atan2", binary_d, std::atan2(x, y)) ATLAN_LIBM("pow", binary_d, std::pow(x, y))
+    ATLAN_LIBM("atan2f", binary_f, std::atan2(x, y)) ATLAN_LIBM("powf", binary_f, std::pow(x, y))
+#undef ATLAN_LIBM
     dispatcher.bind("lroundf", [](ImportCall& call) -> std::optional<std::string> {
         call.set_result(static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(float_arg(call, 0))))); return std::nullopt; });
     // void qsort(void* base, size_t n, size_t size, int (*cmp)(const void*, const void*)): a merge sort over element

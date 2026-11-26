@@ -9,6 +9,8 @@
 #include "atlan/string_services.hpp"
 #include <array>
 #include <cstring>
+#include <cmath>
+#include <bit>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -51,7 +53,8 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
                       {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
                       {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}, {"qsort", 0xf00000bc}, {"cmp", 0xf00000c0},
-                      {"memset", 0xf00000c4}, {"memcpy", 0xf00000c8}, {"memmove", 0xf00000cc}, {"strlen", 0xf00000d0}};
+                      {"memset", 0xf00000c4}, {"memcpy", 0xf00000c8}, {"memmove", 0xf00000cc}, {"strlen", 0xf00000d0},
+                      {"sqrtf", 0xf00000d4}, {"atan2f", 0xf00000d8}, {"atan2", 0xf00000dc}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -346,6 +349,17 @@ void libc_extras() {
     check(f.call("strtol", {data + 0x80, data + 0x100, 10}).stop == atlan::Stop::returned && static_cast<std::int32_t>(f.r0()) == -123 &&
           get32(f.runtime.memory, data + 0x100) == data + 0x80 + 6, "strtol value and end pointer");
     check(f.call("sqrt", {0, 0x40100000}).stop == atlan::Stop::returned && f.r0() == 0 && f.runtime.cpu.registers[1] == 0x40000000, "sqrt(4.0) == 2.0 in r0:r1");
+    check(f.call("sqrtf", {0x41100000}).stop == atlan::Stop::returned && f.r0() == 0x40400000, "sqrtf(9.0f) == 3.0f in r0");
+    check(f.call("atan2f", {0x3f800000, 0xbf800000}).stop == atlan::Stop::returned &&
+              f.r0() == std::bit_cast<std::uint32_t>(std::atan2(1.0F, -1.0F)), "atan2f(y, x) takes y in r0 and x in r1");
+    {
+        const auto y = std::bit_cast<std::uint64_t>(1.0), x = std::bit_cast<std::uint64_t>(-1.0);
+        const auto expected = std::bit_cast<std::uint64_t>(std::atan2(1.0, -1.0));
+        check(f.call("atan2", {static_cast<std::uint32_t>(y), static_cast<std::uint32_t>(y >> 32), static_cast<std::uint32_t>(x),
+                               static_cast<std::uint32_t>(x >> 32)}).stop == atlan::Stop::returned &&
+                  f.r0() == static_cast<std::uint32_t>(expected) && f.runtime.cpu.registers[1] == (expected >> 32),
+              "atan2(y, x) takes doubles in r0:r1 and r2:r3");
+    }
     put_text(f.runtime.memory, data + 0x200, "a,b;;c");
     put_text(f.runtime.memory, data + 0x240, ",;");
     std::string tokens;
