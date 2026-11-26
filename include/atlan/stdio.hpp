@@ -35,6 +35,10 @@ public:
     // Fallback for an absolute guest path that no alias matched: the path up to and including its first component
     // equal to `component` (ASCII case-insensitive) is replaced by `host_prefix`. First matching anchor wins.
     void add_anchor(std::string component, std::string host_prefix);
+    // Paths beneath the root (after aliases and anchors) whose leading components equal `host_prefix` (ASCII
+    // case-insensitive) are served from `directory`, which may lie outside the root, e.g. a folder the user picked
+    // elsewhere. First matching mount wins, so add the more specific prefix first.
+    void add_mount(std::filesystem::path host_prefix, std::filesystem::path directory);
     // A file opened read-only through fopen whose path beneath the root equals `relative` (ASCII case-insensitive,
     // after aliases) is served as `transform(its bytes)` from an unnamed temporary file; the host file is untouched.
     void add_read_filter(std::string relative, std::function<std::string(std::string)> transform);
@@ -59,6 +63,7 @@ private:
     [[nodiscard]] std::FILE* open_filtered(const std::filesystem::path& relative) const;
     std::vector<std::pair<std::string, std::string>> aliases_;
     std::vector<std::pair<std::string, std::string>> anchors_;
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> mounts_;
     std::vector<std::pair<std::string, std::function<std::string(std::string)>>> read_filters_;
     std::filesystem::path root_;
     std::uint32_t errno_address_;

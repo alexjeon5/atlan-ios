@@ -192,6 +192,24 @@ void path_mapping() {
     check(f.call("fread", {data + 0x100, 1, 64, file}).stop == atlan::Stop::returned && f.r0() == 8, "and sees the host file itself");
     check(f.call("fclose", {file}).stop == atlan::Stop::returned, "fclose");
     check(std::filesystem::equivalent(f.stdio.host_path("/x/data/sub"), f.root / "DATA" / "Sub") && f.stdio.host_path("/x/data/../..").empty(), "host_path resolves like the guest calls");
+    {   // a mount serves a prefix from a folder outside the root; the more specific mount added first stays separate
+        const auto outside = f.root.parent_path() / (f.root.filename().string() + "-mount");
+        std::filesystem::remove_all(outside);
+        std::filesystem::create_directories(outside / "Sub");
+        std::filesystem::create_directories(f.root / "state");
+        std::ofstream(outside / "Sub" / "Tile.bin", std::ios::binary) << "tile";
+        f.stdio.add_alias("/storage/x", "MNT");
+        f.stdio.add_mount("MNT/NAND", f.root / "state");
+        f.stdio.add_mount("MNT", outside);
+        put_text(f.runtime.memory, data + 0x80, "r");
+        check(reads("/storage/x/sub/tile.bin", "tile"), "a mounted folder is read in place, ignoring case");
+        put_text(f.runtime.memory, data, "/storage/x/NAND/new.txt");
+        put_text(f.runtime.memory, data + 0x80, "wb");
+        check(f.call("fopen", {data, data + 0x80}).stop == atlan::Stop::returned && f.r0() != 0 && f.call("fclose", {f.r0()}).stop == atlan::Stop::returned, "write through the inner mount");
+        check(std::filesystem::exists(f.root / "state" / "new.txt") && !std::filesystem::exists(outside / "NAND"), "the inner mount keeps writes beneath the root");
+        check(std::filesystem::equivalent(f.stdio.host_path("/storage/x"), outside) && f.stdio.host_path("/storage/x/../..").empty(), "host_path follows mounts and still refuses escapes");
+        std::filesystem::remove_all(outside);
+    }
 }
 void directories_and_descriptors() {
     Fixture f;
