@@ -91,6 +91,21 @@ int main() {
         const auto& draw = f.backend.calls.back();
         check(draw.op == GlOp::draw_arrays && draw.attribs.size() == 1 && draw.attribs[0].bytes.size() == 24, "client-side vertices gathered");
 
+        // Indices in an element buffer with client-side attributes: the vertices up to the largest index are gathered.
+        const std::uint16_t indices[4] = {0, 2, 1, 0};
+        f.put(data + 0x600, indices, sizeof indices);
+        check(f.call("glGenBuffers", {1, data + 0x700}).stop == Stop::returned, "gen element buffer");
+        const auto element_buffer = f.get32(data + 0x700);
+        check(f.call("glBindBuffer", {0x8893, element_buffer}).stop == Stop::returned, "bind element buffer");
+        check(f.call("glBufferData", {0x8893, 8, data + 0x600, 0x88E4}).stop == Stop::returned, "element buffer data");
+        check(f.call("glDrawElements", {4, 3, 0x1403, 2}).stop == Stop::returned, "draw elements from a buffer");
+        const auto& indexed = f.backend.calls.back();
+        check(indexed.op == GlOp::draw_elements && indexed.a[4] == element_buffer && indexed.vertex_count == 3 &&
+              indexed.attribs.size() == 1 && indexed.attribs[0].bytes.size() == 24, "client-side vertices gathered for buffer indices");
+        check(f.call("glDrawElements", {4, 3, 0x1403, 6}).stop == Stop::returned && f.backend.calls.back().attribs.empty(),
+              "indices past the buffer gather nothing");
+        check(f.call("glDeleteBuffers", {1, data + 0x700}).stop == Stop::returned, "delete element buffer");
+
         const char* name = "uMvp";
         f.put(data + 0x500, name, 5);
         check(f.call("glGetUniformLocation", {3, data + 0x500}).stop == Stop::returned && f.runtime.cpu.registers[0] == 7, "uniform lookup returns the backend location");

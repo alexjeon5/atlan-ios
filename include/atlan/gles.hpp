@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace atlan {
@@ -85,6 +86,9 @@ private:
     std::uint32_t unpack_alignment_{4};
     std::uint32_t array_buffer_{}, element_buffer_{};
     std::array<Attrib, 16> attribs_{};
+    // Contents of element array buffers (glBufferData while bound there): a draw with indices in a buffer and
+    // client-side attributes needs the largest index to know how many vertices to gather.
+    std::unordered_map<std::uint32_t, std::vector<std::byte>> element_data_;
     friend struct GlesBinder;
 };
 }
