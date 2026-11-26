@@ -14,7 +14,7 @@
 // runs its constructors and JNI_OnLoad, delivers input and draws frames; an AppAdapter supplies what differs per app:
 // where its library is and how it is packaged, how its data folder is laid out, how its Java side answers, and which
 // native entry points start it and draw a frame. Nothing app-specific belongs in the engine (docs/engine-adapter.md).
-namespace atlan { class GuestStdio; class JavaBootstrap; }
+namespace atlan { class AudioSink; class GuestStdio; class JavaBootstrap; }
 namespace atlan::shell {
 class SurfaceState;
 using SessionLog = std::function<void(const std::string&)>;
@@ -38,6 +38,10 @@ public:
     // `message` set to the dispatcher's reason (possibly empty).
     virtual std::optional<std::uint32_t> call_nested(std::uint32_t address, std::span<const std::uint32_t> words,
                                                      std::string& message) = 0;
+    // The session's audio device: the embedder's sink, or a silent one. For sounds the app's Java side plays itself
+    // (a media player), beside the guest's own OpenSL ES output. Streams opened here must be closed by
+    // uninstall_java().
+    [[nodiscard]] virtual AudioSink& audio() = 0;
     // Host surface size, if the embedder supplied one.
     [[nodiscard]] virtual const SurfaceState* surface() const = 0;
     // The session's log. A copy may be kept and called from any thread (the embedder's log is thread-safe).

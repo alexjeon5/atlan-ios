@@ -8,6 +8,7 @@
 @property(class, readonly) UIColor* card;
 @property(class, readonly) UIColor* raised;
 @property(class, readonly) UIColor* line;
+@property(class, readonly) UIColor* lineStrong;  // the border of the selected choice
 @property(class, readonly) UIColor* ink;
 @property(class, readonly) UIColor* ink2;
 @property(class, readonly) UIColor* muted;
@@ -31,6 +32,8 @@ struct LauncherMetrics {
     CGFloat button, iconButton, startColumn, startPadding, startIcon, startTitle, settingsButton;
     CGFloat introColumn, tabColumn, sideColumn;
     CGSize container;  // zero: the whole safe area
+    CGSize portraitContainer;  // the same in portrait
+    CGFloat portraitStart;     // height of the start button when the screen stands upright
     static const LauncherMetrics& current();
 };
 

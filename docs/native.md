@@ -33,7 +33,19 @@
 
 inflate 스트림 집합이 설치되면 디코더 내부 상태가 호스트에 있으므로 `inflateSync`·`inflateSetDictionary`·`inflateSyncPoint`가 호출될 경우 명시적으로 정지한다. 디코더(`src/inflate.cpp`)는 입력·출력을 임의 크기로 나눠 받아도 이어서 동작하며, 호스트 zlib에 의존하지 않는다.
 
-이 집합들은 특정 앱이 아니라 툴체인과 공용 라이브러리의 표준 이름에 대한 것이라 엔진 쪽에 둔다. 앱 고유 함수를 대체하게 되면 그 집합은 어댑터가 만들어 같은 `install_native_functions()`에 넘긴다([엔진/어댑터 경계](engine-adapter.md)).
+이 집합들은 특정 앱이 아니라 툴체인과 공용 라이브러리의 표준 이름에 대한 것이라 엔진 쪽에 둔다. 앱 고유 함수의 집합은 어댑터가 만들어 같은 `install_native_functions()`에 넘긴다([엔진/어댑터 경계](engine-adapter.md)).
+
+## Atlan 어댑터 집합 (`AtlanAdapter::native_sets()`)
+
+멤버는 시그니처 파일로만 찾는다.
+
+| 집합 | 멤버 | 검증 |
+| --- | --- | --- |
+| 사각형 기하 | `orientation`, `segment_relation`, `inside_polygon`, `rectangle_overlap` | 임의 좌표의 반환값과 출력 점 비교 |
+| 문자 변환 (iconv) | `multibyte_to_wide`, `wide_to_multibyte` | CP949↔UTF-16LE를 변환하지 못하는 곳이나 출력이 모자란 곳에서 멈추는 변환. 호스트가 변환하는 모든 코드를 한 번에, 길이·출력 공간 조합, 거부하는 코드 표본 비교 |
+| 문자 변환 (table) | `multibyte_to_wide` | 모르는 코드를 `?`로 바꾸는 표 기반 변환. 표가 덮는 모든 코드를 한 번에, 길이·출력 공간 조합 비교. 표 끝을 넘는 코드는 게스트 코드에 넘김 |
+
+두 문자 변환 집합은 같은 멤버 이름을 쓰는 변형이고, 검증을 통과한 쪽 하나만 설치된다. `atlan-session`에서 `ATLAN_NATIVE_CHECK_ALL=1`이면 iconv 변형을 모든 2바이트 코드와 모든 UTF-16 코드 단위에 대해 하나씩 비교한다. 새 앱 빌드를 한 번 확인할 때 쓴다.
 
 ## 시그니처 파일
 
@@ -47,6 +59,7 @@ inflate 스트림 집합이 설치되면 디코더 내부 상태가 호스트에
 ## 진단
 
 - `ATLAN_NO_NATIVE=1`: 전부 인터프리터로 실행. `ATLAN_NATIVE_SKIP=집합,집합`: 해당 집합만 제외.
+- `ATLAN_PERF=1`이면 대체 설치(검증 포함)에 걸린 시간과 시작 함수(init)의 명령 수·시간·import 집계가 로그에 남는다.
 - 대체 여부에 따라 게스트가 쓰는 명령 수가 크게 달라지므로, 프레임 수로 끊는 헤드리스 실행은 게스트의 시간 기반 대기와 어긋나 로딩 진행 정도가 달라질 수 있다. 비교는 `ATLAN_INTERACTIVE_SECONDS`로 시간을 맞춰서 한다.
 
 ## 테스트

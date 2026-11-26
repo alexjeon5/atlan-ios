@@ -17,6 +17,7 @@ extern NSNotificationName const LauncherSettingsDidChange;
 @property(nonatomic) BOOL setupDone;        // a complete ATLAN folder has been seen once
 @property(nonatomic) LauncherAppearance appearance;
 @property(nonatomic) BOOL notchInset;
+@property(nonatomic) BOOL duckOthers;      // lower other apps' audio while a voice prompt plays
 @property(nonatomic) BOOL sessionLog;
 @property(nonatomic) BOOL perfLog;
 @property(nonatomic) BOOL networkLog;
@@ -27,7 +28,14 @@ extern NSNotificationName const LauncherSettingsDidChange;
 @property(nonatomic, readonly, nullable) NSURL* pickedFolder;
 - (void)usePickedFolder:(NSURL*)url;  // a URL from the folder picker
 - (void)forgetPickedFolder;
-// The ATLAN folder in use: inside the picked folder if there is one, else Documents/ATLAN. Empty when neither exists.
+// ATLAN folders side by side in Documents (ATLAN, ATLAN_RTA, ...), by name.
+@property(nonatomic, readonly) NSArray<NSString*>* documentsFolders;
+// The one of them chosen when there are several.
+- (void)chooseDocumentsFolder:(NSString*)path;
+// Several are there, none has been chosen and no folder elsewhere was picked.
+@property(nonatomic, readonly) BOOL needsFolderChoice;
+// The ATLAN folder in use: inside the picked folder if there is one, else the chosen (or only) one in Documents.
+// Empty when there is none or a choice is still needed.
 @property(nonatomic, readonly) NSString* atlanFolder;
 @property(nonatomic, readonly) BOOL atlanFolderIsPicked;
 

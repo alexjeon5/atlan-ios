@@ -248,6 +248,11 @@ void data_status(const fs::path& scratch) {
     check(status.map == "26.10.20", "a data file's trailer date");
     check(status.route.empty() && status.search.empty() && status.safety_main.empty() && status.safety_sub.empty(),
           "a wrong tag, a missing file, a short date and a short file give no version");
+    fs::create_directories(picked / "ATLAN_RTA" / "Sys");
+    fs::create_directories(picked / "logs");
+    const auto sets = find_atlan_folders(picked.string());
+    check(sets.size() == 2 && sets[0] == (picked / "ATLAN_RTA").string() && sets[1] == atlan.string(),
+          "several data sets side by side are found by their top folders, other folders are not");
     write(atlan / "app" / "Atlan3d.inf", bytes("Atlan5 (9.9.9)"));
     check(!is_verified(inspect_atlan_data(atlan.string())), "an unlisted build is not verified");
 }
