@@ -12,6 +12,36 @@
 namespace atlan {
 namespace {
 constexpr std::uint32_t max_block = 64U * 1024 * 1024;  // bound one service call
+// Fast paths for the block cache (ImportDispatcher::bind_inline). Each does what the service below does, and leaves
+// every call the service would fail to it, before changing anything.
+[[nodiscard]] std::uint32_t reg(const CpuState& cpu, unsigned index) noexcept { return static_cast<std::uint32_t>(cpu.registers[index]); }
+bool memset_inline(CpuState& cpu, Memory& memory) noexcept {
+    const auto dest = reg(cpu, 0), count = reg(cpu, 2);
+    if (count > max_block || (count != 0 && std::uint64_t{dest} + count > 0x100000000ULL)) return false;
+    if (!memory.fill(dest, std::byte(reg(cpu, 1) & 0xff), count)) return false;
+    return true;  // r0 is already dest
+}
+bool memmove_inline(CpuState& cpu, Memory& memory) noexcept {
+    const auto dest = reg(cpu, 0), src = reg(cpu, 1), count = reg(cpu, 2);
+    if (count > max_block) return false;
+    if (count != 0 && (std::uint64_t{src} + count > 0x100000000ULL || std::uint64_t{dest} + count > 0x100000000ULL)) return false;
+    return memory.move(dest, src, count);
+}
+bool strlen_inline(CpuState& cpu, Memory& memory) noexcept {
+    const auto start = reg(cpu, 0);
+    for (std::uint64_t length = 0; length < max_block;) {
+        if (std::uint64_t{start} + length > 0xffffffffULL) return false;
+        const auto bytes = memory.page_span(static_cast<std::uint32_t>(start + length), MemoryAccess::read);
+        if (bytes.empty()) return false;
+        const auto scan = static_cast<std::size_t>(std::min<std::uint64_t>(bytes.size(), max_block - length));
+        if (const void* end = std::memchr(bytes.data(), 0, scan)) {
+            cpu.registers[0] = static_cast<std::uint32_t>(length + static_cast<std::size_t>(static_cast<const std::byte*>(end) - bytes.data()));
+            return true;
+        }
+        length += scan;
+    }
+    return false;
+}
 }
 void install_libc_services(ImportDispatcher& dispatcher) {
     // POSIX drand48 family (only srand48/lrand48 are imported): X = (0x5DEECE66D * X + 0xB) mod 2^48,
@@ -51,6 +81,8 @@ void install_libc_services(ImportDispatcher& dispatcher) {
         }
         return "strlen exceeds service bound";
     });
+    dispatcher.bind_inline("memset", memset_inline);
+    dispatcher.bind_inline("strlen", strlen_inline);
     // char* strcpy(char* dest, const char* src): copies through the terminator.
     dispatcher.bind("strcpy", [](ImportCall& call) -> std::optional<std::string> {
         const auto dest = call.arg(0), src = call.arg(1);
@@ -83,6 +115,8 @@ void install_libc_services(ImportDispatcher& dispatcher) {
             call.set_result(dest);
             return std::nullopt;
         });
+    dispatcher.bind_inline("memcpy", memmove_inline);
+    dispatcher.bind_inline("memmove", memmove_inline);
     // C-locale <ctype.h>: ASCII only, EOF and values above 255 are not characters.
     const auto ctype = [&dispatcher](const char* name, bool (*test)(std::uint32_t)) {
         dispatcher.bind(name, [test](ImportCall& call) -> std::optional<std::string> {

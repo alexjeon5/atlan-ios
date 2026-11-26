@@ -44,7 +44,7 @@ using Error = std::optional<std::string>;
 // The same division on the CPU registers, for the block cache. Division by zero declines to the service, which
 // declines in turn so the guest's own helper raises its error.
 template <bool Signed, bool Remainder>
-bool divide_inline(CpuState& cpu) noexcept {
+bool divide_inline(CpuState& cpu, Memory&) noexcept {
     const auto a = static_cast<std::uint32_t>(cpu.registers[0]), b = static_cast<std::uint32_t>(cpu.registers[1]);
     if (b == 0) return false;
     std::uint32_t quotient, rest;

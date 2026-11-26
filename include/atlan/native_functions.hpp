@@ -53,7 +53,7 @@ struct NativeSet {
         bool required{true};               // a set without one of its required members is not installed
         // Optional register-only form of `service` that the block cache calls in place of the trap
         // (ImportDispatcher::replace_function_inline); false declines to `service`.
-        bool (*inline_run)(CpuState& cpu) noexcept{};
+        InlineRun inline_run{};
     };
     std::string name;
     std::vector<Member> members;

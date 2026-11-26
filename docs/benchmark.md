@@ -68,5 +68,6 @@ VM 시간 측정은 ±30% 흔들려서 작은 변경은 callgrind의 명령 수(
 - 전용 핸들러가 없는 것: LDRD/STRD, TBB/TBH, 비트 필드, 긴 곱셈, 배타 접근, Thumb의 VFP. 첫 실측에서 전용 핸들러 없이 실행된 명령은 6.59억 중 2,900만이었고, 그 대부분(레지스터 시프트 MOV, PC 상대 ADD/LDR, BX pc, MLA)에는 이후 핸들러를 넣었다.
 - import 호출은 실행 불가 PC에서 블록 실행이 바로 fetch 폴트를 돌려주는 것으로 시작한다(`step()`을 거치지 않는다). 트랩 주소에서 서비스와 카운터를 찾는 조회는 주소별로 캐시한다. `Memory::fill/move/page_span`으로 memset·memcpy·memmove·memcmp·strcmp·strlen이 호스트 버퍼 없이 페이지 단위로 동작한다.
 - 바꾼 함수(UDF 트랩) 호출은 블록 루프가 바로 보고하고, 나눗셈은 루프 안에서 끝낸다(`docs/native.md`). 기기 모의주행 8배속에서 `__aeabi_idivmod`가 10초에 300만~530만 번 불린 것이 계기다.
+- 자주 불리는 import(memcmp·strcmp·strncmp·memset·memcpy·memmove·strlen)도 `ImportDispatcher::bind_inline()`으로 블록 루프 안에서 끝난다. 실행 불가 PC는 명령 하나짜리 블록(인라인 함수 또는 fetch 폴트)으로 캐시되어 다른 블록처럼 링크로 찾는다. 인라인 함수는 서비스가 실패할 호출(폴트, 한도 초과)을 아무것도 바꾸지 않고 거절하고, 그 호출은 서비스가 받아 기존과 같이 보고한다. 서버 지도 화면에서 memcmp가 10초에 약 1,300만 번 불려 디스패처 왕복이 실행 시간의 약 10%였다. 바꾼 뒤 정상 상태의 게스트 명령당 호스트 명령은 49.2 → 44.2(블록 루프 정리 포함, `perf stat` 명령 수)다.
 - 추정(미측정): 실제 빈도로 고른 명령 융합(CMP+Bcc 등), `musttail` 꼬리 호출 체인, 빌드 시점 AOT가 다음 후보다.
 - iOS 기기 값, 발열·배터리에 대한 값은 없다.
