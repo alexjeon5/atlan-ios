@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Synthetic APK and encoded .dat packages: DEFLATE decoding, library selection, .dat decoding and discovery.
+// Synthetic APK and encoded .dat packages: DEFLATE decoding, library selection, .dat decoding and discovery, and the
+// launcher's view of a synthetic data folder.
 #include "shell/app_package.hpp"
+#include "adapters/atlan/data_status.hpp"
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -206,6 +208,48 @@ void discovery(const fs::path& scratch) {
     const fs::path other_case = scratch / "Lower";
     write(other_case / "atlan" / "app" / "ATLAN.DAT", encode_dat(apk, bytes({9, 9, 9, 9}), bytes({1, 0, 0, 1})));
     check(find_package(other_case.string()) == (other_case / "atlan" / "app" / "ATLAN.DAT").string(), "folder and file names match in any case");
+    check(atlan::shell::find_package_in((other_case / "atlan").string()) == (other_case / "atlan" / "app" / "ATLAN.DAT").string(),
+          "the search also starts inside a picked ATLAN folder");
+}
+
+Bytes trailer(std::string_view date, std::string_view tag = "ATLANVERINFO") {
+    Bytes out = bytes("data");
+    Bytes tail(48, std::byte{0});
+    for (std::size_t i = 0; i < tag.size(); ++i) tail[i] = std::byte(tag[i]);
+    for (std::size_t i = 0; i < date.size(); ++i) tail[32 + i] = std::byte(date[i]);
+    out.insert(out.end(), tail.begin(), tail.end());
+    return out;
+}
+
+void data_status(const fs::path& scratch) {
+    using namespace atlan::shell;
+    const fs::path picked = scratch / "Picked";
+    const fs::path atlan = picked / "atlan";
+    check(!inspect_atlan_data(atlan.string()).found, "a missing folder is not found");
+    fs::create_directories(atlan / "map" / "map");
+    fs::create_directories(atlan / "UI");
+    auto status = inspect_atlan_data(atlan.string());
+    check(status.found && !status.folders_present() && !status.ready(), "a folder without APP and Sys is not ready");
+    check(status.folders[2].present && status.folders[1].present && !status.folders[0].present && !status.folders[3].present,
+          "each top folder is checked in any case");
+    check(resolve_atlan_folder(picked.string()) == atlan.string() && resolve_atlan_folder(atlan.string()) == atlan.string(),
+          "a picked parent leads to its ATLAN folder");
+    write(atlan / "app" / "Atlan3d.inf", bytes("Atlan3DA (6.4.21)"));
+    write(atlan / "app" / "atlan.dat", encode_dat(zip({{"lib/armeabi/libatlan3dv5.so", elf_like(3), {}}}), bytes({1, 2, 3, 4}), bytes({1, 6, 4, 21})));
+    fs::create_directories(atlan / "SYS");
+    write(atlan / "map" / "map" / "BASE3D.MAP", trailer("261020"));
+    write(atlan / "map" / "NDB" / "road.ndb", trailer("261020", "OTHERTAG"));
+    write(atlan / "map" / "map" / "camerat1.map", trailer("2611"));
+    write(atlan / "map" / "map" / "camerat2.map", bytes("short"));
+    status = inspect_atlan_data(atlan.string());
+    check(status.ready(), "all four folders and a package make a ready folder");
+    check(status.app_name == "Atlan3DA" && status.app_version == "6.4.21" && status.app_label() == "Atlan3DA 6.4.21", "the app's name and version");
+    check(is_verified(status), "a listed build is verified");
+    check(status.map == "26.10.20", "a data file's trailer date");
+    check(status.route.empty() && status.search.empty() && status.safety_main.empty() && status.safety_sub.empty(),
+          "a wrong tag, a missing file, a short date and a short file give no version");
+    write(atlan / "app" / "Atlan3d.inf", bytes("Atlan5 (9.9.9)"));
+    check(!is_verified(inspect_atlan_data(atlan.string())), "an unlisted build is not verified");
 }
 }
 
@@ -216,6 +260,7 @@ int main() {
         inflating();
         packages();
         discovery(scratch);
+        data_status(scratch);
         fs::remove_all(scratch);
         std::cout << "package tests passed: " << checks << " checks\n";
     } catch (const std::exception& error) {

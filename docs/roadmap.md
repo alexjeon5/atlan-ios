@@ -87,8 +87,9 @@ AOT 번역된 arm64-v8a 네이티브 라이브러리로 Android 패키지를 만
 - 비공개 저장소의 macOS 러너는 분당 사용량이 10배로 계산된다. iOS 빌드만 돌리고, 엔진 테스트는 공개 저장소에서 돌린다.
 - 원본 바이너리에서 얻은 데이터를 담은 IPA는 개인 사용 전용이다. 공개 릴리스·아티팩트로 올리지 않는다. 엔진이 GPL-2.0-or-later 출처라서, 다른 사람에게 배포하면 그 IPA의 소스 공개 의무도 따라온다.
 - 그때까지는 지금처럼 앱별 파일을 기기에 따로 넣는다.
-- 아틀란 전용 앱에는 시작 화면(랜딩)과 옵션을 두고, 아이폰 노치 쪽 여백을 켜고 끄는 옵션을 넣는다. 지금은 노치(다이내믹 아일랜드)가 있는 쪽만 safe area 폭만큼 비우는 동작이 항상 켜져 있다(`platform/ios/main.mm`의 `notchInsets`). 나머지는 지금처럼 화면 전체로 늘린다.
-- 앱 화면 오른쪽 아래의 홈 버튼은 원래 차량 단말의 런처로 가는 메시지(`SendMsgFromAtlan` 5번)라서 폰에서는 받는 곳이 없다. 어댑터가 이 메시지를 `AtlanAdapter::Config::on_home`으로 넘기고, iOS 셸은 그때 `platform/ios/landing_view_controller.*`의 임시 홈 화면을 게스트 위에 띄운다(게스트는 아래에서 계속 돈다). 지금은 지도로 돌아가는 버튼만 있고, 시작 화면과 옵션이 생기면 이 자리를 바꾼다.
+- 아틀란 전용 런처(Atlan iOS Launcher, 홈 화면 이름 "Atlan")는 `adapters/atlan/ios/`에 있다. 첫 실행(ATLAN 폴더 넣기·선택, 자동 시작 묻기), 시작 화면(APP·UI·MAP·Sys 폴더와 앱 패키지를 백그라운드로 점검하고 앱·지도·안전운전 버전 표시), 설정(일반·지도 데이터·버전 정보·개발자)을 담는다. 문구는 `launcher_text.h`, 색과 크기는 `launcher_style.*`에 모아 둬서 시안이 바뀌어도 그 두 파일과 화면 조립부만 고치면 된다. 버전 읽기와 폴더 점검은 `adapters/atlan/data_status.*`(C++, 테스트 있음).
+- 앱 화면 오른쪽 아래의 홈 버튼(`SendMsgFromAtlan` 5번)은 어댑터가 `AtlanAdapter::Config::on_home`으로 넘기고, iOS 셸은 그때 런처를 게스트 위에 띄운다(게스트는 아래에서 계속 돈다). 노치 쪽 여백(`platform/ios/main.mm`의 `notchInsets`)은 런처 설정에서 켜고 끈다.
+- 다른 위치(iCloud Drive 등)에서 고른 ATLAN 폴더는 보안 범위 북마크로 기억하고, 어댑터가 `GuestStdio::add_mount`로 그 폴더를 제자리에서 읽힌다. 앱이 쓰는 `ATLAN/NAND`는 앱 Documents에 남는다. 아직 iCloud에서 내려받지 않은 파일을 미리 걸러내는 점검은 없다.
 
 ## 위험
 

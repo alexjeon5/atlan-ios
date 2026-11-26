@@ -60,10 +60,21 @@ std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) 
     // The data folder may live on a case-sensitive host while the app was written for Android's case-insensitive
     // storage: take the exact name when it exists, else the unique-by-iteration case-insensitive match. The exact
     // path costs one host lookup; anything else is answered from cached directory listings.
-    std::error_code ec;
-    if (auto direct = root_ / relative; std::filesystem::exists(direct, ec)) return direct;
     std::filesystem::path current = root_;
-    for (const auto& part : relative) {
+    auto next = relative.begin();
+    for (const auto& [prefix, directory] : mounts_) {
+        auto part = relative.begin();
+        auto wanted = prefix.begin();
+        while (wanted != prefix.end() && part != relative.end() && ascii_lower(wanted->string()) == ascii_lower(part->string()))
+            ++wanted, ++part;
+        if (wanted == prefix.end()) { current = directory; next = part; break; }
+    }
+    std::filesystem::path rest;
+    for (auto part = next; part != relative.end(); ++part) rest /= *part;
+    if (rest.empty()) return current;
+    std::error_code ec;
+    if (auto direct = current / rest; std::filesystem::exists(direct, ec)) return direct;
+    for (const auto& part : rest) {
         const auto& names = listing(current);
         const auto name = part.string();
         if (names.names.contains(name)) { current /= part; continue; }
@@ -71,6 +82,11 @@ std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) 
         else current /= part;
     }
     return current;
+}
+void GuestStdio::add_mount(std::filesystem::path host_prefix, std::filesystem::path directory) {
+    if (host_prefix.empty()) return;
+    mounts_.emplace_back(std::move(host_prefix), std::move(directory));
+    changed();
 }
 void GuestStdio::add_alias(std::string guest_prefix, std::string host_prefix) {
     while (guest_prefix.size() > 1 && guest_prefix.back() == '/') guest_prefix.pop_back();
