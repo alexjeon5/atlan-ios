@@ -17,6 +17,7 @@
 #include "shell/log_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/session.hpp"
+#include <algorithm>
 #include <atomic>
 #include <exception>
 #include <memory>
@@ -330,6 +331,29 @@
     [self applyLocationSource];  // the developer setting's fixed position, switched on or off or moved
 }
 
+// Posted on any thread.
+- (void)framePolicyChanged {
+    __weak ShellViewController* weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf applyFramePolicy]; });
+}
+
+// Frames slow down as the device warms up, and in Low Power Mode, below the 20 per second the run allows at most.
+- (void)applyFramePolicy {
+    if (!_session) return;
+    NSProcessInfo* info = NSProcessInfo.processInfo;
+    std::uint32_t floor = 0;
+    switch (info.thermalState) {
+    case NSProcessInfoThermalStateFair: floor = 67; break;       // 15 frames per second
+    case NSProcessInfoThermalStateSerious: floor = 100; break;   // 10
+    case NSProcessInfoThermalStateCritical: floor = 200; break;  // 5
+    default: break;
+    }
+    if (info.lowPowerModeEnabled) floor = std::max<std::uint32_t>(floor, 100);
+    _session->set_frame_interval_floor_ms(floor);
+    [self note:[NSString stringWithFormat:@"frame floor %u ms (thermal %ld, low power %d)", floor,
+                                          static_cast<long>(info.thermalState), info.lowPowerModeEnabled ? 1 : 0]];
+}
+
 // A line of the shell itself, kept in the session log file.
 - (void)note:(NSString*)line {
     _logFile.write(line.UTF8String ?: "?");
@@ -357,6 +381,11 @@
     atlan::AppleAudioSink::set_duck_others(LauncherSettings.shared.duckOthers);
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged)
         name:LauncherSettingsDidChange object:nil];
+    // The device getting warm or Low Power Mode lowers the frame rate (applyFramePolicy).
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(framePolicyChanged)
+        name:NSProcessInfoThermalStateDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(framePolicyChanged)
+        name:NSProcessInfoPowerStateDidChangeNotification object:nil];
 }
 
 - (CAMetalLayer*)metalLayer { return _layer; }
@@ -405,6 +434,7 @@
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ exit(0); });
     };
     config.frame_interval_ms = 50;  // 20 frames per second at most, for heat
+    config.still_frame_interval_ms = 100;  // a picture that does not change: 10, then 5 frames per second
     _guestSurface.store(0);
     (void)_input.drain();
     config.input = &_input;
@@ -488,6 +518,7 @@
             }
         });
     if (!_session->start()) { [self note:@"thread start failed"]; return; }
+    [self applyFramePolicy];
     UIApplication.sharedApplication.idleTimerDisabled = YES;  // a navigation screen stays on without touches
     [_watch invalidate];
     _watch = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer*) { [weakSelf watchSession]; }];

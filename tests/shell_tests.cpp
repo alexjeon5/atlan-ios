@@ -5,6 +5,7 @@
 #include "atlan/audio.hpp"
 #include "shell/coordinate.hpp"
 #include "shell/data_file.hpp"
+#include "shell/frame_hash.hpp"
 #include "shell/render_config.hpp"
 #include "adapters/atlan/guest_ini.hpp"
 #include "adapters/atlan/java_services.hpp"
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -421,12 +423,60 @@ void coordinates() {
         check(!parse_coordinate(bad), bad);
 }
 
+// FrameHashBackend: a frame that draws what the one before drew is "same", with new object names and client pointers.
+void frame_hash() {
+    using atlan::GlCall, atlan::GlOp;
+    atlan::NullGlBackend sink;
+    atlan::shell::FrameHashBackend hash(sink);
+    const auto op = [&](GlOp o, std::array<std::uint32_t, 8> a = {}, std::vector<std::byte> data = {}) {
+        GlCall call;
+        call.op = o;
+        call.a = a;
+        call.data = std::move(data);
+        hash.execute(call);
+    };
+    const auto swap = [&] { op(GlOp::swap_buffers); return hash.last_frame_same(); };
+    const std::vector<std::byte> pixels(16, std::byte{7}), other(16, std::byte{9});
+    // A frame: a new texture with the same pixels, its parameters set again, a client-array draw at a new address.
+    const auto frame = [&](std::uint32_t texture, std::uint32_t pointer, const std::vector<std::byte>& image, float x) {
+        op(GlOp::bind_texture, {0x0DE1, texture});
+        op(GlOp::tex_image_2d, {0x0DE1, 0, 0x1908, 2, 2, 0, 0x1908, 0x1401}, image);
+        op(GlOp::tex_parameter_i, {0x0DE1, 0x2801, 0x2601});
+        op(GlOp::vertex_attrib_pointer, {0, 2, 0x1406, 0, 0, pointer, 0});
+        GlCall draw;
+        draw.op = GlOp::draw_arrays;
+        draw.a = {4, 0, 4};
+        draw.vertex_count = 4;
+        atlan::GlAttribData attrib;
+        attrib.size = 2;
+        attrib.type = 0x1406;
+        attrib.bytes.resize(32);
+        std::memcpy(attrib.bytes.data(), &x, sizeof x);
+        draw.attribs.push_back(attrib);
+        hash.execute(draw);
+        op(GlOp::delete_texture, {texture});
+    };
+    frame(5, 0x1000, pixels, 1.0f);
+    check(!swap(), "the first frame has nothing to repeat");
+    frame(6, 0x2000, pixels, 1.0f);
+    check(swap(), "new names and pointers with the same contents draw the same frame");
+    frame(7, 0x3000, other, 1.0f);
+    check(swap(), "a changed texture is one changed call, within the allowance");
+    for (int i = 0; i < 20; ++i) frame(8 + i, 0x4000, pixels, 1.0f + static_cast<float>(i));
+    check(!swap(), "twenty changed draws are a different frame");
+    for (int i = 0; i < 20; ++i) frame(40 + i, 0x4000, pixels, 1.0f + static_cast<float>(i));
+    check(swap(), "the same twenty draws again are the same frame");
+    for (int i = 0; i < 19; ++i) frame(80 + i, 0x4000, pixels, 1.0f + static_cast<float>(i));
+    check(!swap(), "a different number of calls is a different frame");
+}
+
 int main() {
     try {
         quad_geometry();
         speed_readout();
         text_conversion();
         home_button();
+        frame_hash();
         scratch = fs::temp_directory_path() / ("atlan-shell-" + std::to_string(::getpid()));
         fs::create_directories(scratch);
         {

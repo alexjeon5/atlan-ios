@@ -120,6 +120,8 @@ int main(int argc, char** argv) {
     const char* interactive = std::getenv("ATLAN_INTERACTIVE_SECONDS");
     config.interactive = interactive != nullptr;
     config.render_on_demand = std::getenv("ATLAN_ON_DEMAND") != nullptr;
+    // ATLAN_STILL_MS=N: frames that repeat the previous frame are spaced at least N ms apart (SessionConfig).
+    if (const char* still = std::getenv("ATLAN_STILL_MS")) config.still_frame_interval_ms = static_cast<std::uint32_t>(std::atoi(still));
     if (config.interactive && !config.input) config.input = &input;
     atlan::shell::GuestSession session(config, [](const std::string& line) { std::cout << line << std::endl; });
     session.start();

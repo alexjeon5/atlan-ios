@@ -40,6 +40,12 @@ struct SessionConfig {
     // once a second). The interactive loop ends.
     std::function<void()> on_guest_exit;
     std::uint32_t frame_interval_ms{33};          // lower bound on the time per interactive frame
+    // Frames that draw what the frame before them drew (the same GL calls and data, but for a few calls: a turning
+    // landmark, a clock) are spaced further apart: when at most a fifth of the last `still_after_frames` (1-16) frames
+    // changed, at least `still_frame_interval_ms`; when at most a quarter of the last four times as many changed, twice
+    // that. A moving picture returns to `frame_interval_ms` within a few frames, a touch at once. 0: off.
+    std::uint32_t still_frame_interval_ms{};
+    std::uint32_t still_after_frames{10};
     // Interactive frames are drawn only when the guest asks for one, as a GLSurfaceView in RENDERMODE_WHEN_DIRTY
     // would, if the adapter supports frame requests. Without a request the guest is asked once per `idle_redraw_ms`
     // whether it is ready and a frame is drawn only if so (a frame drawn while it is not ready shows just the clear
@@ -74,12 +80,16 @@ public:
     void stop() noexcept { stop_.store(true); }
     void join() noexcept;
     [[nodiscard]] SessionState state() const noexcept { return state_.load(); }
+    // A lower bound on the time per interactive frame on top of `frame_interval_ms`, from any thread (the host's
+    // thermal or power state). 0: none.
+    void set_frame_interval_floor_ms(std::uint32_t ms) noexcept { frame_floor_ms_.store(ms, std::memory_order_relaxed); }
 private:
     struct Thread;
     void run();
     SessionConfig config_;
     Log log_;
     std::atomic<bool> stop_{false};
+    std::atomic<std::uint32_t> frame_floor_ms_{0};
     std::atomic<SessionState> state_{SessionState::idle};
     std::unique_ptr<Thread> thread_;
 };

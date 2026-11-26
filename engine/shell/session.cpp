@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shell/session.hpp"
 #include "shell/app_adapter.hpp"
+#include "shell/frame_hash.hpp"
 #include "shell/sha256.hpp"
 #include <iterator>
+#include <bit>
 #include <chrono>
 #include <algorithm>
 #include "atlan/gles.hpp"
@@ -251,7 +253,8 @@ void GuestSession::run() {
         });
         android_log.install(dispatcher);
         NullGlBackend null_gl;
-        Gles2 gles(config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl), Gles2::Config{guard_page + 0x800});
+        FrameHashBackend gl_sink(config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl));
+        Gles2 gles(gl_sink, Gles2::Config{guard_page + 0x800});
         gles.install(dispatcher);
         dispatcher.attach(image);
         auto initializers = std::move(image.initializers);
@@ -452,6 +455,7 @@ void GuestSession::run() {
                 if (const auto* runner = dispatcher.block_runner()) {
                     const auto& st = runner->stats();
                     line += "; blocks built " + std::to_string(st.blocks_built) + ", flushes " + std::to_string(st.flushes) +
+                            ", full flushes " + std::to_string(st.capacity_flushes) +
                             ", without fast handler " + std::to_string(st.generic) + ", fallbacks " + std::to_string(st.fallbacks) +
                             ", single steps " + std::to_string(st.slow_steps) + "; top forms without fast handler:";
                     const auto forms = runner->generic_forms();
@@ -535,6 +539,7 @@ void GuestSession::run() {
                 else note("input: " + b.class_name + "." + b.name + b.signature + " is neither registered nor exported");
                 return bound[&b] = out;
             };
+            bool touched = false;  // a touch was delivered since the interactive loop last looked
             const auto deliver_input = [&]() -> bool {
                 if (!adapter.deliver(host)) return false;  // what the app's Java side delivers (replies, state)
                 if (!config_.input) return true;
@@ -550,6 +555,7 @@ void GuestSession::run() {
                     if (const auto lost = location_watch.lost(now_ms)) events.emplace_back(*lost);
                 for (const auto& event : events) {
                     const bool touch = std::holds_alternative<TouchEvent>(event);
+                    if (touch) touched = true;
                     if (const auto* fix = std::get_if<LocationFix>(&event)) adapter.location_delivered(*fix);
                     const auto bindings = input_bindings.matching(event);
                     if (bindings.empty()) note(std::string("input: no binding for ") + (touch ? "touch" : "location") + " events");
@@ -597,7 +603,7 @@ void GuestSession::run() {
                     if (surfaces_ok) {
                         GlCall swap;
                         swap.op = GlOp::swap_buffers;
-                        (config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl)).execute(swap);
+                        gl_sink.execute(swap);
                     }
                 }
                 if (!surfaces_ok) return;  // fail() already recorded the stop
@@ -632,8 +638,26 @@ void GuestSession::run() {
                 dispatcher.reset_import_counts();
                 log_(on_demand ? "frames on request" : "frames every interval");
                 auto last_draw = std::chrono::steady_clock::now();
-                auto next_draw = last_draw;  // a frame starts no earlier: `frame_interval_ms` after the previous one
+                auto next_draw = last_draw;  // a frame starts no earlier than the frame interval after the previous one
                 std::uint64_t drawn = 0;
+                // One bit per drawn frame, the newest in bit 0: set when the frame drew what the frame before it drew.
+                // The interval stretches when nearly all recent frames were still (still_frame_*), so a change now and
+                // then (a GPS fix, a label) keeps the slow rate and a moving map returns to the full rate in a few frames.
+                std::uint64_t still_history = 0;
+                std::uint32_t history_frames = 0;  // frames recorded in `still_history` since the last touch, at most 64
+                std::uint64_t still_drawn = 0;     // still frames since the last report
+                const auto changed_in_last = [&](std::uint32_t frames) {
+                    const std::uint64_t mask = frames >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << frames) - 1;
+                    return frames - static_cast<std::uint32_t>(std::popcount(still_history & mask));
+                };
+                const auto frame_interval = [&](bool still) {
+                    std::uint32_t ms = std::max(config_.frame_interval_ms, frame_floor_ms_.load(std::memory_order_relaxed));
+                    const std::uint32_t after = std::clamp<std::uint32_t>(config_.still_after_frames, 1, 16);
+                    if (still && config_.still_frame_interval_ms != 0 && history_frames >= after && changed_in_last(after) <= after / 5)
+                        ms = std::max(ms, history_frames >= 4 * after && changed_in_last(4 * after) <= after
+                                              ? 2 * config_.still_frame_interval_ms : config_.still_frame_interval_ms);
+                    return std::chrono::milliseconds(ms);
+                };
                 // Between frames the loop wakes for the guest's own timers (a thread in usleep or a timed wait) and
                 // for input instead of sleeping out the interval, so the guest's threads keep their pace and a
                 // request for a frame is served as soon as the interval allows.
@@ -645,6 +669,13 @@ void GuestSession::run() {
                 while (!stop_.load()) {
                     const auto frame_start = std::chrono::steady_clock::now();
                     if (!deliver_input()) return;
+                    if (touched) {
+                        // A touch is answered at the full rate, also when the screen had been still.
+                        touched = false;
+                        next_draw = std::min(next_draw, last_draw + frame_interval(false));
+                        still_history = 0;
+                        history_frames = 0;
+                    }
                     if (program_exit && program_exit->type == 2 && frame_start >= next_exit_check) {
                         next_exit_check = frame_start + std::chrono::seconds(1);
                         const auto asked = dispatcher.call(runtime, program_exit->address, render_args, stack_base + stack_bytes,
@@ -670,7 +701,6 @@ void GuestSession::run() {
                     if (draw) {
                         adapter.frame_drawn();
                         last_draw = frame_start;
-                        next_draw = frame_start + std::chrono::milliseconds(config_.frame_interval_ms);
                         ++drawn;
                         frame = dispatcher.call(runtime, render->address, render_args, stack_base + stack_bytes,
                                                 return_sentinel, config_.surface_call_budget);
@@ -681,7 +711,12 @@ void GuestSession::run() {
                         }
                         GlCall swap;
                         swap.op = GlOp::swap_buffers;
-                        (config_.gl_backend ? *config_.gl_backend : static_cast<GlBackend&>(null_gl)).execute(swap);
+                        gl_sink.execute(swap);
+                        const bool still = gl_sink.last_frame_same();
+                        still_history = still_history << 1 | (still ? 1U : 0U);
+                        history_frames = std::min<std::uint32_t>(history_frames + 1, 64);
+                        if (still) ++still_drawn;
+                        next_draw = frame_start + frame_interval(true);
                     }
                     const double rendered = seconds_since(frame_start);
                     const auto pump_start = std::chrono::steady_clock::now();
@@ -725,13 +760,14 @@ void GuestSession::run() {
                             std::to_string(render_seconds > 0 ? static_cast<double>(render_instructions) / render_seconds / 1e6 : 0.0) +
                             " MIPS; time render " + share(render_seconds) + "%, threads " + share(pump_seconds) + "% (" +
                             std::to_string(pump_seconds > 0 ? static_cast<double>(pump_instructions) / pump_seconds / 1e6 : 0.0) +
-                            " MIPS), audio " + share(audio_seconds) + "%, idle " + share(idle_seconds) + "%";
+                            " MIPS), audio " + share(audio_seconds) + "%, idle " + share(idle_seconds) + "%; still frames " +
+                            std::to_string(still_drawn) + ", interval " + std::to_string(frame_interval(true).count()) + " ms";
                         if (config_.perf_log) line += perf_details();
                         log_(line);
                         write_profile("frames");
                         dispatcher.reset_import_counts();
                         report_start = std::chrono::steady_clock::now();
-                        frames = render_instructions = pump_instructions = drawn = 0;
+                        frames = render_instructions = pump_instructions = drawn = still_drawn = 0;
                         render_seconds = render_worst = pump_seconds = audio_seconds = idle_seconds = 0;
                     }
                 }

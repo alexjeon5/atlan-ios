@@ -11,6 +11,8 @@
 
 `SessionConfig::interactive`가 켜져 있으면 첫 `render_frames` 프레임과 기존 `pump`·오디오 단계가 끝난 뒤(로그 `interactive`), 중지될 때까지 입력 전달 → `renderGLSF` → swap → 게스트 스레드 `pump` → 오디오 콜백을 반복한다. 프레임 간격의 하한은 `frame_interval_ms`(기본 33ms)다. `render_on_demand`가 켜져 있으면(iOS 앱) `renderGLSF`는 게스트가 프레임을 요청했을 때만 부른다. 요청은 게스트 GL 스레드의 `callBackGLThread` 콜백이고, 안드로이드 쪽 Java 코드처럼 `isStateReady` → `isGLInit` → `setState(3)` 순서로 응답한다(`RENDERMODE_WHEN_DIRTY`). 요청이 없으면 `idle_redraw_ms`(기본 1초)마다 같은 질문을 직접 해서 준비된 경우에만 그린다. 준비되지 않은 상태에서 `renderGLSF`를 부르면 화면을 검게 지우기만 하므로 그 경우에는 그리지 않는다. 지도 화면에서는 게스트가 프레임이 끝날 때마다 바로 다음 프레임을 요청하므로 그리는 횟수는 줄지 않는다(서버 45초 측정: 요청 376회, 그린 프레임 373개). `ATLAN_INTERACTIVE_SECONDS=N`과 `ATLAN_ON_DEMAND=1`로 헤드리스에서 확인한다.
 
+화면이 거의 바뀌지 않으면 프레임 간격을 늘린다(`still_frame_interval_ms`, iOS 100ms). `FrameHashBackend`(`engine/shell/frame_hash.hpp`)가 프레임의 GL 호출을 하나씩 해시해 직전 프레임과 비교하고, 바뀐 호출이 16개 이하면 같은 화면으로 본다. 텍스처·버퍼는 이름 대신 마지막으로 올린 내용(과 파라미터)으로, 클라이언트 배열 포인터는 빼고 비교하므로 게스트가 매 프레임 같은 내용의 텍스처를 새로 만들어도 같은 화면이다. 최근 `still_after_frames`(10)프레임 중 바뀐 프레임이 5분의 1 이하면 그 간격, 최근 40프레임 중 4분의 1 이하면 두 배를 쓴다. GPS 수신이나 라벨 하나처럼 가끔 바뀌는 프레임은 느린 간격을 유지하고, 지도가 움직이면 몇 프레임 안에 원래 간격으로 돌아오며, 터치는 바로 돌아온다. 회전하는 3D 랜드마크처럼 작은 애니메이션은 느린 간격으로 움직인다. 서버(정차, GPS 수신 중): 약 14fps → 약 6fps, 렌더 시간 비율 약 80% → 34%. 주행 중에는 간격이 그대로였다. 호스트는 `GuestSession::set_frame_interval_floor_ms()`로 하한을 더 올릴 수 있고, iOS 앱은 `thermalState`(fair 67ms, serious 100ms, critical 200ms)와 저전력 모드(100ms)를 여기에 넘긴다. `perf frames:` 줄 끝의 `still frames`와 `interval`이 그 구간의 같은 화면 프레임 수와 현재 간격이다. 헤드리스에서는 `ATLAN_STILL_MS=N`.
+
 ## 바인딩 텍스트
 
 한 줄에 규칙 하나, `#` 뒤는 주석이다.

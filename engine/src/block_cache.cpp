@@ -12,8 +12,11 @@ namespace atlan {
 namespace a32 = uml::cpu::arm64::aarch32;
 namespace {
 constexpr std::size_t max_block = 64;        // instructions per block
-constexpr std::size_t slot_count = 16384;    // direct-mapped lookup table
-constexpr std::size_t max_entries = 1U << 17;  // cached instructions; flush everything beyond this
+constexpr std::size_t slot_count = 65536;    // direct-mapped lookup table
+// Cached instructions; everything is flushed beyond this. A block runs on past conditional branches, so code reached
+// from several entry points is held once per entry: a map screen's working set exceeded 2^17 and rebuilt ~36,000
+// blocks a second. At 2^19 one full cache is ~25 MB of FastOps.
+constexpr std::size_t max_entries = 1U << 19;
 
 struct Entry {
     a32::Instruction insn;
@@ -113,6 +116,7 @@ struct BlockRunner::Impl {
     std::vector<std::unique_ptr<Block>> store;
     std::vector<Block*> slots;
     std::size_t entries{};  // instructions held by `store`
+    std::uint64_t capacity_flushes{};
     std::vector<std::uint64_t> generic_forms = std::vector<std::uint64_t>(a32::kFormCount);
     std::unordered_map<std::uint64_t, InlineFunction*> inlines;  // by the key of the function's first instruction
 
@@ -217,7 +221,8 @@ struct BlockRunner::Impl {
     }
     Block* keep(std::unique_ptr<Block> block) {
         block->length = block->fast.size();
-        if (entries + block->fast.size() > max_entries) flush();
+        block->fast.shrink_to_fit();
+        if (entries + block->fast.size() > max_entries) { flush(); ++capacity_flushes; }
         entries += block->fast.size();
         Block* raw = block.get();
         store.push_back(std::move(block));
@@ -278,6 +283,7 @@ Result BlockRunner::execute(std::uint64_t budget) noexcept {
                 if (block) {
                     d.slots[slot_of(key, it)] = block;
                     ++stats_.blocks_built;
+                    stats_.capacity_flushes = d.capacity_flushes;
                 }
             }
             if (block != nullptr && previous != nullptr) {

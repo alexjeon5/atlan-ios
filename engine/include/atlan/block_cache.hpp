@@ -38,6 +38,7 @@ public:
         std::uint64_t generic{};        // instructions run by the library handlers (no fast handler)
         std::uint64_t fallbacks{};      // fast handlers that handed over (fault, page-crossing access)
         std::uint64_t flushes{};
+        std::uint64_t capacity_flushes{};  // everything dropped because the cache was full (not counted in `flushes`)
     };
     explicit BlockRunner(Runtime& runtime);
     ~BlockRunner();
