@@ -243,6 +243,11 @@ void quad_geometry() {
     check(o.any && o.corners && o.low == Point{2, 2} && o.high == Point{4, 4}, "a rectangle inside the quad");
     o = rectangle_overlap(square, {5, 5}, {15, 15});
     check(o.any && !o.corners && o.low == Point{5, 5} && o.high == Point{10, 10} && o.points.size() == 4, "the overlap of a corner of the rectangle");
+    // A fifth inside point shares its slot with the first edge intersection, which overwrites it (the app's
+    // result for this input, found by the install-time comparison).
+    const std::array<Point, 4> wide{Point{-202056, -441616}, Point{996010029, -621927}, Point{-1, -4832207}, Point{-1, 482558538}};
+    o = rectangle_overlap(wide, {495996, 342190}, {284572, 1});
+    check(o.any && o.low == Point{-202056, -4832207} && o.high == Point{996010029, 342190}, "an inside point overwritten by an intersection");
     o = rectangle_overlap(square, {20, 20}, {30, 30});
     check(!o.any && o.points.empty(), "no overlap");
 }

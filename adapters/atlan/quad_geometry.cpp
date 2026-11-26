@@ -104,8 +104,13 @@ Overlap rectangle_overlap(std::span<const Point, 4> quad, Point a, Point b) noex
         out.high = b;
         return out;
     }
+    // The app keeps the points inside in four slots followed by those of the edge intersections, so a fifth and
+    // sixth inside point share their slots with the first two intersections, which overwrite them.
+    std::array<Point, 4 + 16> slots{};
+    std::size_t inside = 0;
+    for (const Point& corner : found) slots[inside++] = corner;
     for (const Point& q : quad)
-        if (inside_polygon(rect, q) == 1) found.push_back(q);
+        if (inside_polygon(rect, q) == 1) slots[inside++] = q;
     for (unsigned i = 0; i < 4; ++i) {
         const Point r0 = rect[i], r1 = rect[(i + 1) % 4];
         const std::int32_t rdx = sub(r1.x, r0.x), rdy = sub(r1.y, r0.y);
@@ -117,10 +122,11 @@ Overlap rectangle_overlap(std::span<const Point, 4> quad, Point a, Point b) noex
             Point hit;
             if (i % 2 != 0) hit = {add(q0.x, divide(mul(qdx, sub(r0.y, q0.y)), qdy)), r0.y};  // horizontal edge
             else hit = {r0.x, add(q0.y, divide(mul(qdy, sub(r0.x, q0.x)), qdx))};          // vertical edge
-            found.push_back(hit);
-            ++out.crossings;
+            slots[4 + out.crossings++] = hit;
         }
     }
+    found.assign(slots.begin(), slots.begin() + static_cast<std::ptrdiff_t>(inside));
+    found.insert(found.end(), slots.begin() + 4, slots.begin() + 4 + out.crossings);
     if (found.empty()) return out;
     out.any = true;
     out.low = b;  // seeded crosswise, as the app does (the low output starts at the high corner)
