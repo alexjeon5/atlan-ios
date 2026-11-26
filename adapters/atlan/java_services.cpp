@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include "shell/java_services.hpp"
+#include "adapters/atlan/java_services.hpp"
 #include "atlan/jni.hpp"
 #include <algorithm>
 #include <chrono>

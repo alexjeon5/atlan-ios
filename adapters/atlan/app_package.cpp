@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include "shell/app_package.hpp"
+#include "adapters/atlan/app_package.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
