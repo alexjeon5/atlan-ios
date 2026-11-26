@@ -15,6 +15,10 @@
 
 요청했지만 제공하지 않는 optional 인터페이스는 노출하지 않고(GetInterface는 `SL_RESULT_FEATURE_UNSUPPORTED`와 null 포인터), required면 생성이 같은 코드로 실패한다. 형식은 16비트 리틀엔디언 PCM 모노/스테레오, 정수 Hz만 받고 나머지는 명시적으로 멈춘다.
 
+## 앱이 직접 재생하는 소리 파일
+
+OpenSL ES와 별개로, 앱의 Java 쪽이 미디어 플레이어로 데이터 폴더의 WAV 파일을 직접 재생하는 경우가 있다. 엔진은 `atlan/wav.hpp`의 `parse_wav`(16비트 PCM, `WAVE_FORMAT_EXTENSIBLE` 포함)와 `play_wav_file`(파일 하나를 처음부터 한 번 재생하는 스트림)을 제공하고, 어댑터는 `AppHost::audio()`로 세션과 같은 `AudioSink`를 받아 쓴다. 게스트의 OpenSL ES 출력과 같은 장치·오디오 세션으로 나간다. 어떤 파일을 언제 재생하고 멈추는지는 어댑터가 정하고, 스트림은 `uninstall_java()`에서 닫는다.
+
 ## 완료 콜백
 
 게스트 콜백은 오디오 장치 스레드가 아니라 게스트 스레드에서만 돈다. 임베더가 서비스 밖(최상위)에서 `OpenSles::pump`를 주기적으로 부르면, 장치가 재생을 끝낸 버퍼마다 콜백(`caller`=큐 인터페이스, `context`)을 호출한다. 재생된 양은 `AudioStream::played_bytes()`로 판단한다.

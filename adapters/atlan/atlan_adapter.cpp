@@ -7,6 +7,7 @@
 #include "shell/surface.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/stdio.hpp"
+#include "atlan/wav.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -18,6 +19,7 @@ namespace {
 constexpr char activity_class[] = "com/atlan/MainActivity";
 constexpr char gl_thread_class[] = "com/atlan/AtlanGLThread";
 constexpr char settings_file[] = "ATLAN/APP/system.ini";
+constexpr char splash_sound_file[] = "ATLAN/UI/SPLASH/splash.wav";
 }
 
 AtlanAdapter::AtlanAdapter() = default;
@@ -68,11 +70,18 @@ void AtlanAdapter::configure_files(GuestStdio& stdio, const SessionLog& log) {
         return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
     });
     use_connection_manager_ = ini_number(settings, "USECONNECTIONMANAGER").value_or(1) != 0;
+    splash_sound_ = stdio.host_path(splash_sound_file);
 }
 
 void AtlanAdapter::install_java(AppHost& host, bool frame_requests) {
     JavaBootstrap& java = host.java();
     const SessionLog log = host.log();
+    // The activity opens its splash screen before the native side starts, and the screen plays the start-up sound.
+    if (std::error_code error; !splash_sound_.empty() && std::filesystem::is_regular_file(splash_sound_, error)) {
+        std::string why;
+        splash_stream_ = play_wav_file(host.audio(), splash_sound_, why);
+        log(splash_stream_ ? "splash sound playing" : "splash sound: " + why);
+    }
     // Host side of the Java callbacks the guest invokes. The surface size is handed to the embedder; the call
     // succeeds without other effect (a void method has no result to invent).
     java.register_method(activity_class, "setSurfaces", "(II)V",
@@ -128,6 +137,11 @@ void AtlanAdapter::install_java(AppHost& host, bool frame_requests) {
     services.use_connection_manager = use_connection_manager_;
     services.log = log;
     services.on_home = config_.on_home;
+    services.on_splash_end = [this, log](std::uint32_t param) {
+        if (param == 0 || !splash_stream_) return;  // 0 only closes the splash screen; its sound plays on
+        splash_stream_.reset();
+        log("splash sound stopped by the app");
+    };
     java_services_ = std::make_unique<JavaServices>(services);
     java_services_->install(java, [&host](const std::string& cls, const std::string& name, const std::string& signature) {
         return host.native_method(cls, name, signature);
@@ -149,7 +163,10 @@ void AtlanAdapter::install_java(AppHost& host, bool frame_requests) {
     }
 }
 
-void AtlanAdapter::uninstall_java() { java_services_.reset(); }
+void AtlanAdapter::uninstall_java() {
+    java_services_.reset();
+    splash_stream_.reset();
+}
 
 std::vector<NativeSet> AtlanAdapter::native_sets() const {
     std::vector<NativeSet> sets;

@@ -3,12 +3,14 @@
 #include "shell/app_adapter.hpp"
 #include "shell/http_client.hpp"
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
 
 // The Atlan app: its package in the data folder, its settings file and folder aliases, its Java side (surface size,
 // GL thread frame requests, network services, logged UI callbacks) and its native start and frame entry points.
+namespace atlan { class AudioStream; }
 namespace atlan::shell {
 class JavaServices;
 class AtlanAdapter final : public AppAdapter {
@@ -51,6 +53,10 @@ private:
     Config config_;
     bool use_connection_manager_{true};  // system.ini USECONNECTIONMANAGER (the stock value is 1)
     std::unique_ptr<JavaServices> java_services_;
+    // The start-up sound the Java side plays with a MediaPlayer while its splash screen shows. It runs to its end
+    // unless the guest stops it or the session ends.
+    std::filesystem::path splash_sound_;
+    std::unique_ptr<AudioStream> splash_stream_;
     // AtlanGLThread natives behind the frame request protocol; all three or on-demand frames are off.
     std::uint32_t is_state_ready_{}, is_gl_init_{}, set_state_{};
     bool on_demand_{};

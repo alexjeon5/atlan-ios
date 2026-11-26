@@ -23,7 +23,7 @@ if(ATLAN_SANITIZERS)
 endif()
 
 add_subdirectory(third_party/kernarium)
-add_library(atlan_runtime STATIC src/memory.cpp src/runtime.cpp src/demo.cpp src/elf.cpp src/imports.cpp src/lifetime.cpp src/libc_services.cpp src/vfp.cpp src/heap.cpp src/threads.cpp src/files.cpp src/abi.cpp src/android_log.cpp src/jni.cpp src/mmap.cpp src/string_services.cpp src/stdio.cpp src/opensles.cpp src/audio.cpp src/block_cache.cpp src/profiler.cpp src/inflate.cpp src/native_functions.cpp src/native_runtime.cpp src/native_images.cpp src/libc_extra.cpp src/data_symbols.cpp src/text_codec.cpp src/gles.cpp src/gl_recorder.cpp src/glsl.cpp src/gl_context.cpp src/sockets.cpp src/scanf.cpp src/system_services.cpp)
+add_library(atlan_runtime STATIC src/memory.cpp src/runtime.cpp src/demo.cpp src/elf.cpp src/imports.cpp src/lifetime.cpp src/libc_services.cpp src/vfp.cpp src/heap.cpp src/threads.cpp src/files.cpp src/abi.cpp src/android_log.cpp src/jni.cpp src/mmap.cpp src/string_services.cpp src/stdio.cpp src/opensles.cpp src/audio.cpp src/wav.cpp src/block_cache.cpp src/profiler.cpp src/inflate.cpp src/native_functions.cpp src/native_runtime.cpp src/native_images.cpp src/libc_extra.cpp src/data_symbols.cpp src/text_codec.cpp src/gles.cpp src/gl_recorder.cpp src/glsl.cpp src/gl_context.cpp src/sockets.cpp src/scanf.cpp src/system_services.cpp)
 set_source_files_properties(src/vfp.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 target_include_directories(atlan_runtime PUBLIC include)
 target_link_libraries(atlan_runtime PRIVATE kernarium_aarch32)
