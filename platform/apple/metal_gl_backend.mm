@@ -4,6 +4,9 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <TargetConditionals.h>
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <set>
@@ -109,6 +112,42 @@ struct MetalGlBackend::Impl final : GlSink {
     std::mutex lock;
     std::vector<std::uint8_t> last_frame;
     std::uint32_t last_width{}, last_height{};
+    // Per-draw data (indices, large vertex streams) is copied into shared buffers that are reused every
+    // `frames_in_flight` frames, instead of a new MTLBuffer per draw. A slot is reused once the command buffer
+    // that last read it has completed.
+    static constexpr std::size_t frames_in_flight = 3;
+    static constexpr NSUInteger upload_chunk_bytes = NSUInteger{1} << 20;
+    struct UploadSlot {
+        std::vector<id<MTLBuffer>> chunks;
+        std::size_t chunk{};
+        NSUInteger offset{};
+        id<MTLCommandBuffer> fence{};  // the last committed command buffer that used this slot
+    };
+    std::array<UploadSlot, frames_in_flight> uploads;
+    std::size_t upload_slot{};
+    struct Uploaded {
+        id<MTLBuffer> buffer{};
+        NSUInteger offset{};
+    };
+    std::vector<std::uint16_t> short_indices;
+    // What the current encoder already has, so a draw only sends the state that changed.
+    static constexpr std::size_t tracked_textures = 16;
+    struct Bound {
+        id<MTLRenderPipelineState> pipeline{};
+        id<MTLDepthStencilState> depth{};
+        int cull{-1}, winding{-1};
+        bool has_viewport{};
+        MTLViewport viewport{};
+        std::array<bool, tracked_textures> has_texture{};
+        std::array<std::uint64_t, tracked_textures> texture{};  // image serial, 0 for the black texture
+        std::array<bool, tracked_textures> has_sampler{};
+        std::array<GlSamplerParams, tracked_textures> sampler{};
+    } bound;
+    // The pipeline and depth state of the previous draw, which the next one usually repeats.
+    std::tuple<std::uint64_t, bool, std::uint32_t, std::uint32_t> last_pipeline_key{};
+    id<MTLRenderPipelineState> last_pipeline{};
+    std::tuple<bool, std::uint32_t, bool> last_depth_key{};
+    id<MTLDepthStencilState> last_depth{};
     GlContext context{*this};
 
     Impl() {
@@ -139,7 +178,35 @@ struct MetalGlBackend::Impl final : GlSink {
             d.storageMode = MTLStorageModePrivate;
             depth = [device newTextureWithDescriptor:d];
         }
+        upload_slot = (upload_slot + 1) % frames_in_flight;
+        auto& slot = uploads[upload_slot];
+        if (slot.fence) {
+            [slot.fence waitUntilCompleted];
+            slot.fence = nil;
+        }
+        slot.chunk = 0;
+        slot.offset = 0;
         commands = [queue commandBuffer];
+    }
+    // Copies `length` bytes into this frame's upload memory, at an offset that is a multiple of `alignment`.
+    Uploaded upload(const void* bytes, std::size_t length, NSUInteger alignment) {
+        auto& slot = uploads[upload_slot];
+        NSUInteger at = (slot.offset + alignment - 1) & ~(alignment - 1);
+        while (slot.chunk < slot.chunks.size() && at + length > slot.chunks[slot.chunk].length) {
+            ++slot.chunk;
+            at = 0;
+        }
+        if (slot.chunk == slot.chunks.size()) {
+            id<MTLBuffer> fresh = [device newBufferWithLength:std::max<NSUInteger>(upload_chunk_bytes, length)
+                                                      options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
+            if (!fresh) return {};
+            slot.chunks.push_back(fresh);
+            at = 0;
+        }
+        id<MTLBuffer> buffer = slot.chunks[slot.chunk];
+        std::memcpy(static_cast<std::uint8_t*>(buffer.contents) + at, bytes, length);
+        slot.offset = at + length;
+        return {buffer, at};
     }
     void ensure_encoder() {
         if (encoder) return;
@@ -162,6 +229,7 @@ struct MetalGlBackend::Impl final : GlSink {
             pass.depthAttachment.loadAction = MTLLoadActionLoad;
         }
         encoder = [commands renderCommandEncoderWithDescriptor:pass];
+        bound = Bound{};
         color_valid = depth_valid = true;
         pending_color = pending_depth = false;
     }
@@ -253,6 +321,7 @@ struct MetalGlBackend::Impl final : GlSink {
             const bool read_back = offscreen != nil;
 #endif
             [commands commit];
+            uploads[upload_slot].fence = commands;
             if (read_back) {
                 [commands waitUntilCompleted];
                 last_width = static_cast<std::uint32_t>(offscreen.width);
@@ -270,6 +339,7 @@ struct MetalGlBackend::Impl final : GlSink {
     }
     void forget_texture(std::uint64_t serial) override { textures.erase(serial); }
     void forget_program(std::uint64_t serial) override {
+        last_pipeline = nil;
         libraries.erase(serial);
         broken_programs.erase(serial);
         for (auto it = pipelines.begin(); it != pipelines.end();) it = std::get<0>(it->first) == serial ? pipelines.erase(it) : std::next(it);
@@ -294,7 +364,12 @@ struct MetalGlBackend::Impl final : GlSink {
     id<MTLRenderPipelineState> pipeline_for(const GlDraw& d) {
         const auto& s = d.state;
         const auto key = std::make_tuple(d.program->serial, s.blend, s.blend ? s.blend_src : 0U, s.blend ? s.blend_dst : 0U);
-        if (const auto it = pipelines.find(key); it != pipelines.end()) return it->second;
+        if (last_pipeline && key == last_pipeline_key) return last_pipeline;
+        if (const auto it = pipelines.find(key); it != pipelines.end()) {
+            last_pipeline_key = key;
+            last_pipeline = it->second;
+            return it->second;
+        }
         if (broken_programs.contains(d.program->serial)) return nil;
         id<MTLLibrary> lib = library_for(*d.program);
         if (!lib) return nil;
@@ -329,16 +404,25 @@ struct MetalGlBackend::Impl final : GlSink {
             return nil;
         }
         pipelines[key] = state;
+        last_pipeline_key = key;
+        last_pipeline = state;
         return state;
     }
     id<MTLDepthStencilState> depth_state(const GlRenderState& s) {
         const auto key = std::make_tuple(s.depth_test, s.depth_test ? s.depth_func : 0x207U, s.depth_test && s.depth_write);
-        if (const auto it = depth_states.find(key); it != depth_states.end()) return it->second;
+        if (last_depth && key == last_depth_key) return last_depth;
+        if (const auto it = depth_states.find(key); it != depth_states.end()) {
+            last_depth_key = key;
+            last_depth = it->second;
+            return it->second;
+        }
         MTLDepthStencilDescriptor* d = [MTLDepthStencilDescriptor new];
         d.depthCompareFunction = s.depth_test ? compare(s.depth_func) : MTLCompareFunctionAlways;
         d.depthWriteEnabled = s.depth_test && s.depth_write;
         id<MTLDepthStencilState> state = [device newDepthStencilStateWithDescriptor:d];
         depth_states[key] = state;
+        last_depth_key = key;
+        last_depth = state;
         return state;
     }
     id<MTLSamplerState> sampler_for(const GlSamplerParams& p) {
@@ -377,10 +461,16 @@ struct MetalGlBackend::Impl final : GlSink {
         textures[image->serial] = t;
         return t;
     }
-    // Small payloads go inline; larger ones need a buffer.
-    void set_vertex_data(const void* bytes, std::size_t length, NSUInteger index) {
-        if (length <= 4096) [encoder setVertexBytes:bytes length:length atIndex:index];
-        else [encoder setVertexBuffer:[device newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared] offset:0 atIndex:index];
+    // Small payloads go inline; larger ones into this frame's upload memory.
+    bool set_vertex_data(const void* bytes, std::size_t length, NSUInteger index, NSUInteger alignment) {
+        if (length <= 4096) {
+            [encoder setVertexBytes:bytes length:length atIndex:index];
+            return true;
+        }
+        const Uploaded data = upload(bytes, length, alignment);
+        if (!data.buffer) return false;
+        [encoder setVertexBuffer:data.buffer offset:data.offset atIndex:index];
+        return true;
     }
 
     void draw(const GlDraw& d) override {
@@ -390,26 +480,72 @@ struct MetalGlBackend::Impl final : GlSink {
         if (!pipeline) { ++counters.draws_dropped; return; }
         const auto& s = d.state;
         if (s.cull && s.cull_face == 0x0408) return;  // GL_FRONT_AND_BACK: every triangle is culled
+        // Indices: 16-bit while every vertex number fits below the strip restart value 0xFFFF.
+        Uploaded indices;
+        MTLIndexType index_type = MTLIndexTypeUInt32;
+        if (d.vertex_count <= 0xFFFFU) {
+            short_indices.resize(d.indices.size());
+            for (std::size_t i = 0; i < d.indices.size(); ++i) short_indices[i] = static_cast<std::uint16_t>(d.indices[i]);
+            indices = upload(short_indices.data(), short_indices.size() * sizeof(std::uint16_t), 16);
+            index_type = MTLIndexTypeUInt16;
+        } else {
+            indices = upload(d.indices.data(), d.indices.size() * sizeof(std::uint32_t), 16);
+        }
+        if (!indices.buffer) { ++counters.draws_dropped; return; }
         ensure_encoder();
-        [encoder setRenderPipelineState:pipeline];
-        [encoder setDepthStencilState:depth_state(s)];
-        [encoder setCullMode:!s.cull ? MTLCullModeNone : (s.cull_face == 0x0404 ? MTLCullModeFront : MTLCullModeBack)];
-        [encoder setFrontFacingWinding:s.front_face == 0x0900 ? MTLWindingClockwise : MTLWindingCounterClockwise];
+        if (pipeline != bound.pipeline) {
+            [encoder setRenderPipelineState:pipeline];
+            bound.pipeline = pipeline;
+        }
+        id<MTLDepthStencilState> depth_stencil = depth_state(s);
+        if (depth_stencil != bound.depth) {
+            [encoder setDepthStencilState:depth_stencil];
+            bound.depth = depth_stencil;
+        }
+        const MTLCullMode cull = !s.cull ? MTLCullModeNone : (s.cull_face == 0x0404 ? MTLCullModeFront : MTLCullModeBack);
+        if (static_cast<int>(cull) != bound.cull) {
+            [encoder setCullMode:cull];
+            bound.cull = static_cast<int>(cull);
+        }
+        const MTLWinding winding = s.front_face == 0x0900 ? MTLWindingClockwise : MTLWindingCounterClockwise;
+        if (static_cast<int>(winding) != bound.winding) {
+            [encoder setFrontFacingWinding:winding];
+            bound.winding = static_cast<int>(winding);
+        }
         const double w = static_cast<double>(target.width), h = static_cast<double>(target.height);
         MTLViewport vp{0, 0, w, h, 0, 1};
         if (s.viewport[2] > 0 && s.viewport[3] > 0)  // GL's origin is the lower left corner
             vp = MTLViewport{double(s.viewport[0]), h - double(s.viewport[1]) - double(s.viewport[3]), double(s.viewport[2]), double(s.viewport[3]), 0, 1};
-        [encoder setViewport:vp];
-        set_vertex_data(d.uniforms.data(), d.uniforms.size(), 0);
+        const auto& b = bound.viewport;
+        if (!bound.has_viewport || vp.originX != b.originX || vp.originY != b.originY || vp.width != b.width || vp.height != b.height ||
+            vp.znear != b.znear || vp.zfar != b.zfar) {
+            [encoder setViewport:vp];
+            bound.viewport = vp;
+            bound.has_viewport = true;
+        }
+        if (!set_vertex_data(d.uniforms.data(), d.uniforms.size(), 0, 256)) { ++counters.draws_dropped; return; }
         [encoder setFragmentBytes:d.uniforms.data() length:d.uniforms.size() atIndex:0];
         for (std::size_t k = 0; k < d.streams.size(); ++k)
-            set_vertex_data(d.streams[k].values.data(), d.streams[k].values.size() * sizeof(float), 1 + k);
+            if (!set_vertex_data(d.streams[k].values.data(), d.streams[k].values.size() * sizeof(float), 1 + k, 16)) { ++counters.draws_dropped; return; }
         for (std::size_t t = 0; t < d.textures.size(); ++t) {
-            [encoder setFragmentTexture:texture_for(d.textures[t].image) atIndex:t];
-            [encoder setFragmentSamplerState:sampler_for(d.textures[t].sampler) atIndex:t];
+            const auto& binding = d.textures[t];
+            const std::uint64_t serial = binding.image ? binding.image->serial : 0;
+            if (t >= tracked_textures || !bound.has_texture[t] || bound.texture[t] != serial) {
+                [encoder setFragmentTexture:texture_for(binding.image) atIndex:t];
+                if (t < tracked_textures) {
+                    bound.has_texture[t] = true;
+                    bound.texture[t] = serial;
+                }
+            }
+            if (t >= tracked_textures || !bound.has_sampler[t] || !(bound.sampler[t] == binding.sampler)) {
+                [encoder setFragmentSamplerState:sampler_for(binding.sampler) atIndex:t];
+                if (t < tracked_textures) {
+                    bound.has_sampler[t] = true;
+                    bound.sampler[t] = binding.sampler;
+                }
+            }
         }
-        id<MTLBuffer> indices = [device newBufferWithBytes:d.indices.data() length:d.indices.size() * sizeof(std::uint32_t) options:MTLResourceStorageModeShared];
-        [encoder drawIndexedPrimitives:primitive(d.primitive) indexCount:d.indices.size() indexType:MTLIndexTypeUInt32 indexBuffer:indices indexBufferOffset:0];
+        [encoder drawIndexedPrimitives:primitive(d.primitive) indexCount:d.indices.size() indexType:index_type indexBuffer:indices.buffer indexBufferOffset:indices.offset];
         ++counters.draws;
     }
 };
