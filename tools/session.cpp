@@ -6,12 +6,19 @@
 #include "shell/session.hpp"
 #include "adapters/atlan/atlan_adapter.hpp"
 #include "preview_sink.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <thread>
 #include <vector>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
+#include <string>
+#if ATLAN_HAVE_GLES
+#include "egl_host.hpp"
+#include "gles_backend.hpp"
+#endif
 
 int main(int argc, char** argv) {
     if (argc < 3) { std::cerr << "usage: atlan-session LIBRARY DATA_ROOT [GL_TRACE_FILE [--sources]]\n"; return 2; }
@@ -35,6 +42,39 @@ int main(int argc, char** argv) {
     config.data_root = argv[2];
     if (raw) config.gl_backend = &recorder;
     else config.gl_backend = &context;
+#if ATLAN_HAVE_GLES
+    // ATLAN_GLES=DIR: draw with the host's real GLES2 (platform/gles, the Android renderer; Mesa here) instead of the
+    // state machine, and write every ATLAN_PREVIEW_EVERY-th presented frame as DIR/gles_NNNNN.ppm.
+    std::unique_ptr<atlan::EglHost> egl;
+    std::unique_ptr<atlan::GlesBackend> gles;
+    std::uint64_t gles_frames = 0;
+    if (const char* gles_directory = std::getenv("ATLAN_GLES")) {
+        egl = std::make_unique<atlan::EglHost>();
+        const std::string folder = gles_directory;
+        const std::uint32_t every = preview_every ? std::max(1, std::atoi(preview_every)) : 1;
+        egl->set_capture([folder, every, &gles_frames](const std::vector<std::uint8_t>& rgba, std::uint32_t w, std::uint32_t h) {
+            if (gles_frames++ % every != 0) return;
+            char name[32];
+            std::snprintf(name, sizeof name, "/gles_%05llu.ppm", static_cast<unsigned long long>(gles_frames - 1));
+            if (std::FILE* f = std::fopen((folder + name).c_str(), "wb")) {
+                std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+                for (std::size_t i = 0; i < std::size_t{w} * h; ++i) std::fwrite(&rgba[i * 4], 1, 3, f);
+                std::fclose(f);
+            }
+        });
+        egl->set_log([](const std::string& line) { std::cout << "gl: " << line << std::endl; });
+        gles = std::make_unique<atlan::GlesBackend>(*egl);
+        gles->set_log([](const std::string& line) { std::cout << "gl: " << line << std::endl; });
+        gles->set_surface_size(preview_width, preview_height);
+        atlan::shell::AtlanAdapter::Config app;
+        atlan::GlesBackend* backend = gles.get();
+        app.on_set_surfaces = [backend](std::int32_t w, std::int32_t h) {
+            if (w > 0 && h > 0) backend->set_surface_size(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+        };
+        config.adapter = std::make_shared<atlan::shell::AtlanAdapter>(std::move(app));
+        config.gl_backend = gles.get();
+    }
+#endif
     config.block_cache = std::getenv("ATLAN_NO_BLOCK_CACHE") == nullptr;
     config.perf_log = std::getenv("ATLAN_PERF") != nullptr;
     // ATLAN_NO_NATIVE=1: run every guest function interpreted; ATLAN_NATIVE_SKIP=a,b: only those sets;
@@ -110,5 +150,12 @@ int main(int argc, char** argv) {
               << " programs=" << st.programs_linked << " link_failures=" << st.link_failures << " shader_failures=" << st.shader_failures
               << " uploads=" << st.texture_uploads << " unsupported=" << st.unsupported << '\n';
     for (const auto& [name, n] : recorder.counts) std::cout << "gl " << name << " " << n << '\n';
+#if ATLAN_HAVE_GLES
+    if (gles) {
+        const auto g = gles->stats();
+        std::cout << "gles frames=" << g.frames << " draws=" << g.draws << " skipped=" << g.draws_skipped
+                  << " shader_failures=" << g.shader_failures << " link_failures=" << g.link_failures << '\n';
+    }
+#endif
     return session.state() == atlan::shell::SessionState::finished ? 0 : 1;
 }
