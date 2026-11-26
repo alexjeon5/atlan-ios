@@ -75,6 +75,9 @@ std::string fingerprint(const AtlanDataStatus& s) {
     BOOL _checking;
     NSTimer* _timer;
     dispatch_queue_t _queue;
+    BOOL _shownPortrait;  // the orientation the current screen was built for
+    NSLayoutConstraint* _boxWidth;   // iPad: the centred box, sized per orientation
+    NSLayoutConstraint* _boxHeight;
 }
 
 - (instancetype)initWithDelegate:(id<LauncherDelegate>)delegate {
@@ -85,6 +88,38 @@ std::string fingerprint(const AtlanDataStatus& s) {
         self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     }
     return self;
+}
+
+- (void)setLandscapeOnly:(BOOL)landscapeOnly {
+    if (_landscapeOnly == landscapeOnly) return;
+    _landscapeOnly = landscapeOnly;
+    if (@available(iOS 16.0, *)) [self setNeedsUpdateOfSupportedInterfaceOrientations];
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    if (_landscapeOnly) return UIInterfaceOrientationMaskLandscape;
+    return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? UIInterfaceOrientationMaskAll
+                                                                                : UIInterfaceOrientationMaskAllButUpsideDown;
+}
+
+- (BOOL)portrait {
+    const CGSize size = self.view.bounds.size;
+    return size.height > size.width;
+}
+
+// A turn of the device rebuilds the screen for the new shape.
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    const BOOL portrait = self.portrait;
+    if (_boxWidth) {
+        const auto& m = LauncherMetrics::current();
+        const CGSize box = portrait ? m.portraitContainer : m.container;
+        if (_boxWidth.constant != box.width || _boxHeight.constant != box.height) {
+            _boxWidth.constant = box.width;
+            _boxHeight.constant = box.height;
+        }
+    }
+    if (portrait != _shownPortrait) [self render];
 }
 
 - (void)setRunning:(BOOL)running {
@@ -108,6 +143,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
         NSLayoutConstraint* width = [_frame.widthAnchor constraintEqualToConstant:m.container.width];
         NSLayoutConstraint* height = [_frame.heightAnchor constraintEqualToConstant:m.container.height];
         width.priority = height.priority = UILayoutPriorityDefaultHigh;
+        _boxWidth = width;
+        _boxHeight = height;
         [NSLayoutConstraint activateConstraints:@[
             [_frame.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
             [_frame.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
@@ -116,7 +153,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
             width, height,
         ]];
     } else {
-        // 16 at the top and 24 at the bottom as designed; at the sides the notch's safe area plus a little.
+        // 16 at the top and 24 at the bottom as designed; at the sides the notch's safe area plus a little (at least
+        // 16 when the phone stands upright).
         NSLayoutConstraint* bottom = [_frame.bottomAnchor constraintEqualToAnchor:view.bottomAnchor constant:-24];
         bottom.priority = UILayoutPriorityDefaultHigh;
         NSLayoutConstraint* leading = [_frame.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12];
@@ -126,8 +164,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
             [_frame.topAnchor constraintEqualToAnchor:safe.topAnchor constant:16],
             [_frame.bottomAnchor constraintLessThanOrEqualToAnchor:view.bottomAnchor constant:-24],
             [_frame.bottomAnchor constraintLessThanOrEqualToAnchor:safe.bottomAnchor],
-            [_frame.leadingAnchor constraintGreaterThanOrEqualToAnchor:view.leadingAnchor constant:24],
-            [_frame.trailingAnchor constraintLessThanOrEqualToAnchor:view.trailingAnchor constant:-24],
+            [_frame.leadingAnchor constraintGreaterThanOrEqualToAnchor:view.leadingAnchor constant:16],
+            [_frame.trailingAnchor constraintLessThanOrEqualToAnchor:view.trailingAnchor constant:-16],
             [_frame.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor],
             [_frame.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor],
             bottom, leading, trailing,
@@ -206,6 +244,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
 - (void)render {
     if (!_frame) return;
     [_screen removeFromSuperview];
+    _shownPortrait = self.portrait;
     _screen = _known ? [self buildScreen] : [UIView new];
     _screen.translatesAutoresizingMaskIntoConstraints = NO;
     [_frame addSubview:_screen];
@@ -248,7 +287,6 @@ std::string fingerprint(const AtlanDataStatus& s) {
 
 // Left column of the first-run screens: name and settings at the top, the question and its buttons at the bottom.
 - (UIView*)introColumn:(UIView*)block buttons:(NSArray<UIButton*>*)buttons {
-    const auto& m = LauncherMetrics::current();
     __weak LauncherViewController* weakSelf = self;
     UIButton* gear = LKIconButton(@"slider.horizontal.3", text::settings, ^{ [weakSelf openSettings:Tab::general]; });
     UIStackView* top = LKRow(@[[self nameLine], LKSpacer(), gear], 8);
@@ -256,15 +294,38 @@ std::string fingerprint(const AtlanDataStatus& s) {
     [buttons.firstObject setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView* row = LKRow(buttons, 8);
     row.alignment = UIStackViewAlignmentFill;
-    UIStackView* column = LKColumn(@[top, LKSpacer(), LKColumn(@[block, row], 16)], 0);
-    LKSize(column, m.introColumn, 0);
-    return column;
+    if (self.portrait) return LKColumn(@[top, LKColumn(@[block, row], 16)], 24);
+    return LKColumn(@[top, LKSpacer(), LKColumn(@[block, row], 16)], 0);
 }
 
 - (UIView*)twoColumns:(UIView*)left right:(UIView*)right spacing:(CGFloat)spacing {
     UIStackView* row = LKRow(@[left, right], spacing);
     row.alignment = UIStackViewAlignmentFill;
     return row;
+}
+
+// Two parts side by side in landscape, a fixed width (> 0) on either, or one above the other in portrait, where
+// `grow` takes the spare height.
+- (UIView*)pair:(UIView*)first width:(CGFloat)firstWidth with:(UIView*)second width:(CGFloat)secondWidth
+        spacing:(CGFloat)spacing grow:(UIView*)grow {
+    if (self.portrait) {
+        UIView* other = grow == first ? second : first;
+        [grow setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisVertical];
+        [other setContentHuggingPriority:UILayoutPriorityDefaultHigh + 1 forAxis:UILayoutConstraintAxisVertical];
+        [other setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
+        return LKColumn(@[first, second], spacing);
+    }
+    if (firstWidth > 0) LKSize(first, firstWidth, 0);
+    if (secondWidth > 0) LKSize(second, secondWidth, 0);
+    return [self twoColumns:first right:second spacing:spacing];
+}
+
+// Two cards side by side in landscape; in portrait one under the other in a scroll view.
+- (UIView*)cards:(UIView*)first with:(UIView*)second secondWidth:(CGFloat)width {
+    const auto& m = LauncherMetrics::current();
+    if (self.portrait) return LKScroll(LKColumn(@[first, second], m.gap));
+    LKSize(second, width, 0);
+    return [self twoColumns:first right:second spacing:m.gap];
 }
 
 - (UIView*)welcomeScreen {
@@ -292,7 +353,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
         LKLabel(text::welcome_package, m.caption, UIFontWeightRegular, LauncherColor.muted)], 8)
                                               padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding)
                                                radius:m.cardRadius];
-    return [self twoColumns:left right:LKColumn(@[ways, layout], m.gap) spacing:24];
+    UIView* right = LKColumn(@[ways, layout], m.gap);
+    return [self pair:left width:m.introColumn with:right width:0 spacing:24 grow:right];
 }
 
 - (UIView*)autoStartScreen {
@@ -320,7 +382,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
     UIView* data = [[LKCard alloc] initWithContent:LKColumn(@[head, LKSpacer(), grid], 8)
                                            padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding)
                                             radius:m.cardRadius];
-    return [self twoColumns:left right:LKColumn(@[notes, data], m.gap) spacing:24];
+    UIView* right = LKColumn(@[notes, data], m.gap);
+    return [self pair:left width:m.introColumn with:right width:0 spacing:24 grow:right];
 }
 
 - (void)answerAutoStart:(BOOL)on {
@@ -383,7 +446,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
     list.distribution = UIStackViewDistributionFillEqually;
     // Two or three fill the column; more scroll.
     UIView* right = _choices.size() <= 3 ? list : LKScroll(list);
-    return [self twoColumns:left right:right spacing:24];
+    return [self pair:left width:m.introColumn with:right width:0 spacing:24 grow:right];
 }
 
 - (void)setPending:(std::size_t)index {
@@ -438,14 +501,19 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                             radius:m.cardRadius];
     [card addAction:[UIAction actionWithHandler:^(UIAction*) { [weakSelf openSettings:Tab::map]; }]
    forControlEvents:UIControlEventTouchUpInside];
-    UIStackView* left = LKColumn(@[[self nameLine], card], m.gap);
-
     LKStartButton* start = [[LKStartButton alloc] initWithTitle:_running ? text::resume : text::start];
     start.enabled = ready || _running;
     [start addAction:[UIAction actionWithHandler:^(UIAction*) { [weakSelf startNavigation]; }]
     forControlEvents:UIControlEventTouchUpInside];
     UIButton* gear = LKButton(text::settings, @"slider.horizontal.3", LKButtonSecondary, m.settingsButton,
                               ^{ [weakSelf openSettings:Tab::general]; });
+    if (self.portrait) {
+        // Upright: the folder card on top, the start button and settings under it, within thumb reach.
+        [start.heightAnchor constraintEqualToConstant:m.portraitStart].active = YES;
+        [card setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisVertical];
+        return LKColumn(@[[self nameLine], card, start, gear], m.gap);
+    }
+    UIStackView* left = LKColumn(@[[self nameLine], card], m.gap);
     UIStackView* right = LKColumn(@[start, gear], m.gap);
     LKSize(right, m.startColumn, 0);
     return [self twoColumns:left right:right spacing:24];
@@ -467,14 +535,21 @@ std::string fingerprint(const AtlanDataStatus& s) {
     const std::pair<Tab, NSString*> names[] = {{Tab::general, text::tab_general}, {Tab::map, text::tab_map},
                                                {Tab::versions, text::tab_versions}, {Tab::developer, text::tab_developer}};
     for (const auto& [tab, name] : names) [tabs addObject:[self tabButton:name tab:tab]];
-    [tabs addObject:LKSpacer()];
-    UIStackView* tabColumn = LKColumn(tabs, 4);
-    LKSize(tabColumn, m.tabColumn, 0);
-
     UIView* pane = _tab == Tab::general ? [self generalPane]
                  : _tab == Tab::map     ? [self mapPane]
                  : _tab == Tab::versions ? [self versionsPane]
                                           : [self developerPane];
+    if (self.portrait) {
+        // Upright: the tabs in one row above the pane.
+        UIStackView* tabRow = LKRow(tabs, 4);
+        tabRow.distribution = UIStackViewDistributionFillEqually;
+        tabRow.alignment = UIStackViewAlignmentFill;
+        [pane setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisVertical];
+        return LKColumn(@[header, tabRow, pane], m.gap);
+    }
+    [tabs addObject:LKSpacer()];
+    UIStackView* tabColumn = LKColumn(tabs, 4);
+    LKSize(tabColumn, m.tabColumn, 0);
     return LKColumn(@[header, [self twoColumns:tabColumn right:pane spacing:16]], m.gap);
 }
 
@@ -487,10 +562,12 @@ std::string fingerprint(const AtlanDataStatus& s) {
     const auto& m = LauncherMetrics::current();
     const bool on = tab == _tab;
     UIButtonConfiguration* config = UIButtonConfiguration.plainButtonConfiguration;
+    const BOOL portrait = self.portrait;  // tabs share one row then, so they are smaller and centred
     config.attributedTitle = [[NSAttributedString alloc] initWithString:name attributes:@{
-        NSFontAttributeName: LauncherFont(m.value, on ? UIFontWeightMedium : UIFontWeightRegular)}];
+        NSFontAttributeName: LauncherFont(portrait ? m.body : m.value, on ? UIFontWeightMedium : UIFontWeightRegular)}];
     config.baseForegroundColor = on ? LauncherColor.ink : LauncherColor.ink2;
-    config.contentInsets = NSDirectionalEdgeInsetsMake(0, 12, 0, 12);
+    config.contentInsets = portrait ? NSDirectionalEdgeInsetsMake(0, 4, 0, 4) : NSDirectionalEdgeInsetsMake(0, 12, 0, 12);
+    config.titleLineBreakMode = NSLineBreakByTruncatingTail;
     config.background.cornerRadius = 8;
     config.background.backgroundColor = on ? LauncherColor.tabSelected : UIColor.clearColor;
     config.background.strokeColor = on ? LauncherColor.tabSelectedLine : UIColor.clearColor;
@@ -499,7 +576,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
     UIButton* button = [UIButton buttonWithConfiguration:config primaryAction:[UIAction actionWithHandler:^(UIAction*) {
         [weakSelf openSettings:tab];
     }]];
-    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    button.contentHorizontalAlignment = portrait ? UIControlContentHorizontalAlignmentCenter : UIControlContentHorizontalAlignmentLeading;
     if (on) button.accessibilityTraits |= UIAccessibilityTraitSelected;
     LKSize(button, 0, m.iconButton);
     return button;
@@ -515,10 +592,18 @@ std::string fingerprint(const AtlanDataStatus& s) {
 
 - (UIView*)generalPane {
     LauncherSettings* settings = LauncherSettings.shared;
-    NSMutableArray<UIView*>* screenRows = [NSMutableArray arrayWithObject:
-        LKSegmentRow(text::appearance, text::appearance_detail,
-                     @[text::appearance_system, text::appearance_light, text::appearance_dark], settings.appearance, 60,
-                     ^(NSInteger index) { LauncherSettings.shared.appearance = (LauncherAppearance)index; })];
+    NSArray<NSString*>* modes = @[text::appearance_system, text::appearance_light, text::appearance_dark];
+    void (^pickMode)(NSInteger) = ^(NSInteger index) { LauncherSettings.shared.appearance = (LauncherAppearance)index; };
+    UIView* appearance = LKSegmentRow(text::appearance, text::appearance_detail, modes, settings.appearance, 60, pickMode);
+    if (self.portrait) {
+        // Upright the row is too narrow for text and choices side by side: the choices go under the text.
+        UIStackView* stacked = LKColumn(@[LKListRow(text::appearance, text::appearance_detail, nil, 52, NO, nil),
+                                          LKSegments(modes, settings.appearance, pickMode)], 4);
+        stacked.layoutMarginsRelativeArrangement = YES;
+        stacked.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(0, 0, 12, 0);
+        appearance = stacked;
+    }
+    NSMutableArray<UIView*>* screenRows = [NSMutableArray arrayWithObject:appearance];
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone)
         [screenRows addObject:LKSwitchRow(text::notch, text::notch_detail, settings.notchInset, 60,
                                           ^(BOOL on) { LauncherSettings.shared.notchInset = on; })];
@@ -547,6 +632,13 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                LKLabel(where, m.value, UIFontWeightMedium, LauncherColor.ink)], 0);
     [place setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView* location = LKRow([@[place, LKSpacer()] arrayByAddingObjectsFromArray:buttons], 8);
+    if (self.portrait) {
+        UIStackView* buttonRow = LKRow(buttons, 8);
+        buttonRow.distribution = UIStackViewDistributionFillEqually;
+        location = LKColumn(@[place, buttonRow], 8);
+        location.layoutMarginsRelativeArrangement = YES;
+        location.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(12, 0, 12, 0);
+    }
     [location.heightAnchor constraintGreaterThanOrEqualToConstant:60].active = YES;
     const bool ready = _status.ready();
     UIView* rows = LKColumn(@[
@@ -593,7 +685,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
     }
     UIView* footer = LKColumn(@[LKLabel(text::applies_next_start, m.caption, UIFontWeightRegular, LauncherColor.muted),
                                 LKButton(text::pick_other, @"folder", LKButtonRaised, m.iconButton, ^{ [weakSelf pickFolder]; })], 12);
-    LKCard* chooser = [[LKCard alloc] initWithContent:LKColumn(@[LKScroll(LKColumn(options, 0)), footer], 12)
+    UIView* optionList = self.portrait ? LKColumn(options, 0) : LKScroll(LKColumn(options, 0));
+    LKCard* chooser = [[LKCard alloc] initWithContent:LKColumn(@[optionList, footer], 12)
                                               padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding)
                                                radius:m.cardRadius];
 
@@ -607,8 +700,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
         LKSpacer(),
     ], 0);
     LKCard* chosen = [[LKCard alloc] initWithContent:rows padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, 4, m.cardPadding) radius:m.cardRadius];
-    LKSize(chosen, m.sideColumn, 0);
-    return [self twoColumns:chooser right:chosen spacing:m.gap];
+    return [self cards:chooser with:chosen secondWidth:m.sideColumn];
 }
 
 - (UIView*)versionsPane {
@@ -643,8 +735,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
     LKCard* right = [[LKCard alloc] initWithContent:LKColumn(@[LKColumn(list, 0), LKSpacer(),
         LKLabel([NSString stringWithFormat:text::verified_footnote, text::app_name, launcherVersion()], m.caption, UIFontWeightRegular, LauncherColor.muted)], 12)
                                             padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding) radius:m.cardRadius];
-    LKSize(right, m.sideColumn, 0);
-    return [self twoColumns:left right:right spacing:m.gap];
+    return [self cards:left with:right secondWidth:m.sideColumn];
 }
 
 - (UIView*)developerPane {

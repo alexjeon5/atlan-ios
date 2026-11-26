@@ -44,6 +44,8 @@
     BOOL _launched;                            // the first screen has been chosen
     LauncherViewController* _launcher;
     NSTimer* _watch;                           // brings the launcher back when a run ends by itself
+    BOOL _landscape;                           // locked to landscape: the navigation runs or is about to
+    BOOL _startPending;                        // start the navigation once the screen has turned to landscape
 }
 
 // Bindings from host input to the guest's native methods: Documents/input.cfg (format in shell/input.hpp).
@@ -95,6 +97,52 @@
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self layoutSurface];
+    [self startIfLandscape];
+}
+
+// The launcher turns with the device; the navigation itself is laid out for landscape only, so the app locks to
+// landscape from the moment it starts (and the launcher reached through FINE DRIVE stays landscape).
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    if (_landscape) return UIInterfaceOrientationMaskLandscape;
+    return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? UIInterfaceOrientationMaskAll
+                                                                                : UIInterfaceOrientationMaskAllButUpsideDown;
+}
+
+- (void)setLandscape:(BOOL)landscape {
+    _landscape = landscape;
+    _launcher.landscapeOnly = landscape;
+    if (@available(iOS 16.0, *)) {
+        [self setNeedsUpdateOfSupportedInterfaceOrientations];
+        if (!landscape) return;
+        for (UIScene* scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            auto* preferences = [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape];
+            [(UIWindowScene*)scene requestGeometryUpdateWithPreferences:preferences errorHandler:nil];
+        }
+    } else {
+        [UIViewController attemptRotationToDeviceOrientation];
+    }
+}
+
+// The guest's surface is sized from the view when it starts, so the run waits until the view is landscape.
+- (void)startInLandscape {
+    [self setLandscape:YES];
+    _startPending = YES;
+    [self startIfLandscape];
+}
+
+- (void)startIfLandscape {
+    if (!_startPending || self.presentedViewController || !self.view.window) return;
+    const CGSize size = self.view.bounds.size;
+    if (!(size.width > size.height)) return;
+    _startPending = NO;
+    __weak ShellViewController* weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ShellViewController* strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf runGuest];
+        if (!strongSelf.running) [strongSelf showLauncher];
+    });
 }
 
 - (void)viewSafeAreaInsetsDidChange {
@@ -217,16 +265,18 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             ShellViewController* strongSelf = weakSelf;
             if (!strongSelf) return;
-            if (ready) [strongSelf runGuest];
-            if (!strongSelf.running) [strongSelf showLauncher];
+            if (ready) [strongSelf startInLandscape];
+            else [strongSelf showLauncher];
         });
     });
 }
 
 - (void)launcherWantsNavigation:(LauncherViewController*)launcher {
     (void)launcher;
-    if (!self.running) [self runGuest];
-    if (self.running) [self dismissViewControllerAnimated:YES completion:nil];
+    if (self.running) { [self dismissViewControllerAnimated:YES completion:nil]; return; }
+    [self startInLandscape];
+    __weak ShellViewController* weakSelf = self;
+    [self dismissViewControllerAnimated:YES completion:^{ [weakSelf startIfLandscape]; }];
 }
 
 - (void)settingsChanged {
@@ -268,6 +318,7 @@
 - (void)showLauncher {
     if (!_launcher) _launcher = [[LauncherViewController alloc] initWithDelegate:self];
     _launcher.running = self.running;
+    [self setLandscape:self.running];
     if (self.presentedViewController) return;
     [self presentViewController:_launcher animated:_launched && self.running completion:nil];
 }
