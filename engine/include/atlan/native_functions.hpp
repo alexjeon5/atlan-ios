@@ -68,6 +68,10 @@ struct NativeSet {
     // `name` either as guest code or as its host service. Null: installed without a check.
     using Call = std::function<std::optional<NativeProbe::Result>(const std::string& name, std::span<const std::uint32_t> arguments)>;
     std::function<bool(NativeProbe& probe, const Call& guest, const Call& native)> verify;
+    // Looks at the located code before verification (member name -> first address, bit 0: Thumb), for a host
+    // implementation that depends on what exactly the guest function does. false: the set is left interpreted as one
+    // whose guest code differs. Null: nothing to look at.
+    std::function<bool(Memory& memory, const std::map<std::string, std::uint32_t>& located)> inspect;
 };
 
 // A function start as bytes of code: `mask` selects the bits that must equal `bytes`.

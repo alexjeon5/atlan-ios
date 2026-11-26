@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Host implementations of image code that is linked into guest images: the PNG row filters (PNG specification,
-// called through libpng's png_read_filter_row) and ETC1 block decoding (Khronos ETC1 specification, called
-// through the PowerVR tools' PVRTDecompressETC).
+// called through libpng's png_read_filter_row), ETC1 block decoding (Khronos ETC1 specification, called
+// through the PowerVR tools' PVRTDecompressETC) and the byte source the PowerVR tools' POD model reader reads from.
 #include "atlan/native_functions.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <memory>
 
 namespace atlan {
 namespace {
@@ -206,6 +207,226 @@ NativeSet etc_set(bool blue_first) {
     };
     return set;
 }
+
+// --- The byte source of the PowerVR tools' POD model reader (CSource, CSourceStream over a CPVRTResourceFile).
+// A model is parsed from memory in many reads of a few bytes, each a virtual call. The members are accepted only when
+// their code is exactly the A32 code they are known as (checked at install, branch offsets aside), which fixes the
+// object layout: stream {vtable, file, position}, file {.., .., size at 8, data at 12}, Read at vtable slot 2.
+namespace pod {
+constexpr std::uint32_t file_at = 4, position_at = 8, size_at = 8, data_at = 12, read_slot = 8;
+constexpr std::uint32_t max_read = 1U << 24;  // larger reads stay with the guest's code
+
+enum class Outcome { done, decline };
+// A word (or a few bytes) that can be written: both ends translate.
+[[nodiscard]] bool writable(Memory& memory, std::uint32_t at, std::uint32_t n) {
+    return memory.translate(at, MemoryAccess::write) != nullptr && memory.translate(std::uint64_t{at} + n - 1, MemoryAccess::write) != nullptr;
+}
+// bool CSourceStream::Read(void* to, unsigned n): copies n bytes at the position and advances it, unless position + n
+// (32-bit sum) passes the file's size. The position is read again after the copy, as the guest does.
+[[nodiscard]] Outcome stream_read(Memory& memory, std::uint32_t self, std::uint32_t to, std::uint32_t n, std::uint32_t& result) {
+    std::uint32_t file = 0, position = 0, size = 0, data = 0;
+    if (n > max_read || !load32(memory, self + file_at, file) || !load32(memory, self + position_at, position) ||
+        !load32(memory, file + size_at, size))
+        return Outcome::decline;
+    if (position + n > size) { result = 0; return Outcome::done; }
+    if (!load32(memory, file + data_at, data) || !writable(memory, self + position_at, 4)) return Outcome::decline;
+    if (n != 0 && !memory.move(to, data + position, n)) return Outcome::decline;  // all or nothing
+    if (!load32(memory, self + position_at, position) || !store32(memory, self + position_at, position + n)) return Outcome::decline;
+    result = 1;
+    return Outcome::done;
+}
+// bool CSourceStream::Skip(unsigned n)
+[[nodiscard]] Outcome stream_skip(Memory& memory, std::uint32_t self, std::uint32_t n, std::uint32_t& result) {
+    std::uint32_t file = 0, position = 0, size = 0;
+    if (!load32(memory, self + file_at, file) || !load32(memory, self + position_at, position) || !load32(memory, file + size_at, size) ||
+        !writable(memory, self + position_at, 4))
+        return Outcome::decline;
+    result = position + n <= size ? 1 : 0;
+    if (result != 0 && !store32(memory, self + position_at, position + n)) return Outcome::decline;
+    return Outcome::done;
+}
+// bool CSource::Read32<T>(T& out): four bytes through the virtual Read into a stack word, then stored little-endian.
+// Only a source whose Read is the stream's is served here.
+[[nodiscard]] Outcome read32(Memory& memory, std::uint32_t stream_read_address, std::uint32_t self, std::uint32_t out, std::uint32_t& result) {
+    std::uint32_t table = 0, read = 0;
+    if (!load32(memory, self, table) || !load32(memory, table + read_slot, read) || read != stream_read_address) return Outcome::decline;
+    std::uint32_t file = 0, position = 0, size = 0, data = 0, value = 0;
+    if (!load32(memory, self + file_at, file) || !load32(memory, self + position_at, position) || !load32(memory, file + size_at, size))
+        return Outcome::decline;
+    if (position + 4 > size) { result = 0; return Outcome::done; }
+    if (!load32(memory, file + data_at, data) || !load32(memory, data + position, value) ||
+        !writable(memory, self + position_at, 4) || !writable(memory, out, 4))
+        return Outcome::decline;
+    if (!store32(memory, self + position_at, position + 4) || !store32(memory, out, value)) return Outcome::decline;
+    result = 1;
+    return Outcome::done;
+}
+
+bool read_inline(CpuState& cpu, Memory& memory) noexcept {
+    std::uint32_t result = 0;
+    if (stream_read(memory, static_cast<std::uint32_t>(cpu.registers[0]), static_cast<std::uint32_t>(cpu.registers[1]),
+                    static_cast<std::uint32_t>(cpu.registers[2]), result) != Outcome::done)
+        return false;
+    cpu.registers[0] = result;
+    return true;
+}
+bool skip_inline(CpuState& cpu, Memory& memory) noexcept {
+    std::uint32_t result = 0;
+    if (stream_skip(memory, static_cast<std::uint32_t>(cpu.registers[0]), static_cast<std::uint32_t>(cpu.registers[1]), result) != Outcome::done)
+        return false;
+    cpu.registers[0] = result;
+    return true;
+}
+
+// The code the members must be. 0 in `mask` words: a branch whose offset is checked separately.
+constexpr std::array<std::uint32_t, 24> read_code{
+    0xe92d40f8, 0xe5907008, 0xe1a04000, 0xe5900004, 0xe0827007, 0xe1a06001, 0xe1a05002, 0xeb000000, 0xe1570000, 0x8a00000b,
+    0xe5940004, 0xeb000000, 0xe5941008, 0xe1a02005, 0xe0801001, 0xe1a00006, 0xeb000000, 0xe5943008, 0xe3a00001, 0xe0835005,
+    0xe5845008, 0xe8bd80f8, 0xe3a00000, 0xe8bd80f8};
+constexpr std::array<std::uint32_t, 13> skip_code{
+    0xe92d4070, 0xe5906008, 0xe1a04000, 0xe5900004, 0xe1a05001, 0xe0816006, 0xeb000000, 0xe1560000, 0x95943008, 0x93a00001,
+    0x83a00000, 0x90835005, 0x95845008};
+constexpr std::array<std::uint32_t, 20> read32_code{
+    0xe92d4013, 0xe5903000, 0xe1a04001, 0xe3a02004, 0xe5933008, 0xe28d1004, 0xe12fff33, 0xe3500000, 0x0a000008, 0xe5dd3006,
+    0xe5dd2007, 0xe1a03803, 0xe1833c02, 0xe5dd2004, 0xe1833002, 0xe5dd2005, 0xe1833402, 0xe5843000, 0xe28dd008, 0xe8bd8010};
+constexpr std::array<std::uint32_t, 11> marker_code{
+    0xe92d4038, 0xe1a04000, 0xe1a05002, 0xeb000000, 0xe3500000, 0x0a000003, 0xe1a00004, 0xe1a01005, 0xe8bd4038, 0xea000000,
+    0xe8bd8038};
+constexpr std::array<std::uint32_t, 2> size_code{0xe5900008, 0xe12fff1e}, data_code{0xe590000c, 0xe12fff1e};
+
+// Matches `code` at `address`; branch words (offset bits zero in `code`) are matched on their top byte and their
+// targets returned in order.
+template <std::size_t N>
+[[nodiscard]] bool matches(Memory& memory, std::uint32_t address, const std::array<std::uint32_t, N>& code, std::vector<std::uint32_t>* targets = nullptr) {
+    if ((address & 3U) != 0) return false;
+    for (std::size_t i = 0; i < N; ++i) {
+        std::uint32_t word = 0;
+        if (!load32(memory, address + 4 * static_cast<std::uint32_t>(i), word)) return false;
+        const bool branch = (code[i] & 0x0e000000U) == 0x0a000000U && (code[i] & 0x00ffffffU) == 0;
+        if (branch) {
+            if ((word & 0xff000000U) != code[i]) return false;
+            const auto offset = static_cast<std::int32_t>(word << 8) >> 6;
+            if (targets) targets->push_back(address + 4 * static_cast<std::uint32_t>(i) + 8 + static_cast<std::uint32_t>(offset));
+        } else if (word != code[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+}
+
+NativeSet pod_source_set() {
+    NativeSet set;
+    set.name = "POD model source";
+    auto stream_read_address = std::make_shared<std::uint32_t>(0);
+    ImportService read = [](ImportCall& call) -> Error {
+        std::uint32_t result = 0;
+        if (pod::stream_read(call.runtime().memory, call.arg(0), call.arg(1), call.arg(2), result) != pod::Outcome::done) call.decline();
+        else call.set_result(result);
+        return std::nullopt;
+    };
+    ImportService skip = [](ImportCall& call) -> Error {
+        std::uint32_t result = 0;
+        if (pod::stream_skip(call.runtime().memory, call.arg(0), call.arg(1), result) != pod::Outcome::done) call.decline();
+        else call.set_result(result);
+        return std::nullopt;
+    };
+    ImportService read32 = [stream_read_address](ImportCall& call) -> Error {
+        std::uint32_t result = 0;
+        if (pod::read32(call.runtime().memory, *stream_read_address, call.arg(0), call.arg(1), result) != pod::Outcome::done) call.decline();
+        else call.set_result(result);
+        return std::nullopt;
+    };
+    // bool CSource::ReadMarker(unsigned& name, unsigned& length): two Read32 calls; a guest fallback for either would
+    // have to resume halfway, so the whole call goes to the guest unless both are served.
+    ImportService marker = [stream_read_address](ImportCall& call) -> Error {
+        Memory& memory = call.runtime().memory;
+        const std::uint32_t self = call.arg(0), name = call.arg(1), length = call.arg(2);
+        std::uint32_t table = 0, routine = 0, file = 0, position = 0, size = 0;
+        if (!load32(memory, self, table) || !load32(memory, table + pod::read_slot, routine) || routine != *stream_read_address ||
+            !load32(memory, self + pod::file_at, file) || !load32(memory, self + pod::position_at, position) ||
+            !load32(memory, file + pod::size_at, size) || !pod::writable(memory, name, 4) || !pod::writable(memory, length, 4)) {
+            call.decline();
+            return std::nullopt;
+        }
+        std::uint32_t first = 0, second = 0;
+        if (pod::read32(memory, *stream_read_address, self, name, first) != pod::Outcome::done) return "ReadMarker: first read failed";
+        if (first != 0 && pod::read32(memory, *stream_read_address, self, length, second) != pod::Outcome::done) return "ReadMarker: second read failed";
+        call.set_result(first != 0 ? second : 0);
+        return std::nullopt;
+    };
+    set.members.push_back({"pod_source_read", {"_ZN13CSourceStream4ReadEPvj"}, read, true, pod::read_inline});
+    set.members.push_back({"pod_source_skip", {"_ZN13CSourceStream4SkipEj"}, skip, true, pod::skip_inline});
+    // Read32 for unsigned, int and float: the same code three times.
+    set.members.push_back({"pod_source_read32", {"_ZN7CSource6Read32IjEEbRT_"}, read32, true});
+    set.members.push_back({"pod_source_read32_int", {"_ZN7CSource6Read32IiEEbRT_"}, read32, false});
+    set.members.push_back({"pod_source_read32_float", {"_ZN7CSource6Read32IfEEbRT_"}, read32, false});
+    set.members.push_back({"pod_source_marker", {"_ZN7CSource10ReadMarkerERjS0_"}, marker, false});
+    set.inspect = [stream_read_address](Memory& memory, const std::map<std::string, std::uint32_t>& located) {
+        const auto at = [&](const char* name) { const auto it = located.find(name); return it == located.end() ? 1U : it->second; };
+        std::vector<std::uint32_t> read_calls, skip_calls, marker_calls;
+        if (!pod::matches(memory, at("pod_source_read"), pod::read_code, &read_calls) || read_calls.size() != 3 ||
+            !pod::matches(memory, read_calls[0], pod::size_code) || !pod::matches(memory, read_calls[1], pod::data_code) ||
+            !pod::matches(memory, at("pod_source_skip"), pod::skip_code, &skip_calls) || skip_calls.size() != 1 || skip_calls[0] != read_calls[0] ||
+            !pod::matches(memory, at("pod_source_read32"), pod::read32_code))
+            return false;
+        for (const char* other : {"pod_source_read32_int", "pod_source_read32_float"})
+            if (located.count(other) != 0 && !pod::matches(memory, at(other), pod::read32_code)) return false;
+        if (located.count("pod_source_marker") != 0 &&
+            (!pod::matches(memory, at("pod_source_marker"), pod::marker_code, &marker_calls) || marker_calls.size() != 2 ||
+             marker_calls[0] != at("pod_source_read32") || marker_calls[1] != at("pod_source_read32")))
+            return false;
+        *stream_read_address = at("pod_source_read");
+        return true;
+    };
+    // Fake stream objects over a small file in scratch memory, read and skipped at positions in and past the end.
+    set.verify = [stream_read_address](NativeProbe& probe, const NativeSet::Call& guest, const NativeSet::Call& native) {
+        Memory& memory = probe.memory();
+        const std::uint32_t base = probe.scratch(), file = base, self = base + 0x40, table = base + 0x80, out = base + 0xc0,
+                            to = base + 0x100, data = base + 0x1000;
+        constexpr std::uint32_t size = 37;
+        std::vector<std::uint8_t> bytes(64);
+        Random random;
+        for (auto& byte : bytes) byte = static_cast<std::uint8_t>(random.next());
+        const auto reset = [&](std::uint32_t position) {
+            const std::vector<std::uint8_t> clear(0x200, 0xa5);
+            return store(memory, base, clear) && store(memory, data, bytes) && store32(memory, file + pod::size_at, size) &&
+                   store32(memory, file + pod::data_at, data) && store32(memory, self, table) && store32(memory, self + pod::file_at, file) &&
+                   store32(memory, self + pod::position_at, position) && store32(memory, table + pod::read_slot, *stream_read_address);
+        };
+        const auto state = [&](std::vector<std::uint8_t>& snapshot) { snapshot.assign(0x200, 0); return load(memory, base, snapshot); };
+        struct Case { const char* member; std::uint32_t position, n; };
+        std::vector<Case> cases;
+        for (const std::uint32_t position : {0U, 1U, 5U, 33U, 34U, 36U, 37U, 40U, 0xfffffffeU})
+            for (const std::uint32_t n : {0U, 1U, 3U, 4U, 8U, 36U, 37U, 0xfffffff0U}) {
+                if (n <= 64 && position <= size) cases.push_back({"pod_source_read", position, n});
+                cases.push_back({"pod_source_skip", position, n});
+            }
+        for (const std::uint32_t position : {0U, 1U, 32U, 33U, 34U, 36U, 37U, 41U}) {
+            cases.push_back({"pod_source_read32", position, 0});
+            cases.push_back({"pod_source_marker", position, 0});
+        }
+        for (const auto& c : cases) {
+            std::optional<NativeProbe::Result> returned[2];
+            std::vector<std::uint8_t> after[2];
+            for (int side = 0; side < 2; ++side) {
+                if (!reset(c.position)) return false;
+                Words arguments{self, 0, 0};
+                if (std::string_view(c.member) == "pod_source_read") arguments = {self, to, c.n};
+                else if (std::string_view(c.member) == "pod_source_skip") arguments = {self, c.n};
+                else if (std::string_view(c.member) == "pod_source_read32") arguments = {self, out};
+                else arguments = {self, out, out + 4};
+                returned[side] = (side == 0 ? guest : native)(c.member, arguments);
+                if (!returned[side] && std::string_view(c.member) == "pod_source_marker") break;  // marker not located
+                if (!returned[side] || !state(after[side])) return false;
+            }
+            if (!returned[0] && !returned[1]) continue;
+            if (!returned[0] || !returned[1] || (returned[0]->r0 & 0xff) != (returned[1]->r0 & 0xff) || after[0] != after[1]) return false;
+        }
+        return true;
+    };
+    return set;
+}
 }
 
 std::vector<NativeSet> image_library_sets() {
@@ -213,6 +434,7 @@ std::vector<NativeSet> image_library_sets() {
     sets.push_back(png_filter_set());
     sets.push_back(etc_set(false));
     sets.push_back(etc_set(true));
+    sets.push_back(pod_source_set());
     return sets;
 }
 }

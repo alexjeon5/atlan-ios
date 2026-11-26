@@ -166,6 +166,16 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
             if (!taken) absent += " " + set.name;
             continue;
         }
+        if (set.inspect) {
+            std::map<std::string, std::uint32_t> first;
+            for (const auto& [name, addresses] : located) first.emplace(name, addresses.front());
+            bool accepted = false;
+            try { accepted = set.inspect(runtime.memory, first); } catch (...) { accepted = false; }
+            if (!accepted) {
+                rejected += " " + set.name;
+                continue;
+            }
+        }
         // Instruction members: the host decides from the encoding whether it can stand in for the instruction.
         std::map<std::string, std::vector<ImportService>> instruction_services;  // per located address, in order
         bool instructions_accepted = true;

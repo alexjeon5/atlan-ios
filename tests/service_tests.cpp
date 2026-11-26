@@ -193,6 +193,17 @@ void path_mapping() {
     check(f.call("fread", {data + 0x100, 1, 64, file}).stop == atlan::Stop::returned && f.r0() == 8, "and sees the host file itself");
     check(f.call("fclose", {file}).stop == atlan::Stop::returned, "fclose");
     check(std::filesystem::equivalent(f.stdio.host_path("/x/data/sub"), f.root / "DATA" / "Sub") && f.stdio.host_path("/x/data/../..").empty(), "host_path resolves like the guest calls");
+    put_text(f.runtime.memory, data + 0x80, "r");
+    f.stdio.record_paths();
+    check(reads("/mnt/card/Data/Sub/b.txt", "W=1\nH=2\nX=3\n"), "a read while paths are recorded");
+    put_text(f.runtime.memory, data, "/mnt/card/Data/missing.txt");
+    check(f.call("fopen", {data, data + 0x80}).stop == atlan::Stop::returned && f.r0() == 0, "a missing file");
+    {
+        const auto recorded = f.stdio.take_recorded_paths();
+        check(recorded.size() == 2 && std::filesystem::equivalent(recorded[0], f.root / "DATA" / "Sub" / "b.txt") &&
+              recorded[1] == f.root / "DATA" / "missing.txt", "the host paths the guest resolved are recorded, missing ones too");
+        check(reads("/dir/a.txt", "hello world") && f.stdio.take_recorded_paths().empty(), "nothing is recorded after take");
+    }
     {   // a mount serves a prefix from a folder outside the root; the more specific mount added first stays separate
         const auto outside = f.root.parent_path() / (f.root.filename().string() + "-mount");
         std::filesystem::remove_all(outside);

@@ -51,9 +51,19 @@ public:
     // The host descriptor (and whether it is writable) behind a readable guest POSIX descriptor, for file-backed mappings; nullopt for a bad one.
     // Still owned by this object: callers must not close it and must not use it after the guest closes the fd.
     [[nodiscard]] std::optional<std::pair<int, bool>> host_descriptor(std::uint32_t fd) const;  // (descriptor, opened writable)
+    // Collects the host location of every guest path the services resolve (opens, stats, listings, removals) from
+    // record_paths() until take_recorded_paths(), for a host that keeps a result derived from guest file reads.
+    void record_paths() noexcept { recording_ = true; recorded_.clear(); }
+    [[nodiscard]] std::vector<std::filesystem::path> take_recorded_paths() noexcept {
+        recording_ = false;
+        return std::move(recorded_);
+    }
 private:
     [[nodiscard]] std::string alias(const std::string& path) const;
     [[nodiscard]] std::filesystem::path locate(const std::filesystem::path& relative) const;
+    [[nodiscard]] std::filesystem::path find(const std::filesystem::path& relative) const;
+    bool recording_{};
+    mutable std::vector<std::filesystem::path> recorded_;
     // Names in one host directory, read once for the case-insensitive lookup of locate(). Dropped whenever a
     // service creates, removes or renames something; a file another program adds is still found by its exact name.
     struct Listing { std::unordered_set<std::string> names; std::unordered_map<std::string, std::string> lower; };

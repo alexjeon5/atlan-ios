@@ -100,7 +100,7 @@ struct Guest {
         }
     }
     void seal() { runtime.memory.protect(code, 0x3000, Permissions::read_execute); }
-    unsigned install(std::map<std::string, NativeSignature> signatures = {}) {
+    unsigned install(std::map<std::string, NativeSignature> signatures = {}, std::vector<NativeSet> sets = runtime_library_sets()) {
         NativeOptions options;
         options.stack_top = stack;
         options.return_target = sentinel;
@@ -109,7 +109,7 @@ struct Guest {
         options.code_bytes = 0x3000;
         options.signatures = std::move(signatures);
         options.log = [this](const std::string& line) { log.push_back(line); };
-        return install_native_functions(dispatcher, runtime, exports, runtime_library_sets(), options);
+        return install_native_functions(dispatcher, runtime, exports, std::move(sets), options);
     }
     CallOutcome call(std::uint32_t address, std::uint32_t a, std::uint32_t b) {
         const std::array<std::uint32_t, 2> arguments{a, b};
@@ -465,6 +465,78 @@ void image_services() {
 }
 }
 
+// The POD model source: its members are taken only when their code is exactly the known code (branch targets aside).
+// The test assembles that code with a byte-copy memcpy, lets the install compare guest and host, and reads through it.
+void pod_source() {
+    const std::uint32_t read = code + 0x1000, skip = code + 0x1100, read32 = code + 0x1200, marker = code + 0x1300, size = code + 0x1400,
+                        data_ptr = code + 0x1408, copy = code + 0x1410;
+    const auto branch = [](std::uint32_t at, std::uint32_t target, std::uint32_t top) { return top | (((target - at - 8) >> 2) & 0x00ffffffU); };
+    const auto assemble = [&](Guest& guest, std::uint32_t size_word) {
+        std::array<std::uint32_t, 24> r{
+            0xe92d40f8, 0xe5907008, 0xe1a04000, 0xe5900004, 0xe0827007, 0xe1a06001, 0xe1a05002, 0, 0xe1570000, 0x8a00000b,
+            0xe5940004, 0, 0xe5941008, 0xe1a02005, 0xe0801001, 0xe1a00006, 0, 0xe5943008, 0xe3a00001, 0xe0835005,
+            0xe5845008, 0xe8bd80f8, 0xe3a00000, 0xe8bd80f8};
+        r[7] = branch(read + 28, size, 0xeb000000);
+        r[11] = branch(read + 44, data_ptr, 0xeb000000);
+        r[16] = branch(read + 64, copy, 0xeb000000);
+        std::array<std::uint32_t, 14> k{0xe92d4070, 0xe5906008, 0xe1a04000, 0xe5900004, 0xe1a05001, 0xe0816006, 0, 0xe1560000,
+                                         0x95943008, 0x93a00001, 0x83a00000, 0x90835005, 0x95845008, 0xe8bd8070};
+        k[6] = branch(skip + 24, size, 0xeb000000);
+        const std::array<std::uint32_t, 20> w{
+            0xe92d4013, 0xe5903000, 0xe1a04001, 0xe3a02004, 0xe5933008, 0xe28d1004, 0xe12fff33, 0xe3500000, 0x0a000008, 0xe5dd3006,
+            0xe5dd2007, 0xe1a03803, 0xe1833c02, 0xe5dd2004, 0xe1833002, 0xe5dd2005, 0xe1833402, 0xe5843000, 0xe28dd008, 0xe8bd8010};
+        std::array<std::uint32_t, 11> m{0xe92d4038, 0xe1a04000, 0xe1a05002, 0, 0xe3500000, 0x0a000003, 0xe1a00004, 0xe1a01005,
+                                         0xe8bd4038, 0, 0xe8bd8038};
+        m[3] = branch(marker + 12, read32, 0xeb000000);
+        m[9] = branch(marker + 36, read32, 0xea000000);
+        const std::array<std::uint32_t, 12> tail{size_word, 0xe12fff1e, 0xe590000c, 0xe12fff1e,
+                                                  // memcpy: cmp r2, #0; bxeq lr; mov r3, r0; 1: ldrb r12, [r1], #1; strb r12, [r3], #1; subs r2, #1; bne 1b; bx lr
+                                                  0xe3520000, 0x012fff1e, 0xe1a03000, 0xe4d1c001, 0xe4c3c001, 0xe2522001, 0x1afffffb, 0xe12fff1e};
+        guest.put(read, r);
+        guest.put(skip, k);
+        guest.put(read32, w);
+        guest.put(marker, m);
+        guest.put(size, tail);
+        guest.seal();
+        guest.exports = {{"_ZN13CSourceStream4ReadEPvj", read, 96, 2, 1}, {"_ZN13CSourceStream4SkipEj", skip, 56, 2, 1},
+                         {"_ZN7CSource6Read32IjEEbRT_", read32, 80, 2, 1}, {"_ZN7CSource10ReadMarkerERjS0_", marker, 44, 2, 1}};
+    };
+    Guest guest;
+    assemble(guest, 0xe5900008);
+    check(guest.install({}, image_library_sets()) == 4 && guest.logged("pod_source_read pod_source_skip pod_source_read32 pod_source_marker"),
+          "the POD source members are verified and replaced");
+    // A stream over 10 bytes in a heap page, read through the replaced members.
+    const std::uint32_t heap = 0x300000, file = heap, stream = heap + 0x40, table = heap + 0x80, out = heap + 0xc0, bytes = heap + 0x100;
+    guest.runtime.memory.map(heap, 0x1000, Permissions::read_write);
+    guest.put(file + 8, std::array<std::uint32_t, 2>{10, bytes});
+    guest.put(stream, std::array<std::uint32_t, 3>{table, file, 0});
+    guest.put(table + 8, std::array<std::uint32_t, 1>{read});
+    guest.put(bytes, std::array<std::uint32_t, 3>{0x44332211, 0x88776655, 0x0000aa99});
+    const auto position = [&] {
+        std::array<std::byte, 4> word{};
+        check(guest.runtime.memory.read(stream + 8, word), "read position");
+        return std::to_integer<std::uint32_t>(word[0]);
+    };
+    const std::array<std::uint32_t, 3> marker_arguments{stream, out, out + 4};
+    check(guest.dispatcher.call(guest.runtime, marker, marker_arguments, stack, sentinel, 100000).stop == Stop::returned && guest.r(0) == 1 &&
+          position() == 8, "ReadMarker reads two words");
+    std::array<std::byte, 8> got{};
+    check(guest.runtime.memory.read(out, got) && std::to_integer<std::uint32_t>(got[4]) == 0x55 && std::to_integer<std::uint32_t>(got[7]) == 0x88,
+          "the second word");
+    guest.put(stream + 8, std::array<std::uint32_t, 1>{0});
+    check(guest.call(read32, stream, out).stop == Stop::returned && guest.r(0) == 1 && position() == 4, "Read32 reads four bytes");
+    check(guest.runtime.memory.read(out, got) && std::to_integer<std::uint32_t>(got[0]) == 0x11 && std::to_integer<std::uint32_t>(got[3]) == 0x44,
+          "little-endian word");
+    check(guest.call(skip, stream, 5).stop == Stop::returned && guest.r(0) == 1 && position() == 9, "Skip advances");
+    check(guest.call(read32, stream, out).stop == Stop::returned && guest.r(0) == 0 && position() == 9, "a read past the end fails");
+    check(guest.call(skip, stream, 2).stop == Stop::returned && guest.r(0) == 0 && position() == 9, "a skip past the end fails");
+    check(guest.dispatcher.import_counts().at("native:pod_source_read32") == 2, "served by the host");
+    // A getter with another layout (size at 16) is not the known code: the whole set stays interpreted.
+    Guest other;
+    assemble(other, 0xe5900010);
+    check(other.install({}, image_library_sets()) == 0 && other.logged("left interpreted: POD model source"), "other code is left alone");
+}
+
 int main() {
     try {
         decoder();
@@ -472,6 +544,7 @@ int main() {
         instruction_replacement();
         zlib_services();
         image_services();
+        pod_source();
         std::cout << "native function tests passed: " << checks << " checks\n";
         return 0;
     } catch (const std::exception& error) {

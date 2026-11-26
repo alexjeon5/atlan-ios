@@ -57,6 +57,11 @@ const GuestStdio::Listing& GuestStdio::listing(const std::filesystem::path& dire
     return it->second;
 }
 std::filesystem::path GuestStdio::locate(const std::filesystem::path& relative) const {
+    auto host = find(relative);
+    if (recording_ && (recorded_.empty() || recorded_.back() != host)) recorded_.push_back(host);
+    return host;
+}
+std::filesystem::path GuestStdio::find(const std::filesystem::path& relative) const {
     // The data folder may live on a case-sensitive host while the app was written for Android's case-insensitive
     // storage: take the exact name when it exists, else the unique-by-iteration case-insensitive match. The exact
     // path costs one host lookup; anything else is answered from cached directory listings.
