@@ -29,6 +29,8 @@ Linux ARM64에서 CPU 코어를 실행한 결과는 iOS 기기 검증을 대체�
 
 CI는 `Release-iphoneos` 앱을 `Payload/`로 압축한 서명 없는 IPA(`atlan-runtime-ios-unsigned`)를 아티팩트로 올린다. 사이드로딩 도구(iloader 등)로 서명·설치한다.
 
+공개 빌드에는 앱 아이콘이 없다. 아이콘은 원본 앱 자산에서 나온 것이라 저장소 밖(`private/`)에 두고, 서명 전에 `tools/inject_app_icon.py IN.ipa ICON`으로 IPA에 넣는다. ICON은 크기별 PNG 폴더(파일 이름은 스크립트의 `ICON_FILES`)나 정사각 PNG 한 장(Pillow로 축소)이다. 아이콘은 에셋 카탈로그 없이 낱개 PNG와 Info.plist의 `CFBundleIcons`·`CFBundleIcons~ipad`로 들어간다.
+
 번들 ID는 `com.hanggok.atlan`, 홈 화면 이름은 "Atlan"이다(`platform/ios/CMakeLists.txt`). 2026-11-26 전 빌드는 `org.example.atlan-runtime`이었다. 번들 ID가 바뀌면 다른 앱으로 설치되므로 Documents가 새로 비어 있다. ATLAN 폴더와 `native.sig`, `input.cfg`를 새 앱의 Documents(파일 앱의 나의 iPhone › Atlan)에 다시 넣는다.
 
 ## 화면
