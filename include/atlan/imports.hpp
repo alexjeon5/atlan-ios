@@ -120,7 +120,11 @@ public:
     // works on core registers, so a call costs about as much as a branch. When `inline_run` declines, `service`
     // gets the call. Calls made inline are counted under `name` like the service's.
     bool replace_function_inline(Runtime& runtime, std::uint32_t address, std::string name, ImportService service,
-                                 bool (*inline_run)(CpuState& cpu) noexcept);
+                                 InlineRun inline_run);
+    // A fast path for the import `name` next to its bound service: the block cache calls `inline_run` where
+    // execution reaches one of the import's traps (attach, bind_trap), and the service gets the calls it declines.
+    // It must do exactly what the service does for the calls it takes. Counted under `name` like the service's.
+    void bind_inline(const std::string& name, InlineRun inline_run);
     [[nodiscard]] bool replaces(std::uint32_t address) const noexcept { return hooks_.count(address & ~1U) != 0; }
 
     // Scalar AAPCS32 call with import dispatch. `budget` bounds every instruction
@@ -192,6 +196,9 @@ private:
         InlineFunction function;
     };
     std::vector<std::unique_ptr<Inline>> inlines_;  // stable addresses: the block cache holds the InlineFunctions
+    std::unordered_map<std::string, InlineRun> import_inlines_;  // bind_inline(), by import name
+    // Adds an Inline for every trap of an import bound with bind_inline() that does not have one yet.
+    void inline_traps();
     std::unordered_map<std::string, std::uint64_t> times_;  // nanoseconds per import while timing_
     bool timing_{};
     std::unordered_map<std::uint32_t, std::string> traps_;  // trap base address -> name

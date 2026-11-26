@@ -18,11 +18,14 @@ namespace atlan {
 // covers every map(), unmap() and protect() that involves an executable page;
 // guest stores cannot reach executable pages because the permission model has
 // no writable-and-executable state.
-// A replaced guest function (ImportDispatcher::replace_function_inline) that only reads and writes core registers,
-// called straight from the block loop instead of through the import trap. `run` returns false to decline: the
-// loop then reports the trap, and the dispatcher's service for the same function handles the call.
+// A host function called straight from the block loop instead of through the import dispatcher: a replaced guest
+// function (ImportDispatcher::replace_function_inline) or an import (ImportDispatcher::bind_inline). It may read
+// and write core registers and guest memory, and must not block, call back into the guest or change the PC.
+// `run` returns false, before it changes any state, to decline: the loop then reports the trap (the undefined
+// instruction, or the import's execute fault), and the dispatcher's service for the same function handles the call.
+using InlineRun = bool (*)(CpuState& cpu, Memory& memory) noexcept;
 struct InlineFunction {
-    bool (*run)(CpuState& cpu) noexcept{};
+    InlineRun run{};
     std::uint64_t calls{};  // calls `run` completed; the dispatcher folds them into its import counts
 };
 
@@ -52,14 +55,16 @@ public:
     [[nodiscard]] Result step_block(std::uint64_t budget) noexcept;
     void flush() noexcept;
     // Calls `function` (which must outlive the runner) where a block starts with the replaced-function trap at
-    // `key`; null removes it. Drops the cached blocks.
+    // `key`, or where execution reaches the import trap `key` (a PC that is not executable); null removes it.
+    // Drops the cached blocks.
     void set_inline(std::uint64_t key, InlineFunction* function);
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
     // Diagnostics: how often each instruction form ran without a fast handler, most frequent first.
     [[nodiscard]] std::vector<std::pair<std::string, std::uint64_t>> generic_forms() const;
 
 private:
-    [[nodiscard]] Result execute(std::uint64_t budget, bool single) noexcept;
+    template <bool Single>
+    [[nodiscard]] Result execute(std::uint64_t budget) noexcept;
     struct Impl;
     std::unique_ptr<Impl> impl_;
     Stats stats_;
