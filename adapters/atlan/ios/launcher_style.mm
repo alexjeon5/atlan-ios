@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import "launcher_style.h"
+#import <CoreText/CoreText.h>
 #include <cstdint>
 
 namespace {
@@ -60,6 +61,29 @@ const LauncherMetrics& LauncherMetrics::current() {
     return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? pad : phone;
 }
 
+// The design's type: Barlow for Latin text and figures (tabular), Noto Sans KR for Korean, at weights 400/500/600.
+// Both ship with the app (fonts/, UIAppFonts); Noto Sans KR is one variable font, so its weight is a variation.
+// Without them (a build without the resources) the system font stands in.
 UIFont* LauncherFont(CGFloat size, UIFontWeight weight) {
-    return [UIFont monospacedDigitSystemFontOfSize:size weight:weight];
+    static NSMutableDictionary<NSString*, UIFont*>* cache = [NSMutableDictionary dictionary];
+    const int wght = weight >= UIFontWeightSemibold ? 600 : weight >= UIFontWeightMedium ? 500 : 400;
+    NSString* key = [NSString stringWithFormat:@"%g/%d", size, wght];
+    if (UIFont* font = cache[key]) return font;
+    NSString* latin = wght == 600 ? @"Barlow-SemiBold" : wght == 500 ? @"Barlow-Medium" : @"Barlow-Regular";
+    UIFontDescriptor* korean = [UIFontDescriptor fontDescriptorWithFontAttributes:@{
+        UIFontDescriptorNameAttribute: @"NotoSansKR-Thin",  // the variable font's default instance
+        (__bridge NSString*)kCTFontVariationAttribute: @{@(0x77676874 /* 'wght' */): @(wght)},
+    }];
+    UIFontDescriptor* descriptor = [UIFontDescriptor fontDescriptorWithFontAttributes:@{
+        UIFontDescriptorNameAttribute: latin,
+        UIFontDescriptorCascadeListAttribute: @[korean],
+        UIFontDescriptorFeatureSettingsAttribute: @[@{
+            (__bridge NSString*)kCTFontOpenTypeFeatureTag: @"tnum",
+            (__bridge NSString*)kCTFontOpenTypeFeatureValue: @1,
+        }],
+    }];
+    UIFont* font = [UIFont fontWithDescriptor:descriptor size:size];
+    if (![font.fontName hasPrefix:@"Barlow"]) font = [UIFont monospacedDigitSystemFontOfSize:size weight:weight];
+    cache[key] = font;
+    return font;
 }
