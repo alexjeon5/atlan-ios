@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/charset_conversion.hpp"
 #include "adapters/atlan/glyph_cache.hpp"
+#include "adapters/atlan/poi_lookup.hpp"
 #include "adapters/atlan/quad_geometry.hpp"
 #include "adapters/atlan/speed_readout.hpp"
 #include "atlan/audio.hpp"
@@ -421,6 +422,62 @@ void quad_geometry() {
     o = rectangle_overlap(square, {20, 20}, {30, 30});
     check(!o.any && o.points.empty(), "no overlap");
 }
+// The POI style lookups on a hand-built settings table (the comparison with the guest's own code runs at install).
+void poi_lookups() {
+    const auto sets = atlan::shell::poi::poi_lookup_sets();
+    check(sets.size() == 1 && sets[0].members.size() == 2 && sets[0].verify, "two lookups, compared at install");
+    const auto style = sets[0].members[0].inline_run, symbol = sets[0].members[1].inline_run;
+    atlan::Memory memory;
+    memory.map(0x10000, 0x10000, atlan::Permissions::read_write);
+    const auto put = [&](std::uint32_t at, std::uint32_t value, unsigned bytes) {
+        std::array<std::byte, 4> b{};
+        for (unsigned i = 0; i < 4; ++i) b[i] = std::byte((value >> (8 * i)) & 255U);
+        check(memory.write(at, std::span(b).first(bytes)), "write table");
+    };
+    const auto get = [&](std::uint32_t at, unsigned bytes) {
+        std::array<std::byte, 4> b{};
+        check(memory.read(at, std::span(b).first(bytes)), "read result");
+        std::uint32_t v = 0;
+        for (unsigned i = 0; i < bytes; ++i) v |= std::to_integer<std::uint32_t>(b[i]) << (8 * i);
+        return v;
+    };
+    const std::uint32_t self = 0x10000, entries = 0x11000, list = 0x12000, symbols = 0x13000, out = 0x14000, stack = 0x15000;
+    put(self + 24, 2, 2);            // categories
+    put(self + 196, entries, 4);
+    put(self + 416, 10, 2);          // symbol limit
+    put(self + 772, symbols, 4);
+    put(self + 1916, 5, 4);          // map level
+    put(self + 1936, 0, 4);          // regular size
+    put(self + 2164, 3, 4);          // wanted variant
+    put(self + 2172, 0, 4);          // draw mode
+    const std::uint32_t entry = entries + 24;
+    put(entry + 3, 0x33, 1); put(entry + 6, 2, 1); put(entry + 7, 0, 1); put(entry + 8, 8, 1); put(entry + 9, 9, 1); put(entry + 10, 10, 1);
+    put(entry + 12, 0xdeadbeef, 4); put(entry + 20, list, 4);
+    put(list + 0, 1, 1); put(list + 18, 2, 2);                            // the default variant
+    put(list + 24, 3, 1); put(list + 25, 4, 1); put(list + 26, 6, 1);    // variant 3, levels 4-6
+    put(list + 24 + 4, 0x0404, 2); put(list + 24 + 6, 0x0606, 2); put(list + 24 + 8, 0x88, 2); put(list + 24 + 10, 0x99, 2);
+    put(list + 24 + 12, 0x0c, 1); put(list + 24 + 13, 0x0d, 1); put(list + 24 + 14, 0x0e, 1); put(list + 24 + 16, 0x77, 2); put(list + 24 + 18, 7, 2);
+    put(symbols + 20 * 7 + 8, 640, 2); put(symbols + 20 * 7 + 10, 480, 2);
+    atlan::CpuState cpu{};
+    cpu.registers[0] = self; cpu.registers[1] = 1; cpu.registers[13] = stack;
+    put(stack, out, 4);
+    check(style(cpu, memory) && cpu.registers[0] == 1, "a style record");
+    check(get(out, 4) == 0x00060403 && get(out + 4, 4) == 0x04040007 && get(out + 8, 4) == 0xdeadbeef, "the wanted variant, sizes and the entry word");
+    check(get(out + 12, 4) == 0x000e0c0d && get(out + 16, 4) == 0x330a0908, "swapped bytes and the entry's bytes");
+    cpu.registers[0] = self; cpu.registers[1] = 2;
+    check(style(cpu, memory) && cpu.registers[0] == 0, "no such category");
+    cpu.registers[0] = self; cpu.registers[1] = 1; cpu.registers[3] = out + 32;
+    for (unsigned i = 0; i < 4; ++i) put(stack + 4 * i, out + 36 + 4 * i, 4);
+    check(symbol(cpu, memory) && cpu.registers[0] == 1, "symbol data");
+    check(get(out + 32, 4) == 640 && get(out + 36, 4) == 480 && get(out + 40, 4) == 0x88 && get(out + 44, 4) == 0x99 && get(out + 48, 4) == 0x77,
+          "the symbol's size and the variant's numbers");
+    put(self + 1916, 9, 4);  // a level variant 3 does not cover: the default variant (symbol 2)
+    put(symbols + 20 * 2 + 8, 32, 2);
+    cpu.registers[0] = self; cpu.registers[1] = 1;
+    check(symbol(cpu, memory) && cpu.registers[0] == 1 && get(out + 32, 4) == 32, "outside its levels the default variant");
+    cpu.registers[0] = self; cpu.registers[1] = 1; cpu.registers[13] = 0x30000;
+    check(!symbol(cpu, memory), "an unreadable stack is left to the guest");
+}
 void coordinates() {
     using atlan::shell::parse_coordinate;
     const auto near = [](std::optional<atlan::shell::GeoPoint> p, double lat, double lon) {
@@ -490,6 +547,7 @@ int main() {
         quad_geometry();
         speed_readout();
         glyph_cache();
+        poi_lookups();
         text_conversion();
         home_button();
         frame_hash();
