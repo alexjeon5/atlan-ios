@@ -104,6 +104,13 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                                                                 : UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
+// Touches no control took end here: the next responder of a presented controller is the one that presented it,
+// which would hand them to the navigation underneath.
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { (void)touches; (void)event; }
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { (void)touches; (void)event; }
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { (void)touches; (void)event; }
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { (void)touches; (void)event; }
+
 - (BOOL)portrait {
     const CGSize size = self.view.bounds.size;
     return size.height > size.width;
