@@ -92,6 +92,38 @@ std::optional<std::uint32_t> find_signature(Memory& memory, std::uint32_t base, 
     if (!scan()) return std::nullopt;
     return found;
 }
+
+// A32 word, or Thumb halfword(s) (first in the low half), of the executable instruction at `address` (bit 0: Thumb).
+std::optional<std::uint32_t> instruction_encoding(Memory& memory, std::uint32_t address) {
+    const bool thumb = (address & 1U) != 0;
+    address &= ~1U;
+    const auto halfword = [&](std::uint32_t at) -> std::optional<std::uint32_t> {
+        const std::byte* bytes = memory.translate(at, MemoryAccess::execute);
+        const std::byte* next = memory.translate(at + 1, MemoryAccess::execute);
+        if (bytes == nullptr || next == nullptr) return std::nullopt;
+        return std::to_integer<std::uint32_t>(*bytes) | std::to_integer<std::uint32_t>(*next) << 8;
+    };
+    const auto low = halfword(address);
+    if (!low) return std::nullopt;
+    if (thumb && (*low >> 11) < 0x1d) return low;  // a 16-bit Thumb instruction
+    const auto high = halfword(address + 2);
+    if (!high) return std::nullopt;
+    return *low | *high << 16;
+}
+
+// Runs `service` in place of the instruction at `address`, then goes on with the next one.
+ImportService continue_after(Memory& memory, std::uint32_t address, ImportService service) {
+    const bool thumb = (address & 1U) != 0;
+    const auto encoding = instruction_encoding(memory, address).value_or(0);
+    const std::uint32_t next = (address & ~1U) + (thumb && (encoding >> 11 & 0x1f) < 0x1d ? 2 : 4);
+    return [service = std::move(service), next = next | (thumb ? 1U : 0U)](ImportCall& call) -> std::optional<std::string> {
+        if (auto error = service(call)) return error;
+        if (call.declined() || call.blocked() || call.transferred()) return "an instruction replacement can only run to the next instruction";
+        call.runtime().start(next);
+        call.transfer();
+        return std::nullopt;
+    };
+}
 }
 
 unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime, std::span<const elf::Symbol> exports,
@@ -134,6 +166,23 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
             if (!taken) absent += " " + set.name;
             continue;
         }
+        // Instruction members: the host decides from the encoding whether it can stand in for the instruction.
+        std::map<std::string, std::vector<ImportService>> instruction_services;  // per located address, in order
+        bool instructions_accepted = true;
+        for (const auto& [name, factory] : set.instructions) {
+            const auto it = located.find(name);
+            if (it == located.end() || !factory) continue;
+            for (const std::uint32_t address : it->second) {
+                const auto encoding = instruction_encoding(runtime.memory, address);
+                auto service = encoding ? factory(*encoding) : ImportService{};
+                if (!service) instructions_accepted = false;
+                instruction_services[name].push_back(std::move(service));
+            }
+        }
+        if (!instructions_accepted) {
+            rejected += " " + set.name;
+            continue;
+        }
         if (set.verify) {
             const auto member = [&](const std::string& name) -> const NativeSet::Member* {
                 for (const auto& m : set.members) if (m.name == name) return &m;
@@ -160,7 +209,12 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
             const auto it = located.find(member.name);
             if (it == located.end()) continue;
             bool any = false;
-            for (const std::uint32_t address : it->second)
+            if (const auto services_it = instruction_services.find(member.name); services_it != instruction_services.end()) {
+                const auto& services = services_it->second;
+                for (std::size_t i = 0; i < it->second.size(); ++i)
+                    any |= dispatcher.replace_function(runtime, it->second[i], "native:" + member.name,
+                                                       continue_after(runtime.memory, it->second[i], services[i]));
+            } else for (const std::uint32_t address : it->second)
                 any |= member.inline_run != nullptr
                            ? dispatcher.replace_function_inline(runtime, address, "native:" + member.name, member.service, member.inline_run)
                            : dispatcher.replace_function(runtime, address, "native:" + member.name, member.service);

@@ -4,6 +4,7 @@
 #include "adapters/atlan/quad_geometry.hpp"
 #include "shell/app_package.hpp"
 #include "shell/guest_ini.hpp"
+#include "shell/input.hpp"
 #include "shell/java_services.hpp"
 #include "shell/surface.hpp"
 #include "atlan/jni.hpp"
@@ -177,7 +178,12 @@ std::vector<NativeSet> AtlanAdapter::native_sets() const {
     std::vector<NativeSet> sets;
     sets.push_back(geometry::quad_geometry_set());
     for (auto& set : charset::conversion_sets(config_.exhaustive_native_checks)) sets.push_back(std::move(set));
+    for (auto& set : speed::speed_readout_sets(fix_speed_)) sets.push_back(std::move(set));
     return sets;
+}
+
+void AtlanAdapter::location_delivered(const LocationFix& fix) {
+    fix_speed_->store(speed::fix_kmh(fix.speed_mps, fix.accuracy_m).value_or(-1), std::memory_order_relaxed);
 }
 AppStartup AtlanAdapter::startup() const {
     AppStartup startup;

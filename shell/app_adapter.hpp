@@ -17,6 +17,7 @@
 namespace atlan { class AudioSink; class GuestStdio; class JavaBootstrap; }
 namespace atlan::shell {
 class SurfaceState;
+struct LocationFix;
 using SessionLog = std::function<void(const std::string&)>;
 
 // What the session offers an adapter once the image is loaded. Guest thread only.
@@ -90,6 +91,8 @@ public:
     // Delivers what the app's Java side would have delivered by now (replies, state changes) as guest calls, before
     // input and each frame. false: a call failed and the session has already failed.
     virtual bool deliver(AppHost& host) { (void)host; return true; }
+    // A location fix the embedder supplied, just before the session hands it to the guest through the input bindings.
+    virtual void location_delivered(const LocationFix& fix) { (void)fix; }
 
     // Frames on request, as a GLSurfaceView in RENDERMODE_WHEN_DIRTY draws them.
     [[nodiscard]] virtual bool frames_on_request() const { return false; }

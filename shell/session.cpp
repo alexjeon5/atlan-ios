@@ -475,6 +475,7 @@ void GuestSession::run() {
                     if (const auto lost = location_watch.lost(now_ms)) events.emplace_back(*lost);
                 for (const auto& event : events) {
                     const bool touch = std::holds_alternative<TouchEvent>(event);
+                    if (const auto* fix = std::get_if<LocationFix>(&event)) adapter.location_delivered(*fix);
                     const auto bindings = config_.input_bindings.matching(event);
                     if (bindings.empty()) note(std::string("input: no binding for ") + (touch ? "touch" : "location") + " events");
                     for (const auto* binding : bindings) {

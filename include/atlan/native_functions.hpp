@@ -57,6 +57,13 @@ struct NativeSet {
     };
     std::string name;
     std::vector<Member> members;
+    // Members that replace one instruction instead of a whole function, by member name (their `service` is unused):
+    // the located address is that instruction (bit 0: Thumb; not inside an IT block). At install the factory gets the
+    // instruction's encoding (an A32 word; for Thumb the first halfword in the low 16 bits and the second, if any,
+    // above) and returns the service that runs in its place, or an empty one to leave it alone (the set then counts
+    // as differing from the host). That service sees the CPU state at the instruction and may change registers and
+    // memory; execution then continues with the next instruction, never at LR.
+    std::map<std::string, std::function<ImportService(std::uint32_t encoding)>> instructions;
     // Compares guest and host on the located members (member name -> address, bit 0: Thumb). `call` runs member
     // `name` either as guest code or as its host service. Null: installed without a check.
     using Call = std::function<std::optional<NativeProbe::Result>(const std::string& name, std::span<const std::uint32_t> arguments)>;

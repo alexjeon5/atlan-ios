@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/charset_conversion.hpp"
 #include "adapters/atlan/quad_geometry.hpp"
+#include "adapters/atlan/speed_readout.hpp"
 #include "atlan/audio.hpp"
 #include "shell/coordinate.hpp"
 #include "shell/data_file.hpp"
@@ -338,6 +339,24 @@ void text_conversion() {
     check(t && t->outside_table, "codes beyond the table are left to the guest");
     check(!table_to_wide(bytes({'a', 0xB0}), 3, 100), "unreadable input");
 }
+// Speeds above the app's one-byte 255 km/h: what a replaced load shows, and the instructions it accepts.
+void speed_readout() {
+    using namespace atlan::shell::speed;
+    check(fix_kmh(100.0 / 3.6, 5) == 100 && fix_kmh(312.0 / 3.6, 5) == 312 && fix_kmh(-1, 5) == 0, "fix speed in km/h");
+    check(!fix_kmh(30, -1), "a lost signal has no speed");
+    check(shown_speed(255, 312) == 312 && shown_speed(255, 200) == 255 && shown_speed(255, -1) == 255, "only a saturated byte");
+    check(shown_speed(120, 312) == 120 && shown_speed(0, 900) == 0, "an unsaturated byte is shown as it is");
+    const auto fix = make_fix_speed();
+    const auto sets = speed_readout_sets(fix);
+    check(sets.size() == 2, "one set per screen");
+    for (const auto& set : sets) {
+        check(set.members.size() == 1 && set.instructions.size() == 1, "one load each");
+        const auto& factory = set.instructions.begin()->second;
+        check(factory(0xe5d12003) && factory(0xe5d40fff), "LDRB with an immediate offset");
+        check(!factory(0xe5d1f003) && !factory(0xe5df2003), "not with PC");
+        check(!factory(0x05d12003) && !factory(0xe5512003) && !factory(0xe7d12003) && !factory(0xe5f12003), "nothing else");
+    }
+}
 // The app's geometry as the host computes it (the comparison with the guest's own code runs at install).
 void quad_geometry() {
     using namespace atlan::shell::geometry;
@@ -383,6 +402,7 @@ void coordinates() {
 int main() {
     try {
         quad_geometry();
+        speed_readout();
         text_conversion();
         home_button();
         scratch = fs::temp_directory_path() / ("atlan-shell-" + std::to_string(::getpid()));

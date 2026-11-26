@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include "adapters/atlan/speed_readout.hpp"
 #include "shell/app_adapter.hpp"
 #include "shell/http_client.hpp"
 #include <cstdint>
@@ -49,6 +50,7 @@ public:
     [[nodiscard]] AppStartup startup() const override;
     [[nodiscard]] std::vector<NativeSet> native_sets() const override;
     bool deliver(AppHost& host) override;
+    void location_delivered(const LocationFix& fix) override;
     [[nodiscard]] bool frames_on_request() const override { return on_demand_; }
     [[nodiscard]] bool frame_requested() const override { return render_requested_; }
     void frame_drawn() override { render_requested_ = false; }
@@ -68,5 +70,7 @@ private:
     bool on_demand_{};
     bool render_requested_{};
     std::uint64_t render_requests_{};
+    // Speed of the latest fix, for the screens that show speeds above the app's 255 km/h (speed_readout.hpp).
+    speed::FixSpeed fix_speed_ = speed::make_fix_speed();
 };
 }

@@ -202,6 +202,82 @@ void replacement() {
     check(thumb.call(code | 1, 1, 0).stop == Stop::returned && thumb.r(0) == 101, "thumb replacement after a decline");
 }
 
+// One instruction replaced in the middle of a function; execution goes on with the next instruction.
+void instruction_replacement() {
+    constexpr std::uint32_t data = stack - 0x800;
+    const std::array<std::uint32_t, 3> arm_code{0xe5d10003, 0xe2800001, 0xe12fff1e};  // ldrb r0, [r1, #3]; add r0, #1; bx lr
+    const std::array<std::uint32_t, 2> thumb_code{0x300178c8, 0x00004770};             // ldrb r0, [r1, #3]; adds r0, #1; bx lr
+    const auto load_set = [](std::uint32_t* seen) {
+        NativeSet set;
+        set.name = "load";
+        NativeSet::Member member;
+        member.name = "load";
+        set.members.push_back(std::move(member));
+        set.instructions["load"] = [seen](std::uint32_t encoding) -> ImportService {
+            *seen = encoding;
+            if (encoding != 0xe5d10003 && encoding != 0x78c8) return {};
+            return [](ImportCall& call) -> std::optional<std::string> {
+                std::array<std::byte, 1> byte{};
+                auto& cpu = call.runtime().cpu;
+                if (!call.runtime().memory.read(static_cast<std::uint32_t>(cpu.registers[1]) + 3, byte)) return "fault";
+                cpu.registers[0] = std::to_integer<std::uint32_t>(byte[0]) * 10;
+                return std::nullopt;
+            };
+        };
+        return set;
+    };
+    for (const bool blocks : {true, false}) {
+        for (const bool thumb : {false, true}) {
+            Guest guest;
+            guest.dispatcher.set_block_cache(blocks);
+            if (thumb) guest.put(code, thumb_code); else guest.put(code, arm_code);
+            guest.seal();
+            const std::array<std::byte, 4> bytes{std::byte{0}, std::byte{0}, std::byte{0}, std::byte{7}};
+            check(guest.runtime.memory.write(data, bytes), "write data");
+            const std::uint32_t entry = code | (thumb ? 1U : 0U);
+            check(guest.call(entry, 0, data).stop == Stop::returned && guest.r(0) == 8, "guest load before");
+            std::string why;
+            const auto signatures = parse_native_signatures(thumb ? "load thumb c8 78 01 30 70 47 00 00" : "load arm 03 00 d1 e5 01 00 80 e2", why);
+            check(signatures.has_value(), "instruction signature parses");
+            NativeOptions options;
+            options.stack_top = stack;
+            options.return_target = sentinel;
+            options.scratch = 0x200000;
+            options.code_base = code;
+            options.code_bytes = 0x3000;
+            options.signatures = *signatures;
+            options.log = [&guest](const std::string& line) { guest.log.push_back(line); };
+            std::uint32_t seen = 0;
+            std::vector<NativeSet> sets;
+            sets.push_back(load_set(&seen));
+            check(install_native_functions(guest.dispatcher, guest.runtime, guest.exports, std::move(sets), options) == 1,
+                  "instruction replaced");
+            check(seen == (thumb ? 0x78c8U : 0xe5d10003U), "the factory sees the instruction's encoding");
+            for (int round = 0; round < 3; ++round)
+                check(guest.call(entry, 0, data).stop == Stop::returned && guest.r(0) == 71, "replaced load, then the next instruction");
+        }
+    }
+    // An encoding the factory does not take leaves the instruction alone.
+    Guest other;
+    const std::array<std::uint32_t, 3> other_code{0xe5d10002, 0xe2800001, 0xe12fff1e};  // ldrb r0, [r1, #2]
+    other.put(code, other_code);
+    other.seal();
+    std::string why;
+    NativeOptions options;
+    options.stack_top = stack;
+    options.return_target = sentinel;
+    options.scratch = 0x200000;
+    options.code_base = code;
+    options.code_bytes = 0x3000;
+    options.signatures = *parse_native_signatures("load arm 02 00 d1 e5 01 00 80 e2", why);
+    options.log = [&other](const std::string& line) { other.log.push_back(line); };
+    std::uint32_t seen = 0;
+    std::vector<NativeSet> sets;
+    sets.push_back(load_set(&seen));
+    check(install_native_functions(other.dispatcher, other.runtime, other.exports, std::move(sets), options) == 0 &&
+          !other.dispatcher.replaces(code) && other.logged("left interpreted: load"), "a refused encoding stays guest code");
+}
+
 // The zlib services on guest memory, without a guest implementation to compare with.
 void zlib_services() {
     Runtime runtime;
@@ -393,6 +469,7 @@ int main() {
     try {
         decoder();
         replacement();
+        instruction_replacement();
         zlib_services();
         image_services();
         std::cout << "native function tests passed: " << checks << " checks\n";
