@@ -14,18 +14,19 @@ bool byte_at(Memory& memory, std::uint32_t address, std::uint32_t offset, std::u
     out = std::to_integer<std::uint8_t>(value);
     return true;
 }
-// Compares up to `limit` bytes, stopping after a NUL when `text` is set.
-std::optional<std::string> compare(ImportCall& call, bool text, std::uint32_t limit, const char* name, bool fold = false) {
-    if (limit > max_scan) return std::string(name) + " size exceeds service bound";
-    auto& memory = call.runtime().memory;
+enum class Scan { done, fault, bound };
+// Compares up to `limit` bytes, stopping after a NUL when `text` is set; `result` is the difference of the first
+// unequal bytes, or 0.
+Scan compare_bytes(Memory& memory, std::uint32_t first, std::uint32_t second, bool text, std::uint32_t limit, bool fold,
+                   std::uint32_t& result) noexcept {
+    if (limit > max_scan) return Scan::bound;
     for (std::uint64_t i = 0; i < limit;) {
         // Both operands a page piece at a time; the bytes are compared in order, so a fault is reported only
         // when the scan reaches an unmapped byte before it finds a difference or a terminator.
-        if (std::uint64_t{call.arg(0)} + i > 0xffffffffULL || std::uint64_t{call.arg(1)} + i > 0xffffffffULL)
-            return std::string(name) + " read left mapped guest memory";
-        const auto left = memory.page_span(static_cast<std::uint32_t>(call.arg(0) + i), MemoryAccess::read);
-        const auto right = memory.page_span(static_cast<std::uint32_t>(call.arg(1) + i), MemoryAccess::read);
-        if (left.empty() || right.empty()) return std::string(name) + " read left mapped guest memory";
+        if (std::uint64_t{first} + i > 0xffffffffULL || std::uint64_t{second} + i > 0xffffffffULL) return Scan::fault;
+        const auto left = memory.page_span(static_cast<std::uint32_t>(first + i), MemoryAccess::read);
+        const auto right = memory.page_span(static_cast<std::uint32_t>(second + i), MemoryAccess::read);
+        if (left.empty() || right.empty()) return Scan::fault;
         const auto count = static_cast<std::size_t>(std::min<std::uint64_t>({left.size(), right.size(), limit - i}));
         for (std::size_t k = 0; k < count; ++k) {
             auto a = std::to_integer<std::uint8_t>(left[k]), b = std::to_integer<std::uint8_t>(right[k]);
@@ -34,14 +35,35 @@ std::optional<std::string> compare(ImportCall& call, bool text, std::uint32_t li
                 if (b >= 'A' && b <= 'Z') b = static_cast<std::uint8_t>(b + 32);
             }
             if (a != b || (text && a == 0)) {
-                call.set_result(static_cast<std::uint32_t>(static_cast<int>(a) - static_cast<int>(b)));
-                return std::nullopt;
+                result = static_cast<std::uint32_t>(static_cast<int>(a) - static_cast<int>(b));
+                return Scan::done;
             }
         }
         i += count;
     }
-    call.set_result(0);
+    result = 0;
+    return Scan::done;
+}
+std::optional<std::string> compare(ImportCall& call, bool text, std::uint32_t limit, const char* name, bool fold = false) {
+    std::uint32_t result = 0;
+    switch (compare_bytes(call.runtime().memory, call.arg(0), call.arg(1), text, limit, fold, result)) {
+    case Scan::bound: return std::string(name) + " size exceeds service bound";
+    case Scan::fault: return std::string(name) + " read left mapped guest memory";
+    case Scan::done: break;
+    }
+    call.set_result(result);
     return std::nullopt;
+}
+// The same comparisons on the registers, for the block cache; a call the service would fail is left to it.
+template <bool Text, bool Counted>
+bool compare_inline(CpuState& cpu, Memory& memory) noexcept {
+    std::uint32_t result = 0;
+    const auto limit = Counted ? static_cast<std::uint32_t>(cpu.registers[2]) : max_scan;
+    if (compare_bytes(memory, static_cast<std::uint32_t>(cpu.registers[0]), static_cast<std::uint32_t>(cpu.registers[1]),
+                      Text, limit, false, result) != Scan::done)
+        return false;
+    cpu.registers[0] = result;
+    return true;
 }
 }
 void install_string_services(ImportDispatcher& dispatcher) {
@@ -50,6 +72,9 @@ void install_string_services(ImportDispatcher& dispatcher) {
     dispatcher.bind("strcasecmp", [](ImportCall& call) { return compare(call, true, max_scan, "strcasecmp", true); });
     dispatcher.bind("strncasecmp", [](ImportCall& call) { return compare(call, true, call.arg(2), "strncasecmp", true); });
     dispatcher.bind("memcmp", [](ImportCall& call) { return compare(call, false, call.arg(2), "memcmp"); });
+    dispatcher.bind_inline("strcmp", compare_inline<true, false>);
+    dispatcher.bind_inline("strncmp", compare_inline<true, true>);
+    dispatcher.bind_inline("memcmp", compare_inline<false, true>);
     // char* strncpy(char* dst, const char* src, size_t n): pads with NUL up to n.
     dispatcher.bind("strncpy", [](ImportCall& call) -> std::optional<std::string> {
         const auto dst = call.arg(0), src = call.arg(1), count = call.arg(2);

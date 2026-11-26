@@ -3,6 +3,7 @@
 // function that records the words it received. No app-specific names or values.
 #include "atlan/imports.hpp"
 #include "shell/input.hpp"
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <iostream>
@@ -68,16 +69,18 @@ void bindings_text() {
         "touch.up example/Input onRelease (I)V pointer   # overrides one phase\n"
         "location example/Input onFix (DDFJI)V latitude longitude speed*3.6 time 7\n"
         "location example/Input onSentence (Ljava/lang/String;)V rmc\n"
+        "location example/Input onSentence (Ljava/lang/String;)V gsv\n"
         "actions 10 12 11 13\n", error);
     check(parsed.has_value() && error.empty(), "bindings text parses");
     check(!parsed->empty() && parsed->touch[0]->name == "onTouch" && parsed->touch[1]->name == "onTouch" &&
           parsed->touch[2]->name == "onRelease" && parsed->touch[3]->arguments.size() == 4, "touch rules bind phases");
-    check(parsed->location.size() == 2 && parsed->location[0].arguments[2].source == InputSource::speed &&
+    check(parsed->location.size() == 3 && parsed->location[0].arguments[2].source == InputSource::speed &&
           parsed->location[0].arguments[2].scale == 3.6 && parsed->location[0].arguments[4].source == InputSource::constant &&
           parsed->location[0].arguments[4].scale == 7, "factors and constants parse");
-    check(parsed->location[1].name == "onSentence" && parsed->location[1].arguments[0].source == InputSource::rmc, "text rules parse");
+    check(parsed->location[1].name == "onSentence" && parsed->location[1].arguments[0].source == InputSource::rmc &&
+          parsed->location[2].arguments[0].source == InputSource::gsv, "text rules parse");
     check(parsed->actions == std::array<std::int32_t, 4>{10, 12, 11, 13}, "action codes parse");
-    check(parsed->matching(InputEvent{LocationFix{}}).size() == 2 &&
+    check(parsed->matching(InputEvent{LocationFix{}}).size() == 3 &&
           parsed->matching(InputEvent{TouchEvent{TouchPhase::up, 0, 0, 0, 0}}).front()->name == "onRelease", "events find their bindings");
     check(InputBindings{}.empty() && InputBindings{}.matching(InputEvent{LocationFix{}}).empty(), "empty bindings bind nothing");
 
@@ -161,6 +164,17 @@ void nmea() {
     const LocationFix south{-33.999999999, -0.5, 0, -1, -1, 500, 951782400000ULL};  // 2000-02-29 00:00:00 UTC
     check(nmea_gga(south).starts_with("$GPGGA,000000.00,3400.0000,S,00030.0000,W,1,08,50.0,0.0,M"), "minutes carry into degrees; hemispheres; HDOP bound");
     check(nmea_rmc(south).starts_with("$GPRMC,000000.00,A,3400.0000,S,00030.0000,W,0.00,,290200,,,A*"), "unknown speed and course; leap day");
+
+    // Satellites: the same 8 in GGA, GSA (3D fix, NMEA 4.1 system id) and GSV (two sentences of four).
+    const auto gsa = nmea_gsa(fix);
+    check(valid(gsa) && gsa.starts_with("$GPGSA,A,3,02,05,12,15,18,21,24,29,,,,,1.5,1.0,1.2,1*"), "GSA fields");
+    const auto fields = [](const std::string& s) { return 1 + std::count(s.begin(), s.end(), ','); };
+    check(fields(gsa) == 19, "GSA has 18 fields after its name");
+    const auto gsv = nmea_gsv(fix);
+    check(gsv.size() == 2 && valid(gsv[0]) && valid(gsv[1]), "GSV is two valid sentences");
+    check(gsv[0].starts_with("$GPGSV,2,1,08,02,62,040,44,05,45,110,42,12,30,200,38,15,72,300,45*"), "first GSV sentence");
+    check(gsv[1].starts_with("$GPGSV,2,2,08,18,25,330,35,21,50,160,41,24,15,080,32,29,38,250,39*"), "second GSV sentence");
+    check(nmea_gsa(south).find(",75.0,50.0,60.0,1*") != std::string::npos, "GSA dilutions follow the HDOP bound");
 }
 
 void delivery() {
@@ -211,6 +225,17 @@ void delivery() {
     });
     check(with_text && *with_text == std::vector<std::uint32_t>{1, 2, 0xe0000004} && seen == "0" + nmea_gga(fix), "String argument is the sentence's handle");
     check(!native_call_words(text, fix, {}, 1, 2, error) && error.find("String") != std::string::npos, "a text argument needs a String maker");
+    check(native_call_count(text, fix) == 1 && native_call_count(text, TouchEvent{}) == 1, "one sentence, one call");
+
+    // gsv is several sentences: one call per sentence, `part` picks it.
+    NativeBinding sky{"example/Input", "onSentence", "(Ljava/lang/String;)V", {{InputSource::gsv, 1}}};
+    const auto gsv = nmea_gsv(fix);
+    check(native_call_count(sky, fix) == gsv.size(), "a GSV binding is called once per sentence");
+    std::vector<std::string> parts;
+    for (std::size_t part = 0; part < native_call_count(sky, fix); ++part)
+        check(native_call_words(sky, fix, {}, 1, 2, error, [&](std::size_t, const std::string& s) { parts.push_back(s); return std::uint32_t{1}; }, part).has_value(),
+              "GSV part words are built");
+    check(parts == gsv, "each call carries the next GSV sentence");
 
     NativeBinding mismatched{"example/Input", "m", "(II)V", {{InputSource::x, 1}}};
     check(!native_call_words(mismatched, TouchEvent{}, {}, 0, 0, error) && !error.empty(), "argument count mismatch is an error");

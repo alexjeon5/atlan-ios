@@ -25,8 +25,13 @@
     return self;
 }
 - (void)refreshColors {
-    self.layer.borderColor = [LauncherColor.line resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+    UIColor* border = _selectedLook ? LauncherColor.lineStrong : LauncherColor.line;
+    self.layer.borderColor = [border resolvedColorWithTraitCollection:self.traitCollection].CGColor;
     self.layer.shadowColor = [LauncherColor.shadow resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+}
+- (void)setSelectedLook:(BOOL)selectedLook {
+    _selectedLook = selectedLook;
+    [self refreshColors];
 }
 - (void)traitCollectionDidChange:(UITraitCollection*)previous {
     [super traitCollectionDidChange:previous];
@@ -131,6 +136,22 @@ UIView* LKDot(UIColor* color, CGFloat size) {
     return dot;
 }
 
+UIView* LKRadio(BOOL on) {
+    UIView* ring = [UIView new];
+    ring.layer.cornerRadius = 10;
+    ring.layer.borderWidth = 1.5;
+    ring.backgroundColor = on ? LauncherColor.accent : UIColor.clearColor;
+    ring.layer.borderColor = (on ? LauncherColor.accent : LauncherColor.muted).CGColor;  // fixed accent; muted is close in both modes
+    LKSize(ring, 20, 20);
+    if (on) {
+        UIView* dot = LKDot(LauncherColor.onAccent, 8);
+        [ring addSubview:dot];
+        [NSLayoutConstraint activateConstraints:@[[dot.centerXAnchor constraintEqualToAnchor:ring.centerXAnchor],
+                                                  [dot.centerYAnchor constraintEqualToAnchor:ring.centerYAnchor]]];
+    }
+    return ring;
+}
+
 UIImageView* LKIcon(NSString* symbol, CGFloat size, UIColor* color) {
     UIImageSymbolConfiguration* config = [UIImageSymbolConfiguration configurationWithPointSize:size weight:UIImageSymbolWeightRegular];
     UIImageView* view = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbol withConfiguration:config]];
@@ -221,8 +242,7 @@ UIView* LKSwitchRow(NSString* title, NSString* detail, BOOL on, CGFloat height, 
     return LKListRow(title, detail, toggle, height, NO, nil);
 }
 
-UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* options, NSInteger selected, CGFloat height,
-                     void (^changed)(NSInteger)) {
+UISegmentedControl* LKSegments(NSArray<NSString*>* options, NSInteger selected, void (^changed)(NSInteger)) {
     const auto& m = LauncherMetrics::current();
     UISegmentedControl* control = [[UISegmentedControl alloc] initWithItems:options];
     control.selectedSegmentIndex = selected;
@@ -235,7 +255,14 @@ UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* opti
     [control addAction:[UIAction actionWithHandler:^(UIAction* action) {
         changed(((UISegmentedControl*)action.sender).selectedSegmentIndex);
     }] forControlEvents:UIControlEventValueChanged];
-    LKSize(control, 64.0 * options.count + 8, 40);
+    LKSize(control, 0, 40);
+    return control;
+}
+
+UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* options, NSInteger selected, CGFloat height,
+                     void (^changed)(NSInteger)) {
+    UISegmentedControl* control = LKSegments(options, selected, changed);
+    [control.widthAnchor constraintEqualToConstant:64.0 * options.count + 8].active = YES;
     return LKListRow(title, detail, control, height, NO, nil);
 }
 

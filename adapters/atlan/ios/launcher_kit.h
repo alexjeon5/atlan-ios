@@ -10,6 +10,7 @@ typedef NS_ENUM(NSInteger, LKButtonKind) { LKButtonPrimary, LKButtonSecondary, L
 // A card: rounded surface with a hairline border (and a faint shadow in light mode). Tappable when given an action.
 @interface LKCard : UIControl
 - (instancetype)initWithContent:(UIView*)content padding:(UIEdgeInsets)padding radius:(CGFloat)radius;
+@property(nonatomic) BOOL selectedLook;  // the stronger border of a chosen option
 @end
 
 // The large start button: an icon at the top left and the title at the bottom left.
@@ -23,6 +24,7 @@ UIStackView* LKRow(NSArray<UIView*>* views, CGFloat spacing);
 UIView* LKSpacer(void);
 UIView* LKLine(void);
 UIView* LKDot(UIColor* color, CGFloat size);
+UIView* LKRadio(BOOL on);  // the round mark of one option among several
 UIImageView* LKIcon(NSString* symbol, CGFloat size, UIColor* color);
 void LKSize(UIView* view, CGFloat width, CGFloat height);  // 0 leaves that side free
 
@@ -36,6 +38,7 @@ UILabel* LKValue(NSString* text);
 // A dot and a word, as used for "ready" and verification states.
 UIView* LKStatus(UIColor* color, NSString* text);
 UIView* LKSwitchRow(NSString* title, NSString* detail, BOOL on, CGFloat height, void (^changed)(BOOL));
+UISegmentedControl* LKSegments(NSArray<NSString*>* options, NSInteger selected, void (^changed)(NSInteger));
 UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* options, NSInteger selected, CGFloat height,
                      void (^changed)(NSInteger));
 // Small grey heading above a block, e.g. "방법 1".

@@ -266,10 +266,11 @@ void GuestSession::run() {
         runtime.memory.map(stack_base, stack_bytes, Permissions::read_write);
         BionicData::map(runtime.memory);
         RecordingAudioSink fallback_sink(true);  // used when the embedder supplies no device sink
+        AudioSink& audio_sink = config_.audio_sink ? *config_.audio_sink : fallback_sink;
         std::optional<OpenSles> audio;
         {
             OpenSles::Config audio_config;
-            audio_config.sink = config_.audio_sink ? config_.audio_sink : &fallback_sink;
+            audio_config.sink = &audio_sink;
             audio_config.trace = [this](const std::string& line) { log_("opensles " + line); };
             audio.emplace(runtime, dispatcher, audio_config);
         }
@@ -298,7 +299,11 @@ void GuestSession::run() {
             auto sets = runtime_library_sets();
             for (auto& set : image_library_sets()) sets.push_back(std::move(set));
             for (auto& set : adapter.native_sets()) sets.push_back(std::move(set));
+            const auto native_start = std::chrono::steady_clock::now();
             install_native_functions(dispatcher, runtime, image.exports, std::move(sets), native_options);
+            if (config_.perf_log)
+                log_("perf native function install: " +
+                     std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - native_start).count()) + " s");
             dispatcher.reset_import_counts();
             if (profiler) profiler->reset();
         }
@@ -319,10 +324,12 @@ void GuestSession::run() {
                 JavaBootstrap& bootstrap;
                 const elf::Image& image;
                 const std::function<void(const std::string&)>& fail;
+                AudioSink& sink;
                 Host(GuestSession& s, Runtime& r, ImportDispatcher& d, JavaBootstrap& j, const elf::Image& i,
-                     const std::function<void(const std::string&)>& f)
-                    : session(s), runtime(r), dispatcher(d), bootstrap(j), image(i), fail(f) {}
+                     const std::function<void(const std::string&)>& f, AudioSink& a)
+                    : session(s), runtime(r), dispatcher(d), bootstrap(j), image(i), fail(f), sink(a) {}
                 JavaBootstrap& java() override { return bootstrap; }
+                AudioSink& audio() override { return sink; }
                 std::uint32_t function(std::string_view symbol) const override {
                     const auto* sym = image.find(symbol);
                     return sym && sym->type == 2 ? sym->address : 0;
@@ -351,7 +358,7 @@ void GuestSession::run() {
                 const SessionLog& log() const override { return session.log_; }
             };
             const std::function<void(const std::string&)> fail_session = fail;
-            Host host(*this, runtime, dispatcher, java, image, fail_session);
+            Host host(*this, runtime, dispatcher, java, image, fail_session, audio_sink);
             adapter.install_java(host, config_.render_on_demand);
             struct Uninstall {
                 AppAdapter& adapter;
@@ -365,19 +372,6 @@ void GuestSession::run() {
             for (const auto& m : java.native_methods()) log_("jni native " + m.class_name + "." + m.name + m.signature);
             if (outcome.stop != Stop::returned) { fail(describe_stop("JNI_OnLoad", outcome)); return; }
             log_("JNI_OnLoad returned 0x" + hex(runtime.cpu.registers[0]));
-            if (native_init_address != 0) {
-                const std::array<std::uint32_t, 2> init_args{java.env(), java.new_object(java.class_handle(startup.receiver_class))};
-                const auto started = dispatcher.call(runtime, native_init_address, init_args, stack_base + stack_bytes,
-                                                     return_sentinel, config_.native_init_budget);
-                if (started.stop != Stop::returned) {
-                    if (started.stop == Stop::budget_exhausted) log_(describe_state(runtime, dispatcher));
-                    fail(describe_stop(method_label(startup.init, "init"), started));
-                    return;
-                }
-                log_(method_label(startup.init, "init") + " returned 0x" + hex(runtime.cpu.registers[0]));
-            } else {
-                log_(method_label(startup.init, "init") + " not exported");
-            }
             // Block cache coverage since the start and the busiest imports since the last reset_import_counts().
             const auto perf_details = [&]() -> std::string {
                 std::string line;
@@ -404,6 +398,26 @@ void GuestSession::run() {
                             std::to_string(dispatcher.import_counts().count(slow[i].first) ? dispatcher.import_counts().at(slow[i].first) : 0);
                 return line;
             };
+            if (native_init_address != 0) {
+                const std::array<std::uint32_t, 2> init_args{java.env(), java.new_object(java.class_handle(startup.receiver_class))};
+                dispatcher.reset_import_counts();
+                const auto init_start = std::chrono::steady_clock::now();
+                const auto started = dispatcher.call(runtime, native_init_address, init_args, stack_base + stack_bytes,
+                                                     return_sentinel, config_.native_init_budget);
+                if (config_.perf_log) {
+                    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - init_start).count();
+                    log_("perf " + method_label(startup.init, "init") + ": " + std::to_string(started.retired) + " instructions, " +
+                         std::to_string(seconds) + " s" + perf_details());
+                }
+                if (started.stop != Stop::returned) {
+                    if (started.stop == Stop::budget_exhausted) log_(describe_state(runtime, dispatcher));
+                    fail(describe_stop(method_label(startup.init, "init"), started));
+                    return;
+                }
+                log_(method_label(startup.init, "init") + " returned 0x" + hex(runtime.cpu.registers[0]));
+            } else {
+                log_(method_label(startup.init, "init") + " not exported");
+            }
             // Surface and render entry points (plain Java_ exports: (env, this[, surface]) -> int).
             const auto native = [&](const std::string& name, std::vector<std::uint32_t> extra) -> bool {
                 const auto* sym = image.find(name);
@@ -455,6 +469,8 @@ void GuestSession::run() {
                     for (const auto* binding : bindings) {
                     const auto target = resolve(*binding);
                     if (target.address == 0) continue;
+                    const auto calls = native_call_count(*binding, event);
+                    for (std::size_t part = 0; part < calls; ++part) {
                     std::string why;
                     const auto words = native_call_words(*binding, event, config_.input_bindings.actions, java.env(), target.receiver, why,
                                                          [&](std::size_t index, const std::string& text) -> std::uint32_t {
@@ -462,8 +478,8 @@ void GuestSession::run() {
                         if (handle == 0) handle = java.new_string(text);
                         else if (!java.set_string_text(handle, text)) return 0;
                         return handle;
-                    });
-                    if (!words) { note("input: " + why); continue; }
+                    }, part);
+                    if (!words) { note("input: " + why); break; }
                     note(std::string("input: first ") + (touch ? "touch" : "location") + " event -> " + binding->class_name + "." + binding->name);
                     const auto r = dispatcher.call(runtime, target.address, *words, stack_base + stack_bytes,
                                                    return_sentinel, config_.surface_call_budget);
@@ -471,6 +487,7 @@ void GuestSession::run() {
                         log_(describe_state(runtime, dispatcher));
                         fail(describe_stop("input " + binding->name, r));
                         return false;
+                    }
                     }
                     }
                 }

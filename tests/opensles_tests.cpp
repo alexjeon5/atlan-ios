@@ -2,6 +2,10 @@
 #include "atlan/audio.hpp"
 #include "atlan/opensles.hpp"
 #include "atlan/threads.hpp"
+#include "atlan/wav.hpp"
+#include <filesystem>
+#include <fstream>
+#include <unistd.h>
 #include <array>
 #include <cstring>
 #include <iostream>
@@ -342,8 +346,61 @@ void semaphores() {
     check(call(0xf000000c, {data}).stop == atlan::Stop::service_error, "double destroy stops");
 }
 }
+// A WAVE file as an app ships its sounds: chunks before and between fmt and data, padding, extensible headers.
+std::vector<std::byte> wav(std::uint16_t tag, std::uint16_t bits, std::uint16_t channels, std::size_t data_bytes,
+                           std::size_t declared_extra = 0, bool extensible = false) {
+    std::vector<std::byte> out;
+    const auto bytes = [&](const char* text) { for (unsigned i = 0; i < 4; ++i) out.push_back(std::byte(text[i])); };
+    const auto u16 = [&](std::uint32_t v) { out.push_back(std::byte(v & 255)); out.push_back(std::byte((v >> 8) & 255)); };
+    const auto u32 = [&](std::uint32_t v) { u16(v & 0xffff); u16(v >> 16); };
+    bytes("RIFF"); u32(0); bytes("WAVE");
+    bytes("LIST"); u32(3); out.push_back(std::byte{1}); out.push_back(std::byte{2}); out.push_back(std::byte{3});
+    out.push_back(std::byte{0});  // pad byte of the odd-sized chunk
+    bytes("fmt "); u32(extensible ? 40 : 16);
+    u16(extensible ? 0xfffe : tag); u16(channels); u32(22050); u32(22050U * channels * bits / 8); u16(channels * bits / 8); u16(bits);
+    if (extensible) { u16(22); u16(bits); u32(3); u16(tag); for (int i = 0; i < 14; ++i) out.push_back(std::byte{0}); }
+    bytes("data"); u32(static_cast<std::uint32_t>(data_bytes + declared_extra));
+    for (std::size_t i = 0; i < data_bytes; ++i) out.push_back(std::byte(i & 255));
+    return out;
+}
+void wav_files() {
+    std::string error;
+    auto bytes = wav(1, 16, 2, 400);
+    auto pcm = atlan::parse_wav(bytes, error);
+    check(pcm && pcm->format == atlan::PcmFormat{22050, 2} && pcm->samples.size() == 400 &&
+          pcm->samples.data() == bytes.data() + (bytes.size() - 400), "16-bit PCM after a padded chunk");
+    bytes = wav(1, 16, 1, 400, 0, true);
+    pcm = atlan::parse_wav(bytes, error);
+    check(pcm && pcm->format == atlan::PcmFormat{22050, 1} && pcm->samples.size() == 400, "WAVE_FORMAT_EXTENSIBLE PCM");
+    bytes = wav(1, 16, 2, 402, 1000);
+    pcm = atlan::parse_wav(bytes, error);
+    check(pcm && pcm->samples.size() == 400, "a truncated data chunk is cut to whole frames");
+    check(!atlan::parse_wav(wav(1, 8, 1, 10), error) && error.find("8-bit") != std::string::npos, "8-bit samples are refused");
+    check(!atlan::parse_wav(wav(3, 32, 1, 10), error), "float samples are refused");
+    bytes = wav(1, 16, 1, 10);
+    bytes[8] = std::byte{'X'};
+    check(!atlan::parse_wav(bytes, error), "other RIFF files are refused");
+    check(!atlan::parse_wav(std::span<const std::byte>(bytes.data(), 6), error), "short files are refused");
+
+    const auto path = std::filesystem::temp_directory_path() / ("atlan-wav-" + std::to_string(::getpid()) + ".wav");
+    bytes = wav(1, 16, 2, 800);
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    atlan::RecordingAudioSink sink;
+    auto stream = atlan::play_wav_file(sink, path, error);
+    check(stream && sink.stream_count() == 1, "a WAVE file opens one stream");
+    auto record = sink.record(0);
+    check(record.format == atlan::PcmFormat{22050, 2} && record.data.size() == 800 && record.playing &&
+          record.data[1] == std::byte{1}, "the stream plays the file's samples from the start");
+    stream.reset();
+    check(!sink.record(0).open, "dropping the stream stops the sound");
+    sink.fail_next_open("busy");
+    check(!atlan::play_wav_file(sink, path, error) && error == "busy", "a refused stream is reported");
+    std::filesystem::remove(path);
+    check(!atlan::play_wav_file(sink, path, error) && error.find("cannot open") == 0, "a missing file is reported");
+}
 int main() {
     try {
+        wav_files();
         engine_and_mix();
         android_configuration();
         player_playback();

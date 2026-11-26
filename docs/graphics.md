@@ -33,6 +33,8 @@ Android에서는 이 세 층을 쓰지 않는다. `platform/gles/gles_backend.*`
 
 - MSL은 실행 시 `newLibraryWithSource`로 컴파일한다. iOS에서 허용되는 경로다(컴파일은 시스템 컴파일러 서비스가 하고 앱 프로세스에 쓰기+실행 메모리를 만들지 않으므로 JIT 금지와 무관하다). 프로그램당 한 번 컴파일하고 프로그램·블렌드 조합별 파이프라인을 캐시한다.
 - 프레임 하나는 command buffer 하나다. `glClear`는 새 render pass의 load action이 되고, 프레임 끝(`present`)에서 commit한다.
+- draw마다 새 `MTLBuffer`를 만들지 않는다. 인덱스와 4 KiB가 넘는 정점·uniform 데이터는 프레임 슬롯 세 개가 돌려 쓰는 공유 버퍼에 복사하고, 슬롯은 그것을 마지막으로 쓴 command buffer가 끝난 뒤에 다시 쓴다. 정점이 65,535개 이하면 16비트 인덱스를 쓴다(스트립 재시작 값 0xFFFF가 나올 수 없다). 인코더에 이미 설정된 파이프라인·깊이 상태·컬링·감김·viewport·텍스처·샘플러는 다시 보내지 않는다.
+- `GlContext`는 draw 패킷 하나를 재사용해 draw마다 벡터를 새로 할당하지 않는다.
 - GL 좌표 규약은 Metal과 일치한다. 감김(`glFrontFace`)은 그대로 쓰고, viewport의 y만 하단 원점에서 상단 원점으로 바꾼다. macOS CI의 렌더 테스트가 이를 픽셀로 검증한다.
 - iOS 셸은 게스트가 `setSurfaces(w, h)`로 알려 준 크기로 레이어의 `drawableSize`를 맞추고, 화면에는 항상 뷰 전체로 늘려 보여 준다.
 

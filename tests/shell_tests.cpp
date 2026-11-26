@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "adapters/atlan/charset_conversion.hpp"
 #include "adapters/atlan/quad_geometry.hpp"
+#include "atlan/audio.hpp"
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/guest_ini.hpp"
@@ -187,6 +189,8 @@ struct TestAdapter final : atlan::shell::AppAdapter {
         ++installs;
         asked_for_requests = frame_requests;
         check(host.function("draw") != 0 && host.function("missing") == 0, "host finds exported functions");
+        std::string error;
+        check(host.audio().open({44100, 2}, error) != nullptr, "the host offers the session's audio device");
     }
     void uninstall_java() override { ++uninstalls; }
     atlan::shell::AppStartup startup() const override {
@@ -228,7 +232,8 @@ void adapter_sessions() {
     check(adapter->deliveries >= 3, "deliveries run before every frame");
 }
 }
-// The app's home button reaches the host as message 5 of MainActivity.SendMsgFromAtlan; other messages do not.
+// The app's home button reaches the host as message 5 of MainActivity.SendMsgFromAtlan, the end of its splash as
+// message 13; other messages reach neither.
 void home_button() {
     constexpr std::uint32_t data = 0x4000, stack = 0x80000, sentinel = 0xffff0000;
     atlan::Runtime runtime;
@@ -238,9 +243,11 @@ void home_button() {
     dispatcher.attach(atlan::elf::Image{});
     atlan::JavaBootstrap java(runtime, dispatcher, {});
     unsigned homes = 0;
+    std::vector<std::uint32_t> splash_ends;
     atlan::shell::JavaServices::Config config;
     config.use_connection_manager = false;
     config.on_home = [&homes] { ++homes; };
+    config.on_splash_end = [&splash_ends](std::uint32_t param) { splash_ends.push_back(param); };
     atlan::shell::JavaServices services(config);
     services.install(java, [](const std::string&, const std::string&, const std::string&) { return 0u; });
     const auto text = [&](std::uint32_t at, const std::string& value) {
@@ -272,6 +279,63 @@ void home_button() {
     check(homes == 1, "message 5 presses home");
     (void)invoke(61, {activity, method, 5, 1, 0, 0});
     check(homes == 2, "every press is delivered");
+    check(splash_ends.empty(), "other messages do not end the splash");
+    (void)invoke(61, {activity, method, 13, 0, 0, 0});
+    (void)invoke(61, {activity, method, 13, 1, 0, 0});
+    check(splash_ends == std::vector<std::uint32_t>{0, 1} && homes == 2, "message 13 ends the splash with its param");
+}
+// The app's text conversion as the host does it (the comparison with the guest's own code runs at install).
+void text_conversion() {
+    using namespace atlan::shell::charset;
+    const auto bytes = [](std::vector<std::uint8_t> v) {
+        return [v](std::uint32_t at) -> std::optional<std::uint8_t> { return at < v.size() ? std::optional<std::uint8_t>(v[at]) : std::nullopt; };
+    };
+    const auto units = [](std::vector<std::uint16_t> v) {
+        return [v](std::uint32_t at) -> std::optional<std::uint16_t> { return at / 2 < v.size() ? std::optional<std::uint16_t>(v[at / 2]) : std::nullopt; };
+    };
+    std::vector<std::uint16_t> wide;
+    const auto put_wide = [&](std::uint16_t u) { wide.push_back(u); return true; };
+    std::vector<std::uint8_t> narrow;
+    const auto put_narrow = [&](std::uint8_t b) { narrow.push_back(b); return true; };
+
+    check(decode(0xB0, 0xA1) == u'\uAC00' && decode(0x81, 0x41) == u'\uAC02' && decode('A', 0) == u'A', "CP949 codes");
+    check(decode(0xC9, 0xA1) == u'\uE000' && decode(0xFE, 0xFE) == u'\uE0BB', "user-defined rows map onto the Private Use Area");
+    check(!decode(0x80, 0x41) && !decode(0xFF, 0xA1) && !decode(0xA2, 0xE8) && !decode(0xB0, 0x40), "unmapped codes");
+    check(encode(u'\uAC00') == 0xB0A1 && encode(u'\uE05E') == 0xFEA1 && encode(u'z') == 'z', "encoding");
+    check(!encode(u'\u0080') && !encode(char16_t{0xD800}) && !encode(u'\u327E') && !encode(u'\uFFFE'), "unmappable code points");
+
+    auto left = to_wide(bytes({'a', 0xC7, 0xD1, 0}), 4, put_wide, 100);
+    check(left == 94u && wide == std::vector<std::uint16_t>{'a', 0xD55C, 0}, "conversion with the terminator");
+    wide.clear();
+    left = to_wide(bytes({'a', 0x80, 'b'}), 3, put_wide, 100);
+    check(left == 98u && wide == std::vector<std::uint16_t>{'a'}, "conversion stops at a byte it cannot convert");
+    wide.clear();
+    left = to_wide(bytes({'a', 0xC7}), 2, put_wide, 100);
+    check(left == 98u && wide.size() == 1, "an incomplete character at the end is left");
+    wide.clear();
+    left = to_wide(bytes({'a', 'b', 'c'}), 3, put_wide, 5);
+    check(left == 1u && wide.size() == 2, "conversion stops when the next unit does not fit");
+    left = to_multibyte(units({'a', 0xD55C, 'b'}), 6, put_narrow, 3);
+    check(left == 0u && narrow == std::vector<std::uint8_t>{'a', 0xC7, 0xD1}, "a character of two bytes");
+    narrow.clear();
+    left = to_multibyte(units({'a', 0xD55C}), 4, put_narrow, 2);
+    check(left == 1u && narrow == std::vector<std::uint8_t>{'a'}, "two bytes that do not fit are not split");
+    narrow.clear();
+    left = to_multibyte(units({'a', 0xD800, 'b'}), 6, put_narrow, 10);
+    check(left == 9u && narrow.size() == 1, "a surrogate stops conversion");
+    narrow.clear();
+    left = to_multibyte(units({'a', 'b'}), 3, put_narrow, 10);
+    check(left == 9u && narrow.size() == 1, "an odd last byte is left");
+
+    auto t = table_to_wide(bytes({'a', 0x80, 0xC7, 0xD1, 0xC9, 0xA1, 0}), 6, 100);
+    check(t && t->units == std::vector<char16_t>{u'a', u'\u0080', u'\uD55C', u'?'} && t->terminator, "table conversion with '?' for unmapped codes");
+    t = table_to_wide(bytes({'a', 'b', 'c', 0}), 3, 2);
+    check(t && t->units.size() == 2 && !t->terminator, "no terminator without room");
+    t = table_to_wide(bytes({'a', 0xC7, 0xD1, 'b', 'c', 0}), 2, 100);
+    check(t && t->units.size() == 4 && t->bytes_read == 6, "an odd count runs on to the NUL");
+    t = table_to_wide(bytes({'a', 0xFE, 0xA1, 0}), 3, 100);
+    check(t && t->outside_table, "codes beyond the table are left to the guest");
+    check(!table_to_wide(bytes({'a', 0xB0}), 3, 100), "unreadable input");
 }
 // The app's geometry as the host computes it (the comparison with the guest's own code runs at install).
 void quad_geometry() {
@@ -301,6 +365,7 @@ void quad_geometry() {
 int main() {
     try {
         quad_geometry();
+        text_conversion();
         home_button();
         scratch = fs::temp_directory_path() / ("atlan-shell-" + std::to_string(::getpid()));
         fs::create_directories(scratch);

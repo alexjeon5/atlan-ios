@@ -15,7 +15,9 @@ namespace atlan::shell {
 //    navigation start (17): with USECONNECTIONMANAGER set, the Java side answers it with nativeReceiveMsgData(
 //    REC_ONLINE_STATE, connected) and repeats that message whenever connectivity changes. The guest stays offline
 //    until it gets one. Message 5 is the app's own home button: on the car units the app was made for, the unit's
-//    launcher takes it and shows its home screen; the host's on_home stands in for that launcher.
+//    launcher takes it and shows its home screen; the host's on_home stands in for that launcher. Message 13 ends
+//    the start-up splash: param 0 hides the splash screen and leaves its sound playing, any other value stops the
+//    sound (on_splash_end receives the param).
 //  - AtlanNetService.MgrPlusDataUrlConnection / MgrPlusPostDataUrlConnection: an HTTP GET or POST on a background
 //    thread, answered through the static native AtlanNetService.setResult(byte[] body, int status, int id) with
 //    status 1 (success), 0 (failure) or 4 (malformed URL), as the Java code does.
@@ -28,6 +30,7 @@ public:
         std::function<bool()> network_available;  // nullptr: always available; polled once per take_due()
         bool use_connection_manager{true};        // system.ini USECONNECTIONMANAGER
         std::function<void()> on_home;            // the guest's home button (message 5); guest thread. nullptr: logged only
+        std::function<void(std::uint32_t)> on_splash_end;  // message 13 with its param; guest thread. nullptr: logged only
         std::function<void(const std::string&)> log;
     };
     // A guest native method to call: its address and the JNI argument words (env first).

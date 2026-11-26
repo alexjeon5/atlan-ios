@@ -24,7 +24,7 @@ actions DOWN MOVE UP CANCEL
 - `ARG`는 시그니처의 매개변수마다 하나다. 값 이름이거나(뒤에 `*배율` 가능), 숫자 상수다.
 - 터치 값: `action`(단계별 코드, 기본 0/2/1/3 = down/move/up/cancel), `pointer`(손가락 번호), `x`·`y`(게스트 표면 픽셀, 좌상단 원점), `time`(단조 시간 ms).
 - 위치 값: `latitude`·`longitude`(도), `altitude`(m), `speed`(m/s, 모르면 음수), `course`(도, 모르면 음수), `accuracy`(m), `time`(Unix epoch ms).
-- 위치 문장 값: `gga`, `rmc`. `Ljava/lang/String;` 매개변수에만 쓸 수 있고, 위치 값으로 만든 NMEA 0183 문장(체크섬, CR LF 포함) 하나를 String 객체로 넘긴다. String 객체는 인자마다 하나를 만들어 내용만 바꿔 재사용한다.
+- 위치 문장 값: `gga`, `gsa`, `gsv`, `rmc`. `Ljava/lang/String;` 매개변수에만 쓸 수 있고, 위치 값으로 만든 NMEA 0183 문장(체크섬, CR LF 포함) 하나를 String 객체로 넘긴다. `gsv`는 문장이 여러 개(지금은 2개)라서 그 규칙은 위치 값마다 문장 수만큼 호출된다. String 객체는 인자마다 하나를 만들어 내용만 바꿔 재사용한다.
 - `touch`는 네 단계 모두에, `touch.up` 같은 형태는 한 단계에만 적용된다. `location` 규칙은 여러 개를 쓸 수 있고 위치 값마다 순서대로 모두 호출된다.
 - 숫자 값은 시그니처의 타입으로 변환한다. `Z B C S I`는 반올림한 32비트 정수(범위 밖은 포화), `J`는 64비트 정수, `F`·`D`는 부동소수다. 그 밖의 매개변수 타입은 거부한다.
 - 인자 수가 시그니처와 다르거나 알 수 없는 이름이 있으면 `line N: 이유`로 파일 전체를 거부한다.
@@ -35,6 +35,8 @@ actions DOWN MOVE UP CANCEL
 touch example/Input onTouch (IIJFF)I action pointer time x y
 location example/Input onFix (DDFJ)V latitude longitude speed*3.6 time
 location example/Input onSentence (Ljava/lang/String;)V gga
+location example/Input onSentence (Ljava/lang/String;)V gsa
+location example/Input onSentence (Ljava/lang/String;)V gsv
 location example/Input onSentence (Ljava/lang/String;)V rmc
 ```
 
@@ -42,7 +44,9 @@ location example/Input onSentence (Ljava/lang/String;)V rmc
 
 ## NMEA 문장
 
-CoreLocation은 위성 정보를 주지 않는다. 그래서 `gga`는 fix quality 1, 위성 수 8(명목값), HDOP = 정확도 ÷ 5m(0.5~50)로 채운다. `rmc`의 속도는 노트 단위이고 모르면 0, 방위는 모르면 빈 칸이다. 시각은 fix 시각의 UTC다. 앱이 다른 문장(GSA, GSV)이나 다른 값을 요구하는지는 실제 라이브러리로 확인해야 한다.
+CoreLocation은 위성 정보를 주지 않는다. 그래서 모든 문장이 같은 명목 위성 8개(GPS, 모두 사용 중)를 말한다. `gga`는 fix quality 1, 위성 수 8, HDOP = 정확도 ÷ 5m(0.5~50), `gsa`는 3D fix와 그 위성 번호, PDOP·HDOP·VDOP와 NMEA 4.1 시스템 ID(1), `gsv`는 위성 위치와 신호 세기(4개씩 2문장)다. `rmc`의 속도는 노트 단위이고 모르면 0, 방위는 모르면 빈 칸이다. 시각은 fix 시각의 UTC다.
+
+안드로이드 수신기는 한 주기에 GGA, GSA, GSV…, RMC 순으로 문장을 보내고, 받는 쪽은 RMC에서 그 주기를 마무리하는 경우가 많다. 그래서 규칙도 이 순서로 적는다. 위성 수를 GGA가 아니라 GSV에서 읽는 앱이 있으므로 GGA·RMC만 보내면 위치와 속도는 보여도 위성 0개인 신호로 취급될 수 있다.
 
 ## iOS 앱
 
@@ -52,8 +56,10 @@ CoreLocation은 위성 정보를 주지 않는다. 그래서 `gga`는 fix qualit
 
 ## 헤드리스 확인
 
-`ATLAN_INPUT_CFG=파일 atlan-session LIBRARY DATA_ROOT`는 바인딩을 읽고 첫 프레임 전에 위치 값 하나와 탭(down, up) 하나를 넣는다. 탭 위치는 `ATLAN_TAP=X,Y`(게스트 화면 픽셀, 기본 400,240)다. 로그의 `input: first … event -> …` 줄과 그 뒤 게스트 동작으로 바인딩을 확인한다.
+`ATLAN_INPUT_CFG=파일 atlan-session LIBRARY DATA_ROOT`는 바인딩을 읽고 첫 프레임 전에 위치 값 하나와 탭(down, up) 하나를 넣는다. 탭 위치는 `ATLAN_TAP=X,Y`(게스트 화면 픽셀, 기본 400,240)이고 `ATLAN_TAP=none`이면 탭을 넣지 않는다. 로그의 `input: first … event -> …` 줄과 그 뒤 게스트 동작으로 바인딩을 확인한다.
+
+주행은 `ATLAN_INTERACTIVE_SECONDS`와 함께 `ATLAN_DRIVE=위도,경도,방위,시속[,시작ms]`로 흉내 낸다. 시작ms(기본 0)부터 1초마다 그 방위로 직진한 위치 값을 벽시계 시각으로 넣는다.
 
 ## 검증 상태
 
-`tests/input_tests.cpp`가 큐 합치기, 바인딩 파싱·거부, NMEA 문장, 인자 워드 배치, 합성 게스트 함수로의 전달을 확인한다. 실제 라이브러리에서 인자 순서와 단위가 맞는지, 실기기에서 CoreLocation과 터치가 동작하는지는 이 테스트로 확인되지 않는다.
+`tests/input_tests.cpp`가 큐 합치기, 바인딩 파싱·거부, NMEA 문장(GGA, GSA, GSV, RMC), 문장 여러 개인 규칙의 호출 횟수, 인자 워드 배치, 합성 게스트 함수로의 전달을 확인한다. 실제 라이브러리에서 인자 순서와 단위가 맞는지, 실기기에서 CoreLocation과 터치가 동작하는지는 이 테스트로 확인되지 않는다.

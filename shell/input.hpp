@@ -55,15 +55,15 @@ struct SurfacePoint { float x{}, y{}; };
 
 // Where one argument of a bound native method comes from. The value is multiplied by `scale` and then converted to
 // the JNI type at that position of the signature (Z B C S I: rounded 32-bit integer, J: rounded 64-bit integer,
-// F: float, D: double). The text sources (gga, rmc) fill a java/lang/String parameter with one NMEA 0183 sentence
-// built from the fix (see nmea_gga).
+// F: float, D: double). The text sources (gga, gsa, gsv, rmc) fill a java/lang/String parameter with one NMEA 0183
+// sentence built from the fix (see nmea_gga). gsv is several sentences: its binding is called once per sentence.
 enum class InputSource : std::uint8_t {
     constant,       // `scale` itself
     action,         // touch: InputBindings::actions[phase]
     pointer, x, y,  // touch
     time,           // touch: monotonic ms; location: Unix epoch ms
     latitude, longitude, altitude, speed, course, accuracy,  // location
-    gga, rmc        // location, text
+    gga, gsa, gsv, rmc  // location, text
 };
 struct InputArgument {
     InputSource source{InputSource::constant};
@@ -86,7 +86,7 @@ struct InputBindings {
 //   touch[.down|.move|.up|.cancel] CLASS METHOD SIGNATURE ARG...
 //   location CLASS METHOD SIGNATURE ARG...
 //   actions DOWN MOVE UP CANCEL
-// ARG is a source name (action pointer x y time latitude longitude altitude speed course accuracy gga rmc),
+// ARG is a source name (action pointer x y time latitude longitude altitude speed course accuracy gga gsa gsv rmc),
 // optionally followed by *FACTOR (speed*3.6), or a number (a constant). `touch` without a phase binds all four
 // phases; several `location` rules are all called. The argument count must equal the signature's parameter count.
 // Parameters must be primitives, or Ljava/lang/String; for a text source.
@@ -96,18 +96,26 @@ struct InputBindings {
 [[nodiscard]] std::optional<InputBindings> load_input_bindings(const std::string& path, std::string& error);
 
 // NMEA 0183 sentences for a fix, with checksum and trailing CR LF, as a GPS receiver reports them through Android's
-// NMEA listener (one sentence per message). CoreLocation gives no satellite data, so GGA reports fix quality 1 with
-// a nominal 8 satellites and an HDOP estimated as accuracy / 5 m (0.5 to 50). Unknown speed is 0, unknown course is
-// an empty field. Time is the fix time in UTC.
+// NMEA listener (one sentence per message). CoreLocation gives no satellite data, so all of them describe the same
+// nominal sky of 8 GPS satellites in use: GGA fix quality 1 with 8 satellites, GSA a 3D fix with their numbers, GSV
+// their positions and signal strengths (two sentences). HDOP is estimated as accuracy / 5 m (0.5 to 50). Unknown
+// speed is 0, unknown course is an empty field. Time is the fix time in UTC.
 [[nodiscard]] std::string nmea_gga(const LocationFix& fix);
+[[nodiscard]] std::string nmea_gsa(const LocationFix& fix);
+[[nodiscard]] std::vector<std::string> nmea_gsv(const LocationFix& fix);
 [[nodiscard]] std::string nmea_rmc(const LocationFix& fix);
+
+// How many calls `binding` takes for `event`: the number of sentences of its text argument (gsv), otherwise 1.
+[[nodiscard]] std::size_t native_call_count(const NativeBinding& binding, const InputEvent& event);
 
 // Returns the String object handle holding `text` for parameter `index` of the call (0 on failure).
 using StringArgument = std::function<std::uint32_t(std::size_t index, const std::string& text)>;
 // AAPCS32 (softfp) argument words of the JNI call `binding` for `event`: env, receiver, then the parameters, with
 // 64-bit values (J, D) in an even-aligned word pair, low word first. The words go to Runtime::load_arguments as they
-// are. On failure returns nullopt and sets `error`.
+// are. `part` (below native_call_count) picks the sentence of a text argument. On failure returns nullopt and sets
+// `error`.
 [[nodiscard]] std::optional<std::vector<std::uint32_t>> native_call_words(
     const NativeBinding& binding, const InputEvent& event, const std::array<std::int32_t, 4>& actions,
-    std::uint32_t env, std::uint32_t receiver, std::string& error, const StringArgument& strings = {});
+    std::uint32_t env, std::uint32_t receiver, std::string& error, const StringArgument& strings = {},
+    std::size_t part = 0);
 }

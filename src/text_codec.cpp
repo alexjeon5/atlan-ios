@@ -164,6 +164,15 @@ std::optional<std::string> utf16_to_cp949(std::u16string_view in, Policy policy)
     return out;
 }
 
+char16_t cp949_decode(unsigned char lead, unsigned char trail) noexcept {
+    if (lead < lead_first || lead > lead_last || trail < trail_first || trail > trail_last) return 0;
+    return forward_table[lead - lead_first][trail - trail_first];
+}
+std::uint16_t cp949_encode(char16_t code_point) {
+    const auto code = reverse().find(code_point);
+    return code ? *code : 0;
+}
+
 std::optional<std::string> cp949_to_utf8(std::string_view in, Policy policy) {
     const auto wide = cp949_to_utf16(in, policy);
     return wide ? utf16_to_utf8(*wide, policy) : std::nullopt;
