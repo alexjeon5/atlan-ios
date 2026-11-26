@@ -234,6 +234,19 @@ void directories_and_descriptors() {
     check(f.call("mkdir", {data + 0x30, 0777}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 2, "mkdir of an empty path is ENOENT");
     put_text(f.runtime.memory, data + 0x40, "/a/b/c");
     check(f.call("mkdir", {data + 0x40, 0777}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 2, "mkdir without a parent is ENOENT");
+    // A trailing slash still names the directory (the app builds folder paths ending in '/').
+    put_text(f.runtime.memory, data + 0x40, "/slash/");
+    check(f.call("mkdir", {data + 0x40, 0777}).stop == atlan::Stop::returned && f.r0() == 0 && std::filesystem::is_directory(f.root / "slash"), "mkdir with a trailing slash creates the directory");
+    put_text(f.runtime.memory, data + 0x40, "/slash/sub");
+    check(f.call("mkdir", {data + 0x40, 0777}).stop == atlan::Stop::returned && f.r0() == 0 && std::filesystem::is_directory(f.root / "slash" / "sub"), "mkdir beneath it");
+    put_text(f.runtime.memory, data + 0x40, "/slash/sub/");
+    check(f.call("mkdir", {data + 0x40, 0777}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 17, "mkdir of an existing directory with a trailing slash is EEXIST");
+    check(f.call("opendir", {data + 0x40}).stop == atlan::Stop::returned && f.r0() != 0, "opendir with a trailing slash");
+    check(f.call("closedir", {f.r0()}).stop == atlan::Stop::returned && f.r0() == 0, "closedir after a trailing slash");
+    put_text(f.runtime.memory, data + 0x40, "/slash/sub/.");
+    check(f.call("remove", {data + 0x40}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && get32(f.runtime.memory, data + 0xf00) == 22 && std::filesystem::is_directory(f.root / "slash" / "sub"), "remove of dir/. is EINVAL and keeps the directory");
+    put_text(f.runtime.memory, data + 0x40, "/slash/file/");
+    check(f.call("open", {data + 0x40, 0102, 0644}).stop == atlan::Stop::returned && f.r0() == 0xffffffff && !std::filesystem::exists(f.root / "slash" / "file"), "open of a file path with a trailing slash fails");
     // POSIX descriptors: create, write, seek, read back, truncate, close, remove, rename.
     put_text(f.runtime.memory, data + 0x60, "/dir/fd.bin");
     check(f.call("open", {data + 0x60, 0102, 0644}).stop == atlan::Stop::returned && f.r0() >= 3, "open O_RDWR|O_CREAT");

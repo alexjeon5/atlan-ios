@@ -111,7 +111,8 @@ struct InputBindings {
 // NMEA 0183 sentences for a fix, with checksum and trailing CR LF, as a GPS receiver reports them through Android's
 // NMEA listener (one sentence per message). CoreLocation gives no satellite data, so the sky is derived from the
 // fix's horizontal accuracy (see sky_for): the smaller the error, the more satellites in use and the stronger their
-// signals. All four sentences describe the same sky. HDOP is accuracy / 5 m (0.5 to 50). A fix with an accuracy
+// signals. All four sentences describe the same sky. HDOP is 0.5 + accuracy x 0.045 (0.6 to 9.9: 0.95 at 10 m,
+// 2 at 33 m, 5 at 100 m). A fix with an accuracy
 // above 100 m reports no position fix (GGA quality 0, GSA fix type 1, RMC status V) with a few weak satellites in
 // view; a negative accuracy (signal lost) reports no satellites at all. Without a fix the last position stays in the
 // fields. Unknown speed is 0, unknown course is an empty field. Time is the fix time in UTC.

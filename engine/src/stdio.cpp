@@ -118,7 +118,7 @@ std::filesystem::path GuestStdio::host_path(const std::string& guest_path) const
     std::filesystem::path relative;
     for (const auto& part : std::filesystem::path(alias(guest_path)).relative_path()) {
         if (part == "..") return {};
-        if (part != ".") relative /= part;
+        if (part != "." && !part.empty()) relative /= part;
     }
     return relative.empty() ? std::filesystem::path{} : locate(relative);
 }
@@ -168,7 +168,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
             bool escapes = false;
             for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
                 if (part == "..") escapes = true;
-                else if (part != ".") relative /= part;
+                else if (part != "." && !part.empty()) relative /= part;
             }
             std::error_code ec;
             const auto host = locate(relative);
@@ -199,7 +199,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         std::filesystem::path relative;
         for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") return false;
-            if (part != ".") relative /= part;
+            if (part != "." && !part.empty()) relative /= part;
         }
         host = locate(relative);
         return !relative.empty();
@@ -213,6 +213,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         std::error_code ec;
         std::uint32_t code = 0;
         if (!resolve(path, host)) code = guest_eacces;
+        else if (std::filesystem::path(path).filename() == ".") code = guest_einval;  // rmdir("dir/.") never removes dir
         else if (!std::filesystem::exists(host, ec)) code = guest_enoent;
         else if (!std::filesystem::remove(host, ec)) code = guest_eacces;
         changed();
@@ -271,7 +272,8 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         std::size_t slot = 0;
         while (slot < fds_.size() && fds_[slot].host >= 0) ++slot;
         if (slot >= max_open) return fail(call, guest_emfile, "open");
-        const int fd = ::open(host.c_str(), host_flags, 0644);
+        // A trailing slash names a directory: keep it so the host answers ENOTDIR/EISDIR as Linux does.
+        const int fd = ::open((host.string() + (path.back() == '/' ? "/" : "")).c_str(), host_flags, 0644);
         if (host_flags & O_CREAT) changed();
         if (trace_) trace_(path, "open flags=" + std::to_string(flags), fd >= 0);
         if (fd < 0) return fail(call, errno == ENOENT ? guest_enoent : errno == EEXIST ? 17 : errno == EISDIR ? 21 : guest_eacces, "open");
@@ -369,7 +371,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         bool escapes = false;
         for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") escapes = true;
-            else if (part != ".") relative /= part;
+            else if (part != "." && !part.empty()) relative /= part;
         }
         std::uint32_t code = 0;
         std::error_code ec;
@@ -395,7 +397,7 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         bool escapes = false;
         for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") escapes = true;
-            else if (part != ".") relative /= part;
+            else if (part != "." && !part.empty()) relative /= part;
         }
         std::error_code ec;
         const auto host = locate(relative);
@@ -477,14 +479,14 @@ void GuestStdio::install(ImportDispatcher& dispatcher) {
         std::filesystem::path relative;
         for (const auto& part : std::filesystem::path(alias(path)).relative_path()) {
             if (part == "..") { if (trace_) trace_(path, mode, false); call.set_result(0); return set_errno(call, guest_eacces) ? std::nullopt : std::optional<std::string>("fopen could not write errno"); }
-            if (part != ".") relative /= part;
+            if (part != "." && !part.empty()) relative /= part;
         }
         std::FILE* file = nullptr;
         std::uint32_t code = guest_enoent;
         if (files_.size() >= max_open && open_files() >= max_open) code = guest_emfile;
         else if (!relative.empty() && !std::filesystem::is_directory(locate(relative))) {
             if (mode == "r" || mode == "rb") file = open_filtered(relative);
-            if (!file) file = std::fopen((locate(relative)).string().c_str(), mode.c_str());
+            if (!file) file = std::fopen((locate(relative).string() + (path.back() == '/' ? "/" : "")).c_str(), mode.c_str());
             if (mode[0] != 'r') changed();  // "w" and "a" create the file
             if (!file) code = errno == ENOENT ? guest_enoent : errno == EACCES ? guest_eacces : guest_einval;
         }
