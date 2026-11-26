@@ -29,15 +29,29 @@ dispatch_queue_t control_queue() {
     return queue;
 }
 
-// True when the PCM holds a sample above a faint noise floor (about -54 dBFS), i.e. something a person hears.
+// A sample above a faint noise floor (about -54 dBFS), i.e. something a person hears.
+bool audible_sample(std::span<const std::byte> pcm, std::size_t i) {
+    const auto lo = static_cast<std::uint8_t>(pcm[i * 2]), hi = static_cast<std::uint8_t>(pcm[i * 2 + 1]);
+    const auto sample = static_cast<std::int16_t>(static_cast<std::uint16_t>(lo | (hi << 8)));
+    return sample > 64 || sample < -64;
+}
 bool audible(std::span<const std::byte> pcm) {
-    const std::size_t samples = pcm.size() / 2;
-    for (std::size_t i = 0; i < samples; ++i) {
-        const auto lo = static_cast<std::uint8_t>(pcm[i * 2]), hi = static_cast<std::uint8_t>(pcm[i * 2 + 1]);
-        const auto sample = static_cast<std::int16_t>(static_cast<std::uint16_t>(lo | (hi << 8)));
-        if (sample > 64 || sample < -64) return true;
-    }
+    for (std::size_t i = 0, samples = pcm.size() / 2; i < samples; ++i)
+        if (audible_sample(pcm, i)) return true;
     return false;
+}
+
+// Spoken prompts are told from short effects (button clicks and the like) by length: a prompt is queued as one
+// buffer holding the whole phrase, and only a sound audible for at least this long lowers other apps' audio.
+// The effects seen so far last at most about 0.6 s; voice prompts run well over a second.
+constexpr double prompt_min_seconds = 0.7;
+bool is_prompt(std::span<const std::byte> pcm, const PcmFormat& format) {
+    const std::size_t samples = pcm.size() / 2;
+    std::size_t first = 0, last = samples;
+    while (first < samples && !audible_sample(pcm, first)) ++first;
+    if (first == samples) return false;
+    while (last > first && !audible_sample(pcm, last - 1)) --last;
+    return static_cast<double>(last - first) / format.channels / format.sample_rate >= prompt_min_seconds;
 }
 
 void note_audible();
@@ -51,6 +65,7 @@ struct Core {
     std::mutex mutex;
     std::deque<std::byte> ring;
     std::atomic<std::uint64_t> played{0};
+    std::atomic<std::uint64_t> prompt_end{0};  // the played_bytes() at which the last queued prompt ends
     bool primed{false};      // control queue only
     bool running{false};     // control queue only: started and not paused
     bool registered{false};  // control queue only: listed in the session's streams
@@ -60,22 +75,24 @@ struct Core {
     }
     void fill_and_enqueue(AudioQueueBufferRef buffer) {
         std::size_t copied = 0;
+        bool prompt = false;
         {
             std::lock_guard lock(mutex);
             copied = std::min<std::size_t>(ring.size(), buffer_bytes);
             std::copy_n(ring.begin(), copied, static_cast<std::byte*>(buffer->mAudioData));
             ring.erase(ring.begin(), ring.begin() + static_cast<std::ptrdiff_t>(copied));
-            played.fetch_add(copied, std::memory_order_release);
+            prompt = played.fetch_add(copied, std::memory_order_release) < prompt_end.load(std::memory_order_relaxed);
         }
-        if (audible(std::span(static_cast<const std::byte*>(buffer->mAudioData), copied))) note_audible();
+        // Keeps other audio lowered while a prompt plays, pauses included.
+        if (prompt && audible(std::span(static_cast<const std::byte*>(buffer->mAudioData), copied))) note_audible();
         std::memset(static_cast<char*>(buffer->mAudioData) + copied, 0, buffer_bytes - copied);
         buffer->mAudioDataByteSize = buffer_bytes;
         AudioQueueEnqueueBuffer(queue, buffer, 0, nullptr);
     }
 };
 
-// The audio session's mixing policy (iOS). The session mixes with other apps' audio, and only while something
-// audible is playing (a voice prompt, a start-up sound) does it lower them, up to `prompt_tail` after the last
+// The audio session's mixing policy (iOS). The session mixes with other apps' audio, and only while a prompt
+// (is_prompt: a voice prompt, the start-up sound) plays does it lower them, up to `prompt_tail` after its last
 // audible sample. Other apps follow a change of ducking only when the session is activated again, so a change
 // pauses the running queues, deactivates, sets the new options, reactivates and restarts them; the queues keep
 // their buffers, so nothing is lost. All of it runs on the control queue except note_audible, which any thread
@@ -229,18 +246,21 @@ public:
         return true;
     }
     bool append(std::span<const std::byte> pcm) override {
+        const bool prompt = is_prompt(pcm, format_);
         {
             std::lock_guard lock(core_->mutex);
             if (core_->ring.size() + pcm.size() > ring_limit) return false;
             core_->ring.insert(core_->ring.end(), pcm.begin(), pcm.end());
+            if (prompt) core_->prompt_end.store(core_->played.load() + core_->ring.size(), std::memory_order_relaxed);
         }
         // Seen here, before the device reaches it, other audio can be lowered in time for the first word.
-        if (audible(pcm)) note_audible();
+        if (prompt) note_audible();
         return true;
     }
     void flush() override {
         std::lock_guard lock(core_->mutex);
         core_->ring.clear();
+        core_->prompt_end.store(core_->played.load(), std::memory_order_relaxed);
     }
     void set_playing(bool playing) override {
         if (playing == playing_) return;

@@ -37,6 +37,9 @@
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
     std::vector<UITouch*> _fingers;            // slot index = pointer id; nil when free
     CLLocationManager* _location;
+    int _locationSource;                       // 0 not started, -1 starting, 1 the device (CoreLocation), 2 the pinned position
+    NSTimer* _pinTimer;                        // repeats the pinned position like a GPS receiver while it is used
+    NSString* _pinnedAt;                       // the pinned position last logged
     atlan::shell::SessionLogFile _logFile;
     NSString* _package;                        // the app package in the ATLAN folder
     NSString* _mapRoot;                        // the ATLAN folder when it is not Documents/ATLAN, else nil
@@ -197,7 +200,37 @@
     (void)event; [self forward:touches phase:atlan::shell::TouchPhase::cancel];
 }
 
+// Where the navigation's position comes from: the device, or the developer setting's fixed position (launcher
+// settings), switched live whenever the setting changes once the navigation has started.
 - (void)startLocation {
+    if (_locationSource == 0) _locationSource = -1;  // wanted, source not chosen yet
+    [self applyLocationSource];
+}
+- (void)applyLocationSource {
+    if (_locationSource == 0) return;
+    LauncherSettings* settings = LauncherSettings.shared;
+    if (settings.pinLocation) {
+        if (_locationSource != 2) {
+            [_location stopUpdatingLocation];
+            __weak ShellViewController* weakSelf = self;
+            _pinTimer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer*) { [weakSelf pushPinnedLocation]; }];
+            _locationSource = 2;
+        }
+        NSString* where = [NSString stringWithFormat:@"%.6f, %.6f, %g", settings.pinnedLatitude, settings.pinnedLongitude,
+                                                     settings.pinnedCourse];
+        if (![where isEqualToString:_pinnedAt]) {
+            _pinnedAt = where;
+            [self note:[@"location pinned " stringByAppendingString:where]];
+        }
+        [self pushPinnedLocation];
+        return;
+    }
+    if (_locationSource == 1) return;
+    if (_locationSource == 2) [self note:@"location from the device"];
+    [_pinTimer invalidate];
+    _pinTimer = nil;
+    _pinnedAt = nil;
+    _locationSource = 1;
     if (!_location) {
         _location = [CLLocationManager new];
         _location.delegate = self;
@@ -210,7 +243,14 @@
     else if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) [self note:@"location denied"];
     else [_location startUpdatingLocation];
 }
+// The pinned position as a stationary fix: speed 0, the set heading, a good accuracy, the current time.
+- (void)pushPinnedLocation {
+    LauncherSettings* settings = LauncherSettings.shared;
+    const auto now = static_cast<std::uint64_t>(NSDate.date.timeIntervalSince1970 * 1000.0);
+    _input.push(atlan::shell::LocationFix{settings.pinnedLatitude, settings.pinnedLongitude, 0, 0, settings.pinnedCourse, 5, now});
+}
 - (void)locationManagerDidChangeAuthorization:(CLLocationManager*)manager {
+    if (_locationSource != 1) return;  // the pinned position is in use
     const CLAuthorizationStatus status = manager.authorizationStatus;
     if (status == kCLAuthorizationStatusAuthorizedWhenInUse || status == kCLAuthorizationStatusAuthorizedAlways)
         [manager startUpdatingLocation];
@@ -219,7 +259,7 @@
 - (void)locationManager:(CLLocationManager*)manager didUpdateLocations:(NSArray<CLLocation*>*)locations {
     (void)manager;
     CLLocation* fix = locations.lastObject;
-    if (!fix || fix.horizontalAccuracy < 0) return;  // an invalid fix carries no position
+    if (_locationSource != 1 || !fix || fix.horizontalAccuracy < 0) return;  // an invalid fix carries no position
     _input.push(atlan::shell::LocationFix{fix.coordinate.latitude, fix.coordinate.longitude, fix.altitude, fix.speed,
                                           fix.course, fix.horizontalAccuracy,
                                           static_cast<std::uint64_t>(fix.timestamp.timeIntervalSince1970 * 1000.0)});
@@ -285,6 +325,7 @@
 - (void)settingsChanged {
     [self layoutSurface];  // the notch inset may have been switched
     atlan::AppleAudioSink::set_duck_others(LauncherSettings.shared.duckOthers);
+    [self applyLocationSource];  // the developer setting's fixed position, switched on or off or moved
 }
 
 // A line of the shell itself, kept in the session log file.

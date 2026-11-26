@@ -22,6 +22,12 @@ extern NSNotificationName const LauncherSettingsDidChange;
 @property(nonatomic) BOOL perfLog;
 @property(nonatomic) BOOL networkLog;
 @property(nonatomic) BOOL profiler;
+// Developer: the navigation gets this fixed position instead of the device's location (for debugging and recordings).
+@property(nonatomic) BOOL pinLocation;
+@property(nonatomic, readonly) double pinnedLatitude;
+@property(nonatomic, readonly) double pinnedLongitude;
+- (void)setPinnedLatitude:(double)latitude longitude:(double)longitude;
+@property(nonatomic) double pinnedCourse;  // degrees clockwise from north
 
 @property(nonatomic, readonly) NSString* documentsPath;
 // A folder the user picked outside the app's Documents, kept with access across launches; nil when none.

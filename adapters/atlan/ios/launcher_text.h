@@ -102,6 +102,14 @@ static NSString* const versions_footnote = @"목록에 없는 버전도 실행�
 static NSString* const verified_footnote = @"%@ %@에서 실행을 확인한 버전입니다";
 
 // Developer
+static NSString* const section_logs = @"로그";
+static NSString* const section_location = @"위치";
+static NSString* const pin_location = @"위치 고정";
+static NSString* const pin_location_detail = @"실제 위치 대신 아래 좌표를 내비게이션에 보냅니다";
+static NSString* const coordinate = @"좌표";
+static NSString* const coordinate_detail = @"위도, 경도";
+static NSString* const course = @"진행 방향";
+static NSString* const course_detail = @"북쪽 0°, 시계 방향";
 static NSString* const session_log = @"세션 로그 저장";
 static NSString* const session_log_detail = @"Documents/logs · 최근 5개 보관";
 static NSString* const perf_log = @"성능 로그";
