@@ -21,13 +21,13 @@
 | `src/native_functions.cpp`, `native_runtime.cpp`, `inflate.cpp`, `profiler.cpp` | 엔진 | 게스트 함수의 네이티브 대체(표준 런타임 라이브러리 이름만)와 프로파일러. 앱 고유 대체 집합은 어댑터가 넘김. [네이티브 대체](native.md) |
 | `src/files.cpp` | 엔진 | 가상 파일 디스크립터. 파일 이름·배치는 어댑터가 정함 |
 | `src/abi.cpp`, `src/android_log.cpp` | 엔진 | 인자 읽기·printf 전개·로그 |
-| `src/jni.cpp` (`JavaBootstrap`) | **경계** | 테이블·트랩·핸들 구조는 엔진, 어떤 클래스·메서드에 어떻게 답하는지는 어댑터 |
+| `src/jni.cpp` (`JavaBootstrap`) | 엔진 | 테이블·트랩·핸들 구조와 표준 Java 동작(`java/lang/String`)만. 앱의 Java 메서드와 그 응답은 어댑터가 `register_method`로 등록 |
 | `src/demo.cpp`, `tools/`, `tests/` | 엔진 | 합성 입력만 사용 |
 | `shell/session.*` | 엔진 | 스레드·예산·중지·프레임 루프. 앱 고유 값과 시작 순서는 `AppAdapter`로만 받음 |
 | `shell/app_adapter.hpp` | 엔진 | 엔진이 앱에 묻는 인터페이스(`AppAdapter`, `AppHost`, `AppStartup`) |
 | `shell/input.*`, `http_client.*`, `log_file.*` | 엔진 | 입력 큐·바인딩 해석, HTTP, 로그 파일. 바인딩 값은 어댑터 쪽 파일 |
 | `adapters/atlan/` | 어댑터 | 패키지 위치, 설정 파일·폴더 별칭, Java 쪽 응답, 시작·프레임 진입점, 프레임 요청 규약 |
-| `shell/java_services.*`, `shell/app_package.*`, `shell/guest_ini.*` | 어댑터 | `atlan_adapter` 라이브러리로 빌드. 파일 위치는 단계 5에서 `adapters/atlan/`로 옮김. APK 읽기 자체는 범용이라 그때 엔진 쪽으로 나눔 |
+| `adapters/atlan/java_services.*`, `app_package.*`, `guest_ini.*` | 어댑터 | Java 쪽 네트워크, 앱 패키지(포장 해제와 라이브러리 선택), 설정 파일 형식. APK(ZIP) 읽기 자체는 범용이라 나중에 엔진 쪽으로 나눌 수 있음 |
 | `shell/data_file.*` | **경계** | 부분 읽기·교체·거부 메커니즘은 엔진, 헤더 형식 검증은 어댑터 |
 | `shell/render_config.hpp` | 확인 필요 | 앱 고유 값이 있으면 어댑터로 |
 | `platform/gles`, `platform/android` | 엔진 쪽 호스트 계층 | 기기 GLES2·EGL, Android 액티비티·JNI·OpenSL ES. 앱은 `make_app_adapter`(`platform/android/android_app.hpp`)와 `GuestActivity` 하위 클래스로만 들어온다. [Android](android.md) |
@@ -60,7 +60,12 @@ platform/          ios, macos 호스트 서비스
 
 지금 코드가 이미 "관찰된 호출만 구현하고 나머지는 명시적으로 정지"하는 구조라서 틈이 작다. 필요한 것은 다음 둘이다.
 
-1. **`JavaHost`(가칭)**: `JavaBootstrap`이 클래스 조회, 멤버 조회, 객체 생성, 메서드 호출 결과를 어댑터에 묻는 추상 인터페이스. 기본 구현은 지금과 같이 "알 수 없으면 정지"다.
+1. **`JavaHost`(가칭)**: 따로 만들지 않기로 했다. `JavaBootstrap`은 앱을 모르는 상태로 이미 다음처럼 나뉘어 있다.
+   - 클래스·멤버 조회와 `()V` 생성자는 어떤 이름이든 핸들만 만들어 준다(앱 고유 지식이 없다).
+   - 메서드 호출은 `register_method`로 등록된 것만 실행하고, 나머지는 메서드 이름을 대며 정지한다. 이 등록이 어댑터가 Java 쪽 응답을 정하는 통로다(`AppAdapter::install_java`에서 `AppHost::java()`로 등록).
+   - 엔진이 스스로 등록하는 것은 표준 라이브러리(`java/lang/String`)뿐이다.
+
+   그래서 별도 인터페이스를 끼우면 같은 일을 하는 층만 하나 늘어난다. 앱마다 클래스 조회를 거부하거나 필드 기본값을 바꿔야 하는 경우가 생기면 그때 `install_java`에 훅을 더한다.
 2. **`AppAdapter`** (`shell/app_adapter.hpp`, 계획 때 이름은 `AppProfile`): `SessionConfig::adapter`로 넘기고 `GuestSession`이 이것만 보고 구동한다. 세션 하나에 어댑터 하나다.
    - 라이브러리: `find_library`(데이터 폴더에서 찾기), `missing_library`, `unpack_library`(APK·앱 고유 포장 풀기)
    - 파일: `configure_files`(별칭, 읽기 필터)
@@ -79,10 +84,10 @@ platform/          ios, macos 호스트 서비스
 | --- | --- | --- | --- |
 | 0 | 이 문서와 로드맵 항목 | 없음(문서만) | 완료 |
 | 1 | 규칙 확정: 새 코드는 엔진/어댑터 중 어디인지 PR 설명에 적는다. 엔진 코드에 앱 고유 이름·상수 금지를 `AGENTS.md`에 반영 | 없음 | 완료(`AGENTS.md`). PR을 쓰지 않으므로 커밋 메시지에 적음 |
-| 2 | `JavaHost` 인터페이스 추가와 `JavaBootstrap`이 이를 쓰도록 변경. 기본 구현은 현재 동작 유지 | `src/jni.cpp`·`jni.hpp`: ABI/JNI 브랜치와 겹침 | 해당 브랜치가 main에 들어간 뒤 |
+| 2 | `JavaHost` 인터페이스 추가와 `JavaBootstrap`이 이를 쓰도록 변경. 기본 구현은 현재 동작 유지 | `src/jni.cpp`·`jni.hpp`: ABI/JNI 브랜치와 겹침 | 완료(별도 인터페이스 없이 `register_method`와 `AppHost`로 충분함을 확인, 위 설명) |
 | 3 | `AppProfile` 도입과 `GuestSession`이 시작 순서를 프로필에서 읽도록 변경 | `shell/session.*`: 스레딩 브랜치와 겹칠 수 있음 | 완료(`AppAdapter`, `adapters/atlan/`). 동작 변화 없음 |
 | 4 | 합성 어댑터 추가: 엔진 단독으로 JNI·시작·입력 경로를 합성 이미지로 검증하는 테스트 | 새 파일 위주 | 시작 경로는 `tests/shell_tests.cpp`의 합성 어댑터로 검증 중. JNI·입력 경로는 단계 2 뒤 |
-| 5 | 디렉터리 이동(`git mv`만, 내용 변경 없음)과 CMake 타깃 정리. 기존 `atlan_runtime`은 별칭으로 유지 | 모든 브랜치와 충돌 가능 | 진행 중 브랜치가 모두 정리된 시점에 한 번에 |
+| 5 | 디렉터리 이동(`git mv`만, 내용 변경 없음)과 CMake 타깃 정리. 기존 `atlan_runtime`은 별칭으로 유지 | 모든 브랜치와 충돌 가능 | 일부 완료: 아틀란 파일을 `adapters/atlan/`로 모음. `src/`·`include/`·`shell/`을 `engine/` 아래로 옮기는 것은 엔진 코드를 고치는 작업이 없는 때에 한 번에 |
 | 6 | 엔진 공개 API 정리, 누락 함수 감지(M10)를 엔진 기능으로 고정, 별도 저장소로 분리할지 판단 | 낮음 | 구동 안정 이후 |
 
 오디오·그래픽 같은 신규 호스트 서비스는 처음부터 "엔진 서비스 + 어댑터가 채우는 설정"으로 나눠 만든다. 그러면 단계 5의 이동 때 손댈 것이 줄어든다.
