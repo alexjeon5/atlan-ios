@@ -369,7 +369,11 @@ void GuestSession::run() {
                 const std::array<std::uint32_t, 2> init_args{java.env(), java.new_object(java.class_handle(startup.receiver_class))};
                 const auto started = dispatcher.call(runtime, native_init_address, init_args, stack_base + stack_bytes,
                                                      return_sentinel, config_.native_init_budget);
-                if (started.stop != Stop::returned) { fail(describe_stop(method_label(startup.init, "init"), started)); return; }
+                if (started.stop != Stop::returned) {
+                    if (started.stop == Stop::budget_exhausted) log_(describe_state(runtime, dispatcher));
+                    fail(describe_stop(method_label(startup.init, "init"), started));
+                    return;
+                }
                 log_(method_label(startup.init, "init") + " returned 0x" + hex(runtime.cpu.registers[0]));
             } else {
                 log_(method_label(startup.init, "init") + " not exported");
