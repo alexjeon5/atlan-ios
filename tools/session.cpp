@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
         }
     }
     if (const char* profile = std::getenv("ATLAN_PROFILE")) config.profile_path = profile;  // per-function profile files
+    if (const char* budget = std::getenv("ATLAN_INIT_BUDGET")) config.native_init_budget = std::strtoull(budget, nullptr, 10);
     if (const char* frames = std::getenv("ATLAN_FRAMES")) config.render_frames = static_cast<std::uint32_t>(std::atoi(frames));
     // ATLAN_TAP=X,Y: where the test tap lands in guest screen pixels (default 400,240).
     float tap_x = 400, tap_y = 240;
