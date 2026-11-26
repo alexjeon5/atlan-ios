@@ -78,6 +78,9 @@ static NSString* const appearance_light = @"라이트";
 static NSString* const appearance_dark = @"다크";
 static NSString* const notch = @"노치 여백";
 static NSString* const notch_detail = @"아이폰에서 노치 쪽 화면을 비워 둡니다";
+static NSString* const section_sound = @"소리";
+static NSString* const duck = @"안내 음성 때 다른 앱 소리 줄이기";
+static NSString* const duck_detail = @"음악은 그대로 재생되고 안내가 나올 때만 작아집니다";
 
 // Map data
 static NSString* const location = @"위치";

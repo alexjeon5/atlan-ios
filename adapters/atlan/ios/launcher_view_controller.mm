@@ -646,6 +646,9 @@ std::string fingerprint(const AtlanDataStatus& s) {
                               ^(BOOL on) { LauncherSettings.shared.autoStart = on; })]),
         [self sectionCaption:text::section_screen top:12],
         LKGroup(screenRows),
+        [self sectionCaption:text::section_sound top:12],
+        LKGroup(@[LKSwitchRow(text::duck, text::duck_detail, settings.duckOthers, 60,
+                              ^(BOOL on) { LauncherSettings.shared.duckOthers = on; })]),
     ], 0));
 }
 
