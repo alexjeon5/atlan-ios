@@ -19,6 +19,7 @@ UIColor* pair(UIColor* dark, UIColor* light) {
 + (UIColor*)card { return pair(rgb(0x11141C), rgb(0xFFFFFF)); }
 + (UIColor*)raised { return pair(rgb(0x1A1E28), rgb(0xECEFF4)); }
 + (UIColor*)line { return pair(rgb(0xEEF0F5, 0.08), rgb(0x111827, 0.08)); }
++ (UIColor*)lineStrong { return pair(rgb(0xEEF0F5, 0.4), rgb(0x111827, 0.4)); }
 + (UIColor*)ink { return pair(rgb(0xEEF0F5), rgb(0x111827)); }
 + (UIColor*)ink2 { return pair(rgb(0xA3A9B8), rgb(0x4B5565)); }
 + (UIColor*)muted { return pair(rgb(0x7A8296), rgb(0x646D80)); }

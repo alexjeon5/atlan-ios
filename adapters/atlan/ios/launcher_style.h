@@ -8,6 +8,7 @@
 @property(class, readonly) UIColor* card;
 @property(class, readonly) UIColor* raised;
 @property(class, readonly) UIColor* line;
+@property(class, readonly) UIColor* lineStrong;  // the border of the selected choice
 @property(class, readonly) UIColor* ink;
 @property(class, readonly) UIColor* ink2;
 @property(class, readonly) UIColor* muted;
