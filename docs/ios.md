@@ -29,9 +29,11 @@ Linux ARM64에서 CPU 코어를 실행한 결과는 iOS 기기 검증을 대체�
 
 CI는 `Release-iphoneos` 앱을 `Payload/`로 압축한 서명 없는 IPA(`atlan-runtime-ios-unsigned`)를 아티팩트로 올린다. 사이드로딩 도구(iloader 등)로 서명·설치한다.
 
+번들 ID는 `com.hanggok.atlan`, 홈 화면 이름은 "Atlan"이다(`platform/ios/CMakeLists.txt`). 2026-11-26 전 빌드는 `org.example.atlan-runtime`이었다. 번들 ID가 바뀌면 다른 앱으로 설치되므로 Documents가 새로 비어 있다. ATLAN 폴더와 `native.sig`, `input.cfg`를 새 앱의 Documents(파일 앱의 나의 iPhone › Atlan)에 다시 넣는다.
+
 ## 화면
 
-가로 모드 전용(`LandscapeLeft/Right`)이며 iPhone·iPad 모두 지원한다(`TARGETED_DEVICE_FAMILY` 1,2, iPad는 가로 전용을 위해 `UIRequiresFullScreen`). 렌더링 해상도의 기본값은 기기 실제 픽셀(points × `nativeScale`)이고, 발열 대비 내부 해상도 배율은 `shell/render_config.hpp`의 `render_size`에서 0.25~1.0으로 줄일 수 있게 자리만 두었다(UI 옵션은 아직 없다). 그래픽 서비스(M4) 전까지 이 값은 쓰이지 않는다.
+런처는 내비게이션을 시작하기 전까지 세로로도 돌아가고, 내비게이션이 시작되면 가로(`LandscapeLeft/Right`)로 고정된다. iPhone·iPad 모두 지원한다(`TARGETED_DEVICE_FAMILY` 1,2, 방향 고정을 위해 `UIRequiresFullScreen`). 렌더링 해상도의 기본값은 기기 실제 픽셀(points × `nativeScale`)이고, 발열 대비 내부 해상도 배율은 `shell/render_config.hpp`의 `render_size`에서 0.25~1.0으로 줄일 수 있게 자리만 두었다(UI 옵션은 아직 없다). 그래픽 서비스(M4) 전까지 이 값은 쓰이지 않는다.
 
 ## 실행 중 동작
 

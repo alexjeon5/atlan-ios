@@ -21,7 +21,7 @@ target_link_libraries(AtlanRuntime PRIVATE atlan_adapter atlan_apple_audio "-fra
 target_compile_options(AtlanRuntime PRIVATE -fobjc-arc -Wall -Wextra -Werror)
 set_target_properties(AtlanRuntime PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
-  MACOSX_BUNDLE_GUI_IDENTIFIER "org.example.atlan-runtime"
+  MACOSX_BUNDLE_GUI_IDENTIFIER "com.hanggok.atlan"
   MACOSX_BUNDLE_BUNDLE_NAME "Atlan"
   MACOSX_BUNDLE_BUNDLE_VERSION "1"
   MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
