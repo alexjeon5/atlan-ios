@@ -116,6 +116,19 @@ std::string resolve_atlan_folder(const std::string& picked) {
     return picked;
 }
 
+std::vector<std::string> find_atlan_folders(const std::string& parent) {
+    std::vector<std::string> found;
+    std::error_code error;
+    if (parent.empty()) return found;
+    for (fs::directory_iterator it(parent, error), end; !error && it != end; it.increment(error)) {
+        if (!it->is_directory(error) || it->path().filename().string().starts_with(".")) continue;
+        for (const auto name : {"APP", "UI", "MAP", "Sys"})
+            if (child(it->path(), name, true)) { found.push_back(it->path().string()); break; }
+    }
+    std::sort(found.begin(), found.end());
+    return found;
+}
+
 std::span<const VerifiedApp> verified_apps() noexcept { return verified; }
 
 bool is_verified(const AtlanDataStatus& status) noexcept {

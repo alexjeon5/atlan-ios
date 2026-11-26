@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/charset_conversion.hpp"
 #include "adapters/atlan/quad_geometry.hpp"
+#include "atlan/audio.hpp"
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/guest_ini.hpp"
@@ -188,6 +189,8 @@ struct TestAdapter final : atlan::shell::AppAdapter {
         ++installs;
         asked_for_requests = frame_requests;
         check(host.function("draw") != 0 && host.function("missing") == 0, "host finds exported functions");
+        std::string error;
+        check(host.audio().open({44100, 2}, error) != nullptr, "the host offers the session's audio device");
     }
     void uninstall_java() override { ++uninstalls; }
     atlan::shell::AppStartup startup() const override {
@@ -229,7 +232,8 @@ void adapter_sessions() {
     check(adapter->deliveries >= 3, "deliveries run before every frame");
 }
 }
-// The app's home button reaches the host as message 5 of MainActivity.SendMsgFromAtlan; other messages do not.
+// The app's home button reaches the host as message 5 of MainActivity.SendMsgFromAtlan, the end of its splash as
+// message 13; other messages reach neither.
 void home_button() {
     constexpr std::uint32_t data = 0x4000, stack = 0x80000, sentinel = 0xffff0000;
     atlan::Runtime runtime;
@@ -239,9 +243,11 @@ void home_button() {
     dispatcher.attach(atlan::elf::Image{});
     atlan::JavaBootstrap java(runtime, dispatcher, {});
     unsigned homes = 0;
+    std::vector<std::uint32_t> splash_ends;
     atlan::shell::JavaServices::Config config;
     config.use_connection_manager = false;
     config.on_home = [&homes] { ++homes; };
+    config.on_splash_end = [&splash_ends](std::uint32_t param) { splash_ends.push_back(param); };
     atlan::shell::JavaServices services(config);
     services.install(java, [](const std::string&, const std::string&, const std::string&) { return 0u; });
     const auto text = [&](std::uint32_t at, const std::string& value) {
@@ -273,6 +279,10 @@ void home_button() {
     check(homes == 1, "message 5 presses home");
     (void)invoke(61, {activity, method, 5, 1, 0, 0});
     check(homes == 2, "every press is delivered");
+    check(splash_ends.empty(), "other messages do not end the splash");
+    (void)invoke(61, {activity, method, 13, 0, 0, 0});
+    (void)invoke(61, {activity, method, 13, 1, 0, 0});
+    check(splash_ends == std::vector<std::uint32_t>{0, 1} && homes == 2, "message 13 ends the splash with its param");
 }
 // The app's text conversion as the host does it (the comparison with the guest's own code runs at install).
 void text_conversion() {

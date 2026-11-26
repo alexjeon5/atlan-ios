@@ -266,10 +266,11 @@ void GuestSession::run() {
         runtime.memory.map(stack_base, stack_bytes, Permissions::read_write);
         BionicData::map(runtime.memory);
         RecordingAudioSink fallback_sink(true);  // used when the embedder supplies no device sink
+        AudioSink& audio_sink = config_.audio_sink ? *config_.audio_sink : fallback_sink;
         std::optional<OpenSles> audio;
         {
             OpenSles::Config audio_config;
-            audio_config.sink = config_.audio_sink ? config_.audio_sink : &fallback_sink;
+            audio_config.sink = &audio_sink;
             audio_config.trace = [this](const std::string& line) { log_("opensles " + line); };
             audio.emplace(runtime, dispatcher, audio_config);
         }
@@ -323,10 +324,12 @@ void GuestSession::run() {
                 JavaBootstrap& bootstrap;
                 const elf::Image& image;
                 const std::function<void(const std::string&)>& fail;
+                AudioSink& sink;
                 Host(GuestSession& s, Runtime& r, ImportDispatcher& d, JavaBootstrap& j, const elf::Image& i,
-                     const std::function<void(const std::string&)>& f)
-                    : session(s), runtime(r), dispatcher(d), bootstrap(j), image(i), fail(f) {}
+                     const std::function<void(const std::string&)>& f, AudioSink& a)
+                    : session(s), runtime(r), dispatcher(d), bootstrap(j), image(i), fail(f), sink(a) {}
                 JavaBootstrap& java() override { return bootstrap; }
+                AudioSink& audio() override { return sink; }
                 std::uint32_t function(std::string_view symbol) const override {
                     const auto* sym = image.find(symbol);
                     return sym && sym->type == 2 ? sym->address : 0;
@@ -355,7 +358,7 @@ void GuestSession::run() {
                 const SessionLog& log() const override { return session.log_; }
             };
             const std::function<void(const std::string&)> fail_session = fail;
-            Host host(*this, runtime, dispatcher, java, image, fail_session);
+            Host host(*this, runtime, dispatcher, java, image, fail_session, audio_sink);
             adapter.install_java(host, config_.render_on_demand);
             struct Uninstall {
                 AppAdapter& adapter;

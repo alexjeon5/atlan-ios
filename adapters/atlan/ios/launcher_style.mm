@@ -19,6 +19,7 @@ UIColor* pair(UIColor* dark, UIColor* light) {
 + (UIColor*)card { return pair(rgb(0x11141C), rgb(0xFFFFFF)); }
 + (UIColor*)raised { return pair(rgb(0x1A1E28), rgb(0xECEFF4)); }
 + (UIColor*)line { return pair(rgb(0xEEF0F5, 0.08), rgb(0x111827, 0.08)); }
++ (UIColor*)lineStrong { return pair(rgb(0xEEF0F5, 0.4), rgb(0x111827, 0.4)); }
 + (UIColor*)ink { return pair(rgb(0xEEF0F5), rgb(0x111827)); }
 + (UIColor*)ink2 { return pair(rgb(0xA3A9B8), rgb(0x4B5565)); }
 + (UIColor*)muted { return pair(rgb(0x7A8296), rgb(0x646D80)); }
@@ -42,6 +43,8 @@ const LauncherMetrics& LauncherMetrics::current() {
         .settingsButton = 48,
         .introColumn = 288, .tabColumn = 168, .sideColumn = 208,
         .container = CGSizeZero,
+        .portraitContainer = CGSizeZero,
+        .portraitStart = 132,
     };
     static const LauncherMetrics pad{
         .caption = 14, .body = 16, .value = 20, .head = 20, .title = 40,
@@ -51,6 +54,8 @@ const LauncherMetrics& LauncherMetrics::current() {
         .settingsButton = 56,
         .introColumn = 360, .tabColumn = 200, .sideColumn = 260,
         .container = CGSizeMake(1000, 560),
+        .portraitContainer = CGSizeMake(720, 960),
+        .portraitStart = 200,
     };
     return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? pad : phone;
 }
