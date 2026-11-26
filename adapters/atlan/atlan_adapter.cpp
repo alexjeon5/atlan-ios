@@ -7,6 +7,7 @@
 #include "shell/surface.hpp"
 #include "atlan/jni.hpp"
 #include "atlan/stdio.hpp"
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <set>
@@ -23,7 +24,9 @@ AtlanAdapter::AtlanAdapter() = default;
 AtlanAdapter::AtlanAdapter(Config config) : config_(std::move(config)) {}
 AtlanAdapter::~AtlanAdapter() = default;
 
-std::string AtlanAdapter::find_library(const std::string& data_root) const { return find_package(data_root); }
+std::string AtlanAdapter::find_library(const std::string& data_root) const {
+    return config_.map_root.empty() ? find_package(data_root) : find_package_in(config_.map_root);
+}
 
 std::string AtlanAdapter::missing_library() const { return "no guest library or package (ATLAN/APP/atlan.dat, *.apk)"; }
 
@@ -35,6 +38,14 @@ void AtlanAdapter::unpack_library(std::vector<std::byte>& bytes, const SessionLo
 }
 
 void AtlanAdapter::configure_files(GuestStdio& stdio, const SessionLog& log) {
+    if (!config_.map_root.empty()) {
+        const auto state = stdio.host_path("ATLAN/NAND");
+        std::error_code error;
+        std::filesystem::create_directories(state, error);
+        stdio.add_mount("ATLAN/NAND", state);
+        stdio.add_mount("ATLAN", config_.map_root);
+        log("map folder " + config_.map_root);
+    }
     // The guest's settings file names its folders by absolute Android paths, which differ per device and may be
     // edited by the user. Whatever ROOTPATH says is the ATLAN folder beneath the data root; any other absolute path
     // through a folder named "atlan" (any case) lands in that same folder.

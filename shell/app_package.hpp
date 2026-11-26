@@ -27,6 +27,8 @@ GuestPackage open_package(std::span<const std::byte> file);
 // The package in a data root: the newest of ATLAN/APP/atlan.dat, ATLAN/APP/*.apk and ATLAN/*.apk (folder and file
 // names in any case) that is a package. Empty when there is none.
 std::string find_package(const std::string& data_root);
+// The same search inside the ATLAN folder itself, wherever it lies (e.g. a folder the user picked).
+std::string find_package_in(const std::string& folder);
 
 // Raw DEFLATE (RFC 1951) decoding into exactly `size` bytes, and the ZIP CRC-32. Exposed for tests.
 std::vector<std::byte> inflate_raw(std::span<const std::byte> input, std::size_t size);

@@ -361,7 +361,12 @@ GuestPackage open_package(std::span<const std::byte> file) {
 std::string find_package(const std::string& data_root) {
     if (data_root.empty()) return {};
     const auto atlan = child_named(data_root, "atlan");
-    if (!atlan) return {};
+    return atlan ? find_package_in(atlan->string()) : std::string{};
+}
+
+std::string find_package_in(const std::string& folder) {
+    if (folder.empty()) return {};
+    const auto atlan = std::optional<fs::path>(folder);
     std::vector<fs::path> candidates;
     std::error_code error;
     const auto collect = [&](const fs::path& folder, bool dat) {

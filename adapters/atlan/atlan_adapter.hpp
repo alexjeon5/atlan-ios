@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 // The Atlan app: its package in the data folder, its settings file and folder aliases, its Java side (surface size,
 // GL thread frame requests, network services, logged UI callbacks) and its native start and frame entry points.
@@ -23,6 +24,9 @@ public:
         // whether a network is available (nullptr: always). Called from host threads and the guest thread.
         HttpFetch http;
         std::function<bool()> network_available;
+        // The ATLAN folder when it lies outside the data root (a folder the user picked elsewhere), read in place.
+        // What the app writes stays in the data root's ATLAN/NAND. Empty: the data root's ATLAN folder.
+        std::string map_root;
     };
     AtlanAdapter();
     explicit AtlanAdapter(Config config);

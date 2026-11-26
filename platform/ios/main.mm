@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <UIKit/UIKit.h>
 #import <CoreLocation/CoreLocation.h>
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "apple_audio_sink.hpp"
 #include "apple_network.hpp"
 #include "metal_gl_backend.hpp"
-#import "landing_view_controller.h"
+#import "adapters/atlan/ios/launcher_settings.h"
+#import "adapters/atlan/ios/launcher_view_controller.h"
 #import <QuartzCore/CAMetalLayer.h>
 #include "adapters/atlan/atlan_adapter.hpp"
 #include "atlan/demo.hpp"
 #include "shell/app_package.hpp"
-#include "shell/data_file.hpp"
+#include "adapters/atlan/data_status.hpp"
 #include <string>
 #include <cstdio>
 #include "shell/input.hpp"
 #include "shell/log_file.hpp"
-#include "shell/log_filter.hpp"
 #include "shell/render_config.hpp"
 #include "shell/session.hpp"
 #include <atomic>
@@ -23,42 +22,32 @@
 #include <memory>
 #include <vector>
 
-// Debugging aid while the app is being stabilised: every log line of a run, unfiltered, goes to
-// Documents/logs/session-<time>.log (the newest five are kept). Set to false to turn it off.
-static constexpr bool kWriteSessionLog = true;
-
-@interface ShellViewController : UIViewController <UIDocumentPickerDelegate, CLLocationManagerDelegate>
+@interface ShellViewController : UIViewController <CLLocationManagerDelegate, LauncherDelegate>
+@property(nonatomic, readonly) BOOL running;  // a guest session is running
 @end
 
 @implementation ShellViewController {
-    UITextView* _log;
-    UIButton* _library;
-    UIButton* _run;
-    UILabel* _map;
     std::unique_ptr<atlan::shell::GuestSession> _session;
     atlan::AppleAudioSink _audio;
     atlan::shell::SurfaceState _surface;
     UIView* _metalView;
     std::unique_ptr<atlan::MetalGlBackend> _gl;
     CAMetalLayer* _layer;
-    UIButton* _logToggle;
     atlan::shell::InputQueue _input;
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
     std::vector<UITouch*> _fingers;            // slot index = pointer id; nil when free
     CLLocationManager* _location;
     atlan::shell::SessionLogFile _logFile;
-    NSString* _package;                        // the app package in Documents/ATLAN, run in preference to guest.so
-    BOOL _autoStarted;
+    NSString* _package;                        // the app package in the ATLAN folder
+    NSString* _mapRoot;                        // the ATLAN folder when the user picked one elsewhere, else nil
+    BOOL _launched;                            // the first screen has been chosen
+    LauncherViewController* _launcher;
+    NSTimer* _watch;                           // brings the launcher back when a run ends by itself
 }
 
 // Bindings from host input to the guest's native methods: Documents/input.cfg (format in shell/input.hpp).
 - (NSString*)inputBindingsPath {
     return [self.documentsPath stringByAppendingPathComponent:@"input.cfg"];
-}
-
-- (void)toggleLog {
-    _log.hidden = !_log.hidden;  // the log covers the surface and takes its touches while shown
-    for (UIView* view in @[_library, _run, _map]) view.hidden = _log.hidden;  // leave the guest's screen clear
 }
 
 - (atlan::shell::PixelSize)touchSurface {
@@ -71,6 +60,7 @@ static constexpr bool kWriteSessionLog = true;
 // In landscape the safe area reports the same inset on both sides; the notch is at the device's top, which is on
 // the left in landscape-right and on the right in landscape-left. Elsewhere (iPad, iPhones without a notch) zero.
 - (UIEdgeInsets)notchInsets {
+    if (!LauncherSettings.shared.notchInset) return UIEdgeInsetsZero;  // the user's choice in the launcher
     if (UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPhone) return UIEdgeInsetsZero;
     const UIEdgeInsets safe = self.view.safeAreaInsets;
     const CGFloat notch = MAX(safe.left, safe.right);
@@ -187,202 +177,107 @@ static constexpr bool kWriteSessionLog = true;
     if (error.code != kCLErrorLocationUnknown) [self note:[NSString stringWithFormat:@"location failed: %@", error.localizedDescription]];
 }
 
-- (NSURL*)libraryURL {
-    NSURL* base = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory
-                                                       inDomains:NSUserDomainMask].firstObject;
-    [NSFileManager.defaultManager createDirectoryAtURL:base withIntermediateDirectories:YES
-                                            attributes:nil error:nil];
-    return [base URLByAppendingPathComponent:@"guest.so"];
-}
-
 - (NSString*)documentsPath {
     return [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
 }
 
-// The map stays where the user put it; the largest regular file in Documents is used in place.
-- (NSString*)mapPath {
-    NSURL* docs = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
-                                                       inDomains:NSUserDomainMask].firstObject;
-    NSArray<NSURL*>* items = [NSFileManager.defaultManager
-        contentsOfDirectoryAtURL:docs includingPropertiesForKeys:@[NSURLFileSizeKey, NSURLIsRegularFileKey]
-                         options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
-    NSURL* best = nil;
-    NSInteger bestSize = -1;
-    for (NSURL* item in items) {
-        NSNumber* regular = nil; NSNumber* size = nil;
-        [item getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
-        [item getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-        if (regular.boolValue && size.longLongValue > bestSize) { best = item; bestSize = size.longLongValue; }
-    }
-    return best.path;
-}
-
-// The app as installed on Android: ATLAN/APP/atlan.dat or an APK in the ATLAN folder (shell/app_package.hpp).
+// The app as installed on Android: ATLAN/APP/atlan.dat or an APK in the ATLAN folder (shell/app_package.hpp), in
+// the app's Documents or in a folder the user picked in the launcher.
 - (void)findPackage {
-    const std::string path = atlan::shell::find_package(self.documentsPath.UTF8String);
+    LauncherSettings* settings = LauncherSettings.shared;
+    NSString* folder = settings.atlanFolder;
+    _mapRoot = settings.atlanFolderIsPicked && folder.length ? folder : nil;
+    const std::string path = _mapRoot ? atlan::shell::find_package_in(_mapRoot.UTF8String)
+                                      : atlan::shell::find_package(self.documentsPath.UTF8String);
     _package = path.empty() ? nil : [NSString stringWithUTF8String:path.c_str()];
 }
 
-- (NSString*)guestLibraryPath {
-    if (_package) return _package;
-    NSString* imported = self.libraryURL.path;
-    return [NSFileManager.defaultManager fileExistsAtPath:imported] ? imported : nil;
+- (BOOL)running {
+    return _session && _session->state() == atlan::shell::SessionState::running;
 }
 
-// The package runs by itself once per launch, as soon as the view is on screen or the app returns with one in place.
-- (void)autoRun {
-    if (_autoStarted || _session || !_package || !self.view.window) return;
-    _autoStarted = YES;
-    [self runGuest];
-}
-
-- (void)becameActive {
-    [self findPackage];
-    [self refresh];
-    [self autoRun];
-}
-
+// The first screen: the navigation itself when the user turned auto start on and the ATLAN folder is complete,
+// otherwise the launcher (which also explains what is missing).
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    [self autoRun];
+    if (_launched) return;
+    _launched = YES;
+    if (!LauncherSettings.shared.autoStart) { [self showLauncher]; return; }
+    NSString* folder = LauncherSettings.shared.atlanFolder;
+    __weak ShellViewController* weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        const bool ready = atlan::shell::inspect_atlan_data(folder.UTF8String ?: "").ready();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ShellViewController* strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (ready) [strongSelf runGuest];
+            if (!strongSelf.running) [strongSelf showLauncher];
+        });
+    });
 }
 
-// A line of the shell itself: on screen and in the session log file.
+- (void)launcherWantsNavigation:(LauncherViewController*)launcher {
+    (void)launcher;
+    if (!self.running) [self runGuest];
+    if (self.running) [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)settingsChanged {
+    [self layoutSurface];  // the notch inset may have been switched
+}
+
+// A line of the shell itself, kept in the session log file.
 - (void)note:(NSString*)line {
     _logFile.write(line.UTF8String ?: "?");
-    [self append:line];
-}
-
-- (void)append:(NSString*)line {
-    // Appending in place keeps a long log cheap; the oldest half goes once it is large.
-    NSMutableString* text = _log.textStorage.mutableString;
-    if (text.length > 200000) [text deleteCharactersInRange:NSMakeRange(0, text.length / 2)];
-    [text appendFormat:@"%@\n", line];
-    if (!_log.hidden) [_log scrollRangeToVisible:NSMakeRange(text.length, 0)];
-}
-
-- (void)refresh {
-    BOOL hasLibrary = self.guestLibraryPath != nil;
-    NSString* path = self.mapPath;
-    if (path) {
-        const auto status = atlan::shell::inspect_data_file(path.UTF8String);
-        _map.text = status.ok
-            ? [NSString stringWithFormat:@"%@  %.2f GB", path.lastPathComponent, status.size / 1073741824.0]
-            : [NSString stringWithFormat:@"%@  %s", path.lastPathComponent, status.message.c_str()];
-        _map.textColor = status.ok ? UIColor.labelColor : UIColor.systemRedColor;
-    } else {
-        _map.text = @"—";
-        _map.textColor = UIColor.secondaryLabelColor;
-    }
-    _run.enabled = hasLibrary && !(_session && _session->state() == atlan::shell::SessionState::running);
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
-    _library = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_library setImage:[UIImage systemImageNamed:@"square.and.arrow.down"] forState:UIControlStateNormal];
-    _library.accessibilityLabel = @"라이브러리 가져오기";
-    [_library addTarget:self action:@selector(importLibrary) forControlEvents:UIControlEventTouchUpInside];
-    _run = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_run setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
-    _run.accessibilityLabel = @"실행";
-    [_run addTarget:self action:@selector(runGuest) forControlEvents:UIControlEventTouchUpInside];
-    _logToggle = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_logToggle setImage:[UIImage systemImageNamed:@"text.alignleft"] forState:UIControlStateNormal];
-    _logToggle.accessibilityLabel = @"로그";
-    [_logToggle addTarget:self action:@selector(toggleLog) forControlEvents:UIControlEventTouchUpInside];
-    _map = [UILabel new];
-    _map.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
-    _map.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    _log = [UITextView new];
-    _log.editable = NO;
-    _log.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-    _log.backgroundColor = [UIColor.secondarySystemBackgroundColor colorWithAlphaComponent:0.55];
+    self.view.backgroundColor = UIColor.blackColor;
     _metalView = [UIView new];
     _metalView.layer.opaque = YES;
     _metalView.multipleTouchEnabled = YES;
+    _metalView.backgroundColor = UIColor.blackColor;
     self.view.multipleTouchEnabled = YES;
-    auto* bar = [[UIStackView alloc] initWithArrangedSubviews:@[_library, _run, _logToggle, _map]];
-    bar.spacing = 20;
-    bar.alignment = UIStackViewAlignmentCenter;
     [self.view insertSubview:_metalView atIndex:0];
     _metalView.frame = self.view.bounds;
     _metalView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    for (UIView* view in @[bar, _log]) {
-        view.translatesAutoresizingMaskIntoConstraints = NO;
-        [self.view addSubview:view];
-    }
-    UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
-        [bar.topAnchor constraintEqualToAnchor:safe.topAnchor constant:12],
-        [bar.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
-        [bar.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
-        [_log.topAnchor constraintEqualToAnchor:bar.bottomAnchor constant:12],
-        [_log.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
-        [_log.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [_log.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor]
-    ]];
-    if (kWriteSessionLog) _logFile.open([self.documentsPath stringByAppendingPathComponent:@"logs"].UTF8String);
+    // Every log line of a run, unfiltered, goes to Documents/logs/session-<time>.log (the newest five are kept).
+    if (LauncherSettings.shared.sessionLog) _logFile.open([self.documentsPath stringByAppendingPathComponent:@"logs"].UTF8String);
     try {
         const auto demo = atlan::run_demo();
         [self note:[NSString stringWithFormat:@"selftest %u", demo.value]];
     } catch (const std::exception&) {
         [self note:@"selftest failed"];
     }
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(becameActive)
-        name:UIApplicationDidBecomeActiveNotification object:nil];
-    [self findPackage];
-    [self refresh];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged)
+        name:LauncherSettingsDidChange object:nil];
 }
 
 - (CAMetalLayer*)metalLayer { return _layer; }
 
-// The guest's home button: show the host's home screen over the guest, which keeps running underneath.
-- (void)showLanding {
+// The launcher over the guest, which keeps running underneath (the guest's home button, a finished run, or the
+// first screen of the app).
+- (void)showLauncher {
+    if (!_launcher) _launcher = [[LauncherViewController alloc] initWithDelegate:self];
+    _launcher.running = self.running;
     if (self.presentedViewController) return;
-    [self presentViewController:[LandingViewController new] animated:YES completion:nil];
+    [self presentViewController:_launcher animated:_launched && self.running completion:nil];
 }
 
-- (void)importLibrary {
-    auto* picker = [[UIDocumentPickerViewController alloc]
-        initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
-    picker.delegate = self;
-    [self presentViewController:picker animated:YES completion:nil];
-}
-
-- (void)documentPicker:(UIDocumentPickerViewController*)controller didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
-    (void)controller;
-    NSURL* destination = self.libraryURL;
-    NSURL* staged = [destination URLByAppendingPathExtension:@"part"];
-    NSError* error = nil;
-    [NSFileManager.defaultManager removeItemAtURL:staged error:nil];
-    if ([NSFileManager.defaultManager copyItemAtURL:urls.firstObject toURL:staged error:&error] &&
-        [NSFileManager.defaultManager replaceItemAtURL:destination withItemAtURL:staged backupItemName:nil
-                                               options:0 resultingItemURL:nil error:&error]) {
-        [self note:[NSString stringWithFormat:@"library %@", urls.firstObject.lastPathComponent]];
-    } else if ([NSFileManager.defaultManager moveItemAtURL:staged toURL:destination error:nil]) {
-        [self note:[NSString stringWithFormat:@"library %@", urls.firstObject.lastPathComponent]];
-    } else {
-        [self note:[NSString stringWithFormat:@"import failed: %@", error.localizedDescription]];
-    }
-    [self refresh];
+- (void)watchSession {
+    if (self.running || !_session) return;
+    [_watch invalidate];
+    _watch = nil;
+    [self showLauncher];
 }
 
 - (void)runGuest {
     if (_session) { _session->stop(); _session->join(); _session.reset(); }
     [self findPackage];
-    NSString* library = self.guestLibraryPath;
-    if (!library) { [self note:@"library missing"]; [self refresh]; return; }
-    const NSUInteger documents = self.documentsPath.length + 1;
-    [self note:_package && _package.length > documents ? [_package substringFromIndex:documents] : @"guest.so"];
-    NSString* map = self.mapPath;
-    if (map) {
-        const auto status = atlan::shell::inspect_data_file(map.UTF8String);
-        [self note:status.ok ? @"map ok" : [NSString stringWithFormat:@"map rejected: %s", status.message.c_str()]];
-    } else {
-        [self note:@"map missing"];
-    }
+    NSString* library = _package;
+    if (!library) { [self note:@"library missing"]; return; }
+    [self note:library.lastPathComponent];
     __weak ShellViewController* weakSelf = self;
     atlan::shell::SessionConfig config;
     atlan::shell::AtlanAdapter::Config app;  // the app's Java side: network and the guest's surface size
@@ -404,17 +299,19 @@ static constexpr bool kWriteSessionLog = true;
     config.input = &_input;
     config.interactive = true;
     config.render_on_demand = true;
-    config.perf_log = true;  // the 10-second frame report also lists block cache coverage and the busiest imports
+    LauncherSettings* settings = LauncherSettings.shared;
+    const bool perfLog = settings.perfLog, networkLog = settings.networkLog;
+    config.perf_log = perfLog;  // the 10-second frame report also lists block cache coverage and the busiest imports
+    if (_mapRoot) app.map_root = _mapRoot.UTF8String;
     app.http = atlan::apple_http_fetch();
     app.network_available = atlan::apple_network_available();
     // Optional byte signatures for run-time library functions the guest image does not export.
     config.native_signatures = [self.documentsPath stringByAppendingPathComponent:@"native.sig"].UTF8String;
-    {
-        // A folder named "profile" in Documents turns the per-function profiler on; its files are written there.
+    if (settings.profiler) {
+        // The per-function profiler (launcher settings) writes its files to Documents/profile.
         NSString* profileFolder = [self.documentsPath stringByAppendingPathComponent:@"profile"];
-        BOOL isFolder = NO;
-        if ([NSFileManager.defaultManager fileExistsAtPath:profileFolder isDirectory:&isFolder] && isFolder)
-            config.profile_path = [profileFolder stringByAppendingPathComponent:@"p"].UTF8String;
+        [NSFileManager.defaultManager createDirectoryAtPath:profileFolder withIntermediateDirectories:YES attributes:nil error:nil];
+        config.profile_path = [profileFolder stringByAppendingPathComponent:@"p"].UTF8String;
     }
     {
         std::string why;
@@ -426,7 +323,6 @@ static constexpr bool kWriteSessionLog = true;
         }
     }
     [self startLocation];
-    const auto repeats = std::make_shared<atlan::shell::RepeatFilter>();
     const std::string perfPath = [self.documentsPath stringByAppendingPathComponent:@"perf.log"].UTF8String;
     std::remove(perfPath.c_str());  // one run per file
     const std::string netPath = [self.documentsPath stringByAppendingPathComponent:@"net.log"].UTF8String;
@@ -438,19 +334,12 @@ static constexpr bool kWriteSessionLog = true;
         CAMetalLayer* layer = [CAMetalLayer layer];
         layer.drawableSize = CGSizeMake(size.width, size.height);
         layer.contentsGravity = kCAGravityResize;
-        _metalView.backgroundColor = UIColor.blackColor;
         [_metalView.layer addSublayer:layer];
         _layer = layer;
         [self layoutSurface];
         _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
         atlan::shell::SessionLogFile* logFile = &_logFile;  // outlives the backend and the session
-        _gl->set_log([weakSelf, repeats, logFile](const std::string& line) {
-            logFile->write("gl " + line);
-            std::string shown = "gl " + line;
-            if (!repeats->admit(shown)) return;
-            NSString* text = [NSString stringWithUTF8String:shown.c_str()] ?: @"?";
-            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf append:text]; });
-        });
+        _gl->set_log([logFile](const std::string& line) { logFile->write("gl " + line); });
         config.gl_backend = _gl.get();
         // The guest sizes its GL surface itself (MainActivity.setSurfaces); render at exactly that size and show
         // it in the aspect-fitting rectangle of the view.
@@ -467,36 +356,29 @@ static constexpr bool kWriteSessionLog = true;
         };
     }
     app.on_home = [weakSelf] {
-        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showLanding]; });
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showLauncher]; });
     };
     config.adapter = std::make_shared<atlan::shell::AtlanAdapter>(std::move(app));
     _session = std::make_unique<atlan::shell::GuestSession>(
         config,
-        [weakSelf, repeats, perfPath, netPath, logFile = &_logFile](const std::string& line) {
+        [perfPath, netPath, perfLog, networkLog, logFile = &_logFile](const std::string& line) {
             logFile->write(line);
-            // Lines the guest repeats every frame are shown a few times only. Performance lines are also kept in
-            // Documents/perf.log and network lines in Documents/net.log, which the Files app can open and share.
+            // Performance lines are also kept in Documents/perf.log and network lines in Documents/net.log, which the
+            // Files app can open and share, when the launcher's developer settings ask for them.
             const bool network = line.starts_with("net ") || line.starts_with("http ") || line.starts_with("java online") ||
                                  line.starts_with("java MainActivity.IsConnected");
-            if (line.starts_with("perf ") || network) {
+            if ((perfLog && line.starts_with("perf ")) || (networkLog && network)) {
                 if (std::FILE* file = std::fopen((network ? netPath : perfPath).c_str(), "a")) {
                     std::fputs(line.c_str(), file);
                     std::fputc('\n', file);
                     std::fclose(file);
                 }
             }
-            std::string shown = line;
-            if (!repeats->admit(shown)) return;
-            NSString* text = [NSString stringWithUTF8String:shown.c_str()] ?: @"?";
-            dispatch_async(dispatch_get_main_queue(), ^{
-                ShellViewController* strongSelf = weakSelf;
-                [strongSelf append:text];
-                [strongSelf refresh];
-            });
         });
-    if (!_session->start()) [self note:@"thread start failed"];
+    if (!_session->start()) { [self note:@"thread start failed"]; return; }
     UIApplication.sharedApplication.idleTimerDisabled = YES;  // a navigation screen stays on without touches
-    [self refresh];
+    [_watch invalidate];
+    _watch = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer*) { [weakSelf watchSession]; }];
 }
 
 - (void)dealloc {
@@ -515,6 +397,7 @@ static constexpr bool kWriteSessionLog = true;
     (void)options;
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [ShellViewController new];
+    [LauncherSettings.shared applyAppearanceTo:self.window];
     [self.window makeKeyAndVisible];
     return YES;
 }
