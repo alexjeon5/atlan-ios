@@ -66,12 +66,29 @@ static constexpr bool kWriteSessionLog = true;
     return _surface.get();
 }
 
+// On an iPhone with a notch or Dynamic Island, the strip of the display it sits in, as an inset on that one side.
+// In landscape the safe area reports the same inset on both sides; the notch is at the device's top, which is on
+// the left in landscape-right and on the right in landscape-left. Elsewhere (iPad, iPhones without a notch) zero.
+- (UIEdgeInsets)notchInsets {
+    if (UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPhone) return UIEdgeInsetsZero;
+    const UIEdgeInsets safe = self.view.safeAreaInsets;
+    const CGFloat notch = MAX(safe.left, safe.right);
+    if (!(notch > 0)) return UIEdgeInsetsZero;
+    const UIInterfaceOrientation orientation = self.view.window.windowScene.interfaceOrientation;
+    return orientation == UIInterfaceOrientationLandscapeLeft ? UIEdgeInsetsMake(0, 0, 0, notch)
+                                                             : UIEdgeInsetsMake(0, notch, 0, 0);
+}
+
 // Where the guest surface is shown inside the metal view; touches map through the same rectangle.
 - (atlan::shell::ViewRect)shownRect {
     // The guest's screen is stretched over the whole display whatever its size, as the app's Android layout does
-    // on a phone; its UI is laid out for exactly that size.
+    // on a phone; its UI is laid out for exactly that size. Only the notch's strip is left out (black), since the
+    // notch would cover the guest's text there; the rounded corners and the home indicator are left as they are.
     const CGSize view = _metalView.bounds.size;
-    return {0, 0, view.width, view.height};
+    const UIEdgeInsets notch = self.notchInsets;
+    const CGFloat width = view.width - notch.left - notch.right;
+    if (!(width > 0)) return {0, 0, view.width, view.height};
+    return {notch.left, 0, width, view.height};
 }
 
 - (void)layoutSurface {
@@ -86,6 +103,22 @@ static constexpr bool kWriteSessionLog = true;
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self layoutSurface];
+}
+
+- (void)viewSafeAreaInsetsDidChange {
+    [super viewSafeAreaInsetsDidChange];
+    [self layoutSurface];
+}
+
+// Turning the phone over (landscape-left to landscape-right) keeps the size and the insets but moves the notch to
+// the other side; lay the surface out again once the new orientation is in place.
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    __weak ShellViewController* weakSelf = self;
+    [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        (void)context;
+        [weakSelf layoutSurface];
+    }];
 }
 
 - (void)forward:(NSSet<UITouch*>*)touches phase:(atlan::shell::TouchPhase)phase {
@@ -349,7 +382,8 @@ static constexpr bool kWriteSessionLog = true;
     config.library_path = library.UTF8String;
     config.audio_sink = &_audio;
     config.data_root = self.documentsPath.UTF8String;
-    _surface.set(atlan::shell::render_size(self.view.bounds.size.width, self.view.bounds.size.height,
+    const auto display = self.shownRect;  // the display less the notch's strip
+    _surface.set(atlan::shell::render_size(display.width, display.height,
                                            self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
     config.surface = &_surface;
     // The guest's own quit (its exit dialog): leave like the Android app does. The session thread has finished its
