@@ -64,7 +64,7 @@
 
 사용자가 새 버전이나 갱신된 원본 `.so`를 가져와도 호환성 문제가 바로 드러나게 한다.
 
-- 누락 감지(엔진, `shell/session.cpp`): 모든 호스트 서비스를 묶은 뒤 아무도 제공하지 않는 import를 `compat missing_import`(데이터 심볼은 `compat missing_data`)로 실행 전에 모두 적는다. `JNI_OnLoad` 직후에는 어댑터의 시작·프레임 진입점과 입력 바인딩이 부르는 네이티브 중 이미지에 없는 것(`compat missing_entry`, `compat missing_native`)을, `JNI_OnLoad`와 init 뒤에는 게스트가 ID를 얻었지만 호스트 구현이 없는 Java 메서드(`compat jni_unhandled`, `JavaBootstrap::unhandled_methods`)를 적는다. 조용히 넘기지 않고, 실제 호출 시점에는 지금처럼 이름을 대고 정지한다(`missing_service=`, 데이터 심볼 읽기는 `missing_data=`, Java 메서드는 `no host implementation for`). 세션은 로드한 라이브러리의 SHA-256도 `library sha256=`으로 남긴다.
+- 누락 감지(엔진, `engine/shell/session.cpp`): 모든 호스트 서비스를 묶은 뒤 아무도 제공하지 않는 import를 `compat missing_import`(데이터 심볼은 `compat missing_data`)로 실행 전에 모두 적는다. `JNI_OnLoad` 직후에는 어댑터의 시작·프레임 진입점과 입력 바인딩이 부르는 네이티브 중 이미지에 없는 것(`compat missing_entry`, `compat missing_native`)을, `JNI_OnLoad`와 init 뒤에는 게스트가 ID를 얻었지만 호스트 구현이 없는 Java 메서드(`compat jni_unhandled`, `JavaBootstrap::unhandled_methods`)를 적는다. 조용히 넘기지 않고, 실제 호출 시점에는 지금처럼 이름을 대고 정지한다(`missing_service=`, 데이터 심볼 읽기는 `missing_data=`, Java 메서드는 `no host implementation for`). 세션은 로드한 라이브러리의 SHA-256도 `library sha256=`으로 남긴다.
 - 검증된 빌드 목록: 앱에 넣어 두지 않고 이 저장소 main의 `adapters/atlan/verified_versions.json` 한 파일을 런처가 시작할 때(그리고 앱이 다시 활성화될 때 몇 분 간격으로) raw GitHub 주소로 받아 Application Support에 저장한다. 받지 못하면 마지막으로 받은 사본을 쓰고, 그것도 없으면 상태를 "확인 불가"로만 보인다. 실행은 막지 않는다. 새 빌드를 검증하면 이 파일에 한 줄을 더하는 것만으로 설치된 앱에 반영되고 IPA를 다시 깔 필요가 없다.
 - 목록 형식(1): `{"format": 1, "updated": "YYYY-MM-DD", "builds": [{"name", "version", "sha256"}]}`. 빌드는 패키지 안 네이티브 라이브러리의 SHA-256으로 식별하고(같은 버전 문자열로 다시 포장하거나 고친 라이브러리를 검증된 것으로 착각하지 않게), 이름·버전은 표시용이다. 이 세 키 말고는 받지 않으므로 다운로드 주소나 메모가 공개 파일에 섞이지 않는다(`tests/package_tests.cpp`가 저장소의 파일도 검사). 항목은 `atlan-verified-entry <ATLAN 폴더>`로 만든다.
 - 주소는 `adapters/atlan/verified_versions.hpp`의 `verified_list_url` 하나다. 비공개 어댑터 저장소로 옮기면 raw 주소를 인증 없이 받을 수 없으므로 GitHub Pages나 별도 서버 같은 공개 위치가 따로 필요하다.
@@ -81,7 +81,7 @@
 - 경계, 모듈 분류, 충돌 없는 단계별 리팩터 순서는 [엔진/어댑터 경계](engine-adapter.md)에 있다. 단계 0~4는 진행 중인 작업과 겹치지 않게 병행하고, 디렉터리 이동(단계 5)은 진행 중 브랜치가 정리된 뒤 한 번에 한다.
 - 현재는 한 앱이 부르는 함수만 구현하므로 다른 앱은 빠진 함수를 채워야 한다. M10의 누락 감지를 엔진 기능으로 둬서 그 목록을 바로 보이게 한다.
 - 공개 범위: 엔진만 공개 대상이다. 원본 앱의 바이너리, 분석 자료, 다운로드 주소와 취득 방법은 계속 `original/`·`private/`에만 둔다. CPU 코어의 GPL-2.0-or-later 출처 때문에 분리 전에 파일별 SPDX와 출처를 다시 확인한다.
-- 진행: 단계 0~3 완료, 단계 5 일부. 세션은 `AppAdapter`(`shell/app_adapter.hpp`)로만 앱을 알고, 아틀란 고유 코드는 모두 `adapters/atlan/`(`atlan_adapter` 라이브러리)에 있다. 남은 것은 엔진 디렉터리 이동(단계 5 나머지)과 공개 API 정리(단계 6).
+- 진행: 단계 0~3과 5 완료. 엔진은 `engine/`(`atlan_runtime`, `atlan_shell`)에, 아틀란 고유 코드는 모두 `adapters/atlan/`(`atlan_adapter`)에 있다. 세션은 `AppAdapter`(`engine/shell/app_adapter.hpp`)로만 앱을 안다. 남은 것은 공개 API 정리와 저장소 분리 판단(단계 6).
 - 검증 기준: 합성 어댑터만으로 엔진 단독 테스트가 통과하고, 엔진 디렉터리 코드에 앱 고유 이름·상수가 없다.
 
 ### 추후: 공개 엔진 + 비공개 앱 저장소 (M11 단계 5·6 이후)

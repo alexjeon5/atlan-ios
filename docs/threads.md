@@ -1,6 +1,6 @@
 # 게스트 스레드
 
-원본 라이브러리가 만드는 작업 스레드를 위한 모델이다. 구현은 `GuestThreads`(`include/atlan/threads.hpp`)와 `ImportDispatcher`의 실행 루프다.
+원본 라이브러리가 만드는 작업 스레드를 위한 모델이다. 구현은 `GuestThreads`(`engine/include/atlan/threads.hpp`)와 `ImportDispatcher`의 실행 루프다.
 
 ## 선택: 호스트 스레드 하나 위의 협력 스케줄링
 

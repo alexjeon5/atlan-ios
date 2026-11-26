@@ -10,4 +10,4 @@ Kernarium 정수 코어는 VFP·Advanced SIMD를 실행하지 않아서, `Runtim
 - Thumb 상태의 VFP는 아직 실행하지 않는다.
 - 누적 예외 플래그는 `IOC`(비교의 unordered)만 기록한다. NaN 전파는 호스트 부동소수점 동작을 따른다.
 - 4바이트로 정렬되지 않은 VFP 메모리 접근은 정렬 fault로 보고한다.
-- `VMLA`류는 곱을 먼저 반올림하는 비융합 연산이며, 이를 위해 `src/vfp.cpp`는 `-ffp-contract=off`로 컴파일한다.
+- `VMLA`류는 곱을 먼저 반올림하는 비융합 연산이며, 이를 위해 `engine/src/vfp.cpp`는 `-ffp-contract=off`로 컴파일한다.

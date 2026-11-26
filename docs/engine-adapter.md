@@ -14,22 +14,22 @@
 | 위치 | 분류 | 비고 |
 | --- | --- | --- |
 | `third_party/kernarium` | 엔진 | CPU·디코더. GPL-2.0-or-later 출처 유지 |
-| `src/memory.cpp`, `runtime.cpp`, `vfp.cpp`, `include/atlan/cpu_state.hpp` | 엔진 | 게스트 주소 공간과 실행 |
-| `src/elf.cpp` | 엔진 | ELF32 ARM 로더 |
-| `src/imports.cpp`, `lifetime.cpp` | 엔진 | import 디스패치, atexit·생성자 |
-| `src/libc_services.cpp`, `heap.cpp`, `threads.cpp` | 엔진 | libc·힙·스레드 서비스 |
-| `src/native_functions.cpp`, `native_runtime.cpp`, `inflate.cpp`, `profiler.cpp` | 엔진 | 게스트 함수의 네이티브 대체(표준 런타임 라이브러리 이름만)와 프로파일러. 앱 고유 대체 집합은 어댑터가 넘김. [네이티브 대체](native.md) |
-| `src/files.cpp` | 엔진 | 가상 파일 디스크립터. 파일 이름·배치는 어댑터가 정함 |
-| `src/abi.cpp`, `src/android_log.cpp` | 엔진 | 인자 읽기·printf 전개·로그 |
-| `src/jni.cpp` (`JavaBootstrap`) | 엔진 | 테이블·트랩·핸들 구조와 표준 Java 동작(`java/lang/String`)만. 앱의 Java 메서드와 그 응답은 어댑터가 `register_method`로 등록 |
-| `src/demo.cpp`, `tools/`, `tests/` | 엔진 | 합성 입력만 사용 |
-| `shell/session.*` | 엔진 | 스레드·예산·중지·프레임 루프. 앱 고유 값과 시작 순서는 `AppAdapter`로만 받음 |
-| `shell/app_adapter.hpp` | 엔진 | 엔진이 앱에 묻는 인터페이스(`AppAdapter`, `AppHost`, `AppStartup`) |
-| `shell/input.*`, `http_client.*`, `log_file.*`, `json.*`, `sha256.*` | 엔진 | 입력 큐·바인딩 해석, HTTP, 로그 파일, 작은 JSON 읽기, SHA-256. 바인딩 값은 어댑터 쪽 파일 |
+| `engine/src/memory.cpp`, `runtime.cpp`, `vfp.cpp`, `engine/include/atlan/cpu_state.hpp` | 엔진 | 게스트 주소 공간과 실행 |
+| `engine/src/elf.cpp` | 엔진 | ELF32 ARM 로더 |
+| `engine/src/imports.cpp`, `lifetime.cpp` | 엔진 | import 디스패치, atexit·생성자 |
+| `engine/src/libc_services.cpp`, `heap.cpp`, `threads.cpp` | 엔진 | libc·힙·스레드 서비스 |
+| `engine/src/native_functions.cpp`, `native_runtime.cpp`, `inflate.cpp`, `profiler.cpp` | 엔진 | 게스트 함수의 네이티브 대체(표준 런타임 라이브러리 이름만)와 프로파일러. 앱 고유 대체 집합은 어댑터가 넘김. [네이티브 대체](native.md) |
+| `engine/src/files.cpp` | 엔진 | 가상 파일 디스크립터. 파일 이름·배치는 어댑터가 정함 |
+| `engine/src/abi.cpp`, `engine/src/android_log.cpp` | 엔진 | 인자 읽기·printf 전개·로그 |
+| `engine/src/jni.cpp` (`JavaBootstrap`) | 엔진 | 테이블·트랩·핸들 구조와 표준 Java 동작(`java/lang/String`)만. 앱의 Java 메서드와 그 응답은 어댑터가 `register_method`로 등록 |
+| `engine/src/demo.cpp`, `tools/`, `tests/` | 엔진 | 합성 입력만 사용 |
+| `engine/shell/session.*` | 엔진 | 스레드·예산·중지·프레임 루프. 앱 고유 값과 시작 순서는 `AppAdapter`로만 받음 |
+| `engine/shell/app_adapter.hpp` | 엔진 | 엔진이 앱에 묻는 인터페이스(`AppAdapter`, `AppHost`, `AppStartup`) |
+| `engine/shell/input.*`, `http_client.*`, `log_file.*`, `json.*`, `sha256.*` | 엔진 | 입력 큐·바인딩 해석, HTTP, 로그 파일, 작은 JSON 읽기, SHA-256. 바인딩 값은 어댑터 쪽 파일 |
 | `adapters/atlan/` | 어댑터 | 패키지 위치, 설정 파일·폴더 별칭, Java 쪽 응답, 시작·프레임 진입점, 프레임 요청 규약 |
 | `adapters/atlan/java_services.*`, `app_package.*`, `guest_ini.*` | 어댑터 | Java 쪽 네트워크, 앱 패키지(포장 해제와 라이브러리 선택), 설정 파일 형식. APK(ZIP) 읽기 자체는 범용이라 나중에 엔진 쪽으로 나눌 수 있음 |
-| `shell/data_file.*` | **경계** | 부분 읽기·교체·거부 메커니즘은 엔진, 헤더 형식 검증은 어댑터 |
-| `shell/render_config.hpp` | 확인 필요 | 앱 고유 값이 있으면 어댑터로 |
+| `engine/shell/data_file.*` | **경계** | 부분 읽기·교체·거부 메커니즘은 엔진, 헤더 형식 검증은 어댑터 |
+| `engine/shell/render_config.hpp` | 확인 필요 | 앱 고유 값이 있으면 어댑터로 |
 | `platform/gles`, `platform/android` | 엔진 쪽 호스트 계층 | 기기 GLES2·EGL, Android 액티비티·JNI·OpenSL ES. 앱은 `make_app_adapter`(`platform/android/android_app.hpp`)와 `GuestActivity` 하위 클래스로만 들어온다. [Android](android.md) |
 | `adapters/atlan/android` | 어댑터 | 아틀란 APK의 매니페스트·액티비티(데이터 폴더, 뒤로 두 번 종료)와 `make_app_adapter` |
 | `platform/ios`, `platform/macos` | 엔진 쪽 호스트 계층 | 앱 고유 UI·번들 설정은 어댑터. iOS 앱은 지금 `AtlanAdapter`를 직접 만들고, 데이터 폴더 이름과 로그 분류도 아직 앱 기준 |
@@ -47,12 +47,18 @@
 ## 목표 구조
 
 ```text
-engine/            CPU, 메모리, ELF, import, libc, JNI 구조, 서비스 인터페이스
+engine/            앱을 모르는 런타임
+  include/atlan/   공개 헤더(CPU 상태, 메모리, ELF, import, libc, JNI, GL, 오디오 …)
+  src/             그 구현 (atlan_runtime)
+  shell/           게스트 세션, AppAdapter 인터페이스, 입력·HTTP·로그 (atlan_shell)
+third_party/       CPU 코어(Kernarium 출처, GPL-2.0-or-later)
 adapters/
-  synthetic/       공개 테스트용 합성 어댑터(엔진 단독 검증)
-  atlan/           앱별 시작 순서·JNI 응답·입력 연결(값은 로컬 주입)
-platform/          ios, macos 호스트 서비스
+  atlan/           아틀란 어댑터 (atlan_adapter): 패키지, 설정 파일, Java 쪽, 시작 순서, 런처 UI(ios/, android/)
+platform/          ios, macos, android, apple 공통 호스트 계층
+tools/, tests/, bench/  엔진 도구와 합성 테스트 (아틀란 쪽 도구는 이름에 드러남)
 ```
+
+`synthetic/` 합성 어댑터는 따로 두지 않았다. 합성 어댑터 테스트는 `tests/shell_tests.cpp` 안에 있다.
 
 의존은 한 방향이다. `adapters → engine`, `platform → engine`이고 엔진은 어댑터를 모른다. 엔진 코드에 앱 이름이나 앱 고유 상수가 보이면 경계 위반이다.
 
@@ -66,7 +72,7 @@ platform/          ios, macos 호스트 서비스
    - 엔진이 스스로 등록하는 것은 표준 라이브러리(`java/lang/String`)뿐이다.
 
    그래서 별도 인터페이스를 끼우면 같은 일을 하는 층만 하나 늘어난다. 앱마다 클래스 조회를 거부하거나 필드 기본값을 바꿔야 하는 경우가 생기면 그때 `install_java`에 훅을 더한다.
-2. **`AppAdapter`** (`shell/app_adapter.hpp`, 계획 때 이름은 `AppProfile`): `SessionConfig::adapter`로 넘기고 `GuestSession`이 이것만 보고 구동한다. 세션 하나에 어댑터 하나다.
+2. **`AppAdapter`** (`engine/shell/app_adapter.hpp`, 계획 때 이름은 `AppProfile`): `SessionConfig::adapter`로 넘기고 `GuestSession`이 이것만 보고 구동한다. 세션 하나에 어댑터 하나다.
    - 라이브러리: `find_library`(데이터 폴더에서 찾기), `missing_library`, `unpack_library`(APK·앱 고유 포장 풀기)
    - 파일: `configure_files`(별칭, 읽기 필터)
    - Java: `install_java`/`uninstall_java`(Java 메서드 등록과 정리), `deliver`(Java 쪽이 나중에 보내는 응답을 게스트 호출로 전달)
@@ -84,10 +90,10 @@ platform/          ios, macos 호스트 서비스
 | --- | --- | --- | --- |
 | 0 | 이 문서와 로드맵 항목 | 없음(문서만) | 완료 |
 | 1 | 규칙 확정: 새 코드는 엔진/어댑터 중 어디인지 PR 설명에 적는다. 엔진 코드에 앱 고유 이름·상수 금지를 `AGENTS.md`에 반영 | 없음 | 완료(`AGENTS.md`). PR을 쓰지 않으므로 커밋 메시지에 적음 |
-| 2 | `JavaHost` 인터페이스 추가와 `JavaBootstrap`이 이를 쓰도록 변경. 기본 구현은 현재 동작 유지 | `src/jni.cpp`·`jni.hpp`: ABI/JNI 브랜치와 겹침 | 완료(별도 인터페이스 없이 `register_method`와 `AppHost`로 충분함을 확인, 위 설명) |
-| 3 | `AppProfile` 도입과 `GuestSession`이 시작 순서를 프로필에서 읽도록 변경 | `shell/session.*`: 스레딩 브랜치와 겹칠 수 있음 | 완료(`AppAdapter`, `adapters/atlan/`). 동작 변화 없음 |
+| 2 | `JavaHost` 인터페이스 추가와 `JavaBootstrap`이 이를 쓰도록 변경. 기본 구현은 현재 동작 유지 | `engine/src/jni.cpp`·`jni.hpp`: ABI/JNI 브랜치와 겹침 | 완료(별도 인터페이스 없이 `register_method`와 `AppHost`로 충분함을 확인, 위 설명) |
+| 3 | `AppProfile` 도입과 `GuestSession`이 시작 순서를 프로필에서 읽도록 변경 | `engine/shell/session.*`: 스레딩 브랜치와 겹칠 수 있음 | 완료(`AppAdapter`, `adapters/atlan/`). 동작 변화 없음 |
 | 4 | 합성 어댑터 추가: 엔진 단독으로 JNI·시작·입력 경로를 합성 이미지로 검증하는 테스트 | 새 파일 위주 | 시작 경로는 `tests/shell_tests.cpp`의 합성 어댑터로 검증 중. JNI·입력 경로는 단계 2 뒤 |
-| 5 | 디렉터리 이동(`git mv`만, 내용 변경 없음)과 CMake 타깃 정리. 기존 `atlan_runtime`은 별칭으로 유지 | 모든 브랜치와 충돌 가능 | 일부 완료: 아틀란 파일을 `adapters/atlan/`로 모음. `src/`·`include/`·`shell/`을 `engine/` 아래로 옮기는 것은 엔진 코드를 고치는 작업이 없는 때에 한 번에 |
+| 5 | 디렉터리 이동(`git mv`만, 내용 변경 없음)과 CMake 경로 정리. 타깃 이름(`atlan_runtime`, `atlan_shell`, `atlan_adapter`)은 그대로 | 모든 브랜치와 충돌 가능 | 완료: 아틀란 파일은 `adapters/atlan/`, 엔진은 `engine/{include,src,shell}`. include 문은 그대로(`"atlan/..."`, `"shell/..."`) |
 | 6 | 엔진 공개 API 정리, 누락 함수 감지(M10)를 엔진 기능으로 고정, 별도 저장소로 분리할지 판단 | 낮음 | 구동 안정 이후 |
 
 오디오·그래픽 같은 신규 호스트 서비스는 처음부터 "엔진 서비스 + 어댑터가 채우는 설정"으로 나눠 만든다. 그러면 단계 5의 이동 때 손댈 것이 줄어든다.
@@ -98,4 +104,4 @@ platform/          ios, macos 호스트 서비스
 - **라이선스**: CPU 코어가 GPL-2.0-or-later 출처이므로 엔진을 따로 올리면 같은 조건을 이어받는다. 분리 전에 파일별 SPDX와 출처를 다시 확인한다.
 - **공개 범위**: 엔진만 공개한다. 원본 앱의 바이너리, 분석 자료, 다운로드 주소와 취득 방법은 지금처럼 `original/`·`private/`에만 둔다. 어댑터의 앱별 값도 같다.
 - **저장소 구성**: 분리 뒤에는 공개 엔진 저장소와, 엔진을 가져와 앱 어댑터와 앱별 파일을 IPA에 묶는 비공개 저장소로 나눈다. 자세한 내용은 [로드맵](roadmap.md)의 "공개 엔진 + 비공개 앱 저장소"를 본다.
-- **되돌리기**: 단계 5 이전에는 디렉터리 이동이 없으므로 언제든 멈춰도 현재 구조가 그대로 남는다.
+- **되돌리기**: 단계 5의 이동은 이름 바꾸기뿐이라 git이 다른 브랜치의 변경을 새 경로로 옮겨 준다. 옛 경로에 새 파일을 더한 브랜치는 CMake 줄만 고치면 된다.

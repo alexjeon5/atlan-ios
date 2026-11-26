@@ -20,7 +20,7 @@
 
 함수 전체가 아니라 명령 하나만 바꿀 수도 있다. `NativeSet::instructions`에 멤버 이름과 팩토리를 넣으면, 찾은 주소를 그 명령으로 보고 설치할 때 명령의 인코딩을 팩토리에 넘긴다. 팩토리가 그 명령을 대신할 서비스를 돌려주면 같은 UDF 방식으로 설치되고, 서비스가 끝나면 LR이 아니라 다음 명령으로 이어 간다. 팩토리가 서비스를 주지 않으면(모르는 인코딩) 그 집합은 동작이 다른 것으로 보고 남겨 둔다. Thumb IT 블록 안의 명령은 대상이 아니다.
 
-`install_native_functions()`(`include/atlan/native_functions.hpp`)는 집합(`NativeSet`) 단위로 처리한다. 집합은 함께 바뀌거나 함께 남아야 하는 함수 묶음이다(같은 스트림 상태를 공유하는 zlib 호출들). 필수 멤버를 모두 찾고 검증을 통과해야 설치된다. import 서비스를 연결한 뒤, 게스트 코드를 실행하기 전에 한 번 호출한다. 결과는 로그 한 줄로 남는다: 바뀐 함수, 동작이 달라 남겨 둔 집합, 찾지 못한 집합.
+`install_native_functions()`(`engine/include/atlan/native_functions.hpp`)는 집합(`NativeSet`) 단위로 처리한다. 집합은 함께 바뀌거나 함께 남아야 하는 함수 묶음이다(같은 스트림 상태를 공유하는 zlib 호출들). 필수 멤버를 모두 찾고 검증을 통과해야 설치된다. import 서비스를 연결한 뒤, 게스트 코드를 실행하기 전에 한 번 호출한다. 결과는 로그 한 줄로 남는다: 바뀐 함수, 동작이 달라 남겨 둔 집합, 찾지 못한 집합.
 
 ## 현재 집합 (`runtime_library_sets()`)
 
@@ -33,7 +33,7 @@
 | PNG 행 필터 (`image_library_sets()`) | `png_read_filter_row` | 픽셀 깊이·필터 종류·행 길이 조합의 결과 행 비교. 모르는 필터 값은 게스트 코드에 넘김 |
 | ETC1 디코드 (`image_library_sets()`) | `PVRTDecompressETC` | 여러 크기(블록보다 작은 밉맵 단계 포함)의 임의 블록 디코드 결과와 반환값 비교. 픽셀 바이트 순서가 다른 두 변형 중 맞는 쪽이 설치됨. 비교하지 않은 모드는 게스트 코드에 넘김 |
 
-inflate 스트림 집합이 설치되면 디코더 내부 상태가 호스트에 있으므로 `inflateSync`·`inflateSetDictionary`·`inflateSyncPoint`가 호출될 경우 명시적으로 정지한다. 디코더(`src/inflate.cpp`)는 입력·출력을 임의 크기로 나눠 받아도 이어서 동작하며, 호스트 zlib에 의존하지 않는다.
+inflate 스트림 집합이 설치되면 디코더 내부 상태가 호스트에 있으므로 `inflateSync`·`inflateSetDictionary`·`inflateSyncPoint`가 호출될 경우 명시적으로 정지한다. 디코더(`engine/src/inflate.cpp`)는 입력·출력을 임의 크기로 나눠 받아도 이어서 동작하며, 호스트 zlib에 의존하지 않는다.
 
 이 집합들은 특정 앱이 아니라 툴체인과 공용 라이브러리의 표준 이름에 대한 것이라 엔진 쪽에 둔다. 앱 고유 함수의 집합은 어댑터가 만들어 같은 `install_native_functions()`에 넘긴다([엔진/어댑터 경계](engine-adapter.md)).
 

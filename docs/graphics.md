@@ -1,11 +1,11 @@
 # 그래픽: GLES2 → Metal
 
-게스트의 GLES2/EGL 호출은 `src/gles.cpp`가 인자를 호스트 값(`GlCall`)으로 풀어 `GlBackend`에 넘긴다. 실제 렌더링은 세 층으로 나뉜다.
+게스트의 GLES2/EGL 호출은 `engine/src/gles.cpp`가 인자를 호스트 값(`GlCall`)으로 풀어 `GlBackend`에 넘긴다. 실제 렌더링은 세 층으로 나뉜다.
 
 | 층 | 파일 | 역할 |
 | --- | --- | --- |
-| 번역기 | `src/glsl.cpp` | GLSL ES 1.00 소스를 MSL로 바꾸고, uniform 블록 배치와 attribute/sampler 슬롯을 계산한다 |
-| 상태기계 | `src/gl_context.cpp` | 셰이더·프로그램·버퍼·텍스처와 고정 상태를 추적하고, draw 호출을 자체 완결된 `GlDraw` 패킷으로 만든다 |
+| 번역기 | `engine/src/glsl.cpp` | GLSL ES 1.00 소스를 MSL로 바꾸고, uniform 블록 배치와 attribute/sampler 슬롯을 계산한다 |
+| 상태기계 | `engine/src/gl_context.cpp` | 셰이더·프로그램·버퍼·텍스처와 고정 상태를 추적하고, draw 호출을 자체 완결된 `GlDraw` 패킷으로 만든다 |
 | 싱크 | `platform/apple/metal_gl_backend.mm` | `GlDraw`/clear/present를 Metal로 실행한다 (테스트에서는 기록기) |
 
 번역기와 상태기계는 플랫폼 독립 C++20이라 Linux에서 단위 테스트된다. Metal 코드만 Apple 전용이다.
@@ -51,7 +51,7 @@ GL 기능은 게스트가 실제로 부르는 것만 구현하고, 나머지는 
 - draw는 삼각형 계열(`GL_TRIANGLES`, `GL_TRIANGLE_STRIP`)을 지원한다. 인덱스는 ushort/ubyte, attribute는 float/byte/short/ubyte, VBO를 지원한다.
 - 텍스처는 RGBA/UNSIGNED_BYTE와 밉맵 체인을 지원한다. 레벨별로 보관하고, 레벨 0부터 1x1까지 크기가 맞는 완전한 체인이면 Metal 밉 텍스처로 올리며, 밉맵 필터인데 체인이 불완전하면 GL처럼 검게 읽힌다.
 - 넓은 선(`glLineWidth`), 압축 텍스처, 스텐실·scissor·FBO·`glBlendEquation` 계열은 아직 구현하지 않았다(넓은 선은 쿼드 확장으로 할 계획).
-- 인덱스가 element 버퍼에 있고 attribute가 클라이언트 배열인 draw(지도의 3D 랜드마크, 현재 위치 표시 등)는 서비스(`src/gles.cpp`)가 element 버퍼에 올린 내용을 기억해 가장 큰 인덱스까지 정점을 모은다. 전에는 정점이 모이지 않아 이런 draw가 보이지 않았다.
+- 인덱스가 element 버퍼에 있고 attribute가 클라이언트 배열인 draw(지도의 3D 랜드마크, 현재 위치 표시 등)는 서비스(`engine/src/gles.cpp`)가 element 버퍼에 올린 내용을 기억해 가장 큰 인덱스까지 정점을 모은다. 전에는 정점이 모이지 않아 이런 draw가 보이지 않았다.
 
 ## 검증
 
