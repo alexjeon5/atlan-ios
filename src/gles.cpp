@@ -145,6 +145,7 @@ struct GlesBinder {
                     if (buffer) {
                         if (g.array_buffer_ == id) g.array_buffer_ = 0;
                         if (g.element_buffer_ == id) g.element_buffer_ = 0;
+                        g.element_data_.erase(id);
                     }
                     g.backend_.execute(call);
                 }
@@ -176,6 +177,11 @@ struct GlesBinder {
             call.a = {c.arg(0), c.arg(1), 0, c.arg(3)};  // target, size, (unused), usage
             if (c.arg(2) != 0 && !read_bytes(c, c.arg(2), c.arg(1), call.data)) return "glBufferData data is unreadable or too large";
             if (c.arg(2) == 0 && c.arg(1) > max_payload) return "glBufferData size too large";
+            if (c.arg(0) == element_buffer && g.element_buffer_ != 0) {
+                auto& shadow = g.element_data_[g.element_buffer_];
+                shadow = call.data;
+                shadow.resize(c.arg(1));
+            }
             g.backend_.execute(call);
             return std::nullopt;
         });
@@ -362,8 +368,25 @@ struct GlesBinder {
                     max_index = std::max(max_index, v);
                 }
                 if (auto e = g.gather(c, call, max_index + 1)) return e;
-            } else if (auto e = g.gather(c, call, 0)) {
-                return e;
+            } else {
+                // Indices in a buffer: client-side attributes still need the vertex range the indices reach.
+                const bool client = std::any_of(g.attribs_.begin(), g.attribs_.end(), [](const auto& a) { return a.enabled && a.buffer == 0; });
+                std::uint32_t vertices = 0;
+                if (client) {
+                    const auto it = g.element_data_.find(g.element_buffer_);
+                    const std::uint64_t end = std::uint64_t{c.arg(3)} + std::uint64_t{c.arg(1)} * size;
+                    // Indices outside the buffer: nothing is gathered and the backend drops the draw, as a driver would.
+                    if (it != g.element_data_.end() && end <= it->second.size() && c.arg(1) != 0) {
+                        const std::byte* p = it->second.data() + c.arg(3);
+                        for (std::uint32_t i = 0; i < c.arg(1); ++i) {
+                            std::uint32_t v = 0;
+                            for (std::uint32_t k = 0; k < size; ++k) v |= std::uint32_t(p[i * size + k]) << (8 * k);
+                            max_index = std::max(max_index, v);
+                        }
+                        vertices = max_index + 1;
+                    }
+                }
+                if (auto e = g.gather(c, call, vertices)) return e;
             }
             g.backend_.execute(call);
             return std::nullopt;

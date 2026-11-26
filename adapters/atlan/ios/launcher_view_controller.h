@@ -15,5 +15,6 @@
 @interface LauncherViewController : UIViewController
 - (instancetype)initWithDelegate:(id<LauncherDelegate>)delegate;
 @property(nonatomic) BOOL running;  // the navigation is running underneath
-@property(nonatomic) BOOL landscapeOnly;  // turns with the device until the navigation has started
+@property(nonatomic) BOOL landscapeOnly;
+@property(nonatomic) BOOL stopped;  // the navigation stopped by itself; the big button closes the app  // turns with the device until the navigation has started
 @end

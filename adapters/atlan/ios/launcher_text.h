@@ -53,6 +53,7 @@ static NSString* const location_in_documents = @"앱 Documents/%@";
 // Start
 static NSString* const start = @"내비게이션 시작";
 static NSString* const resume = @"내비게이션으로 돌아가기";
+static NSString* const reopen = @"앱을 닫고 다시 열기";  // after the navigation stopped by itself
 static NSString* const folder_missing = @"폴더 없음";
 static NSString* const folders_missing = @"%@ 폴더 없음";
 static NSString* const package_missing = @"앱 패키지 없음";

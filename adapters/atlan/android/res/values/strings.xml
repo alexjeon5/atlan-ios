@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<resources>
+    <string name="app_name">Atlan</string>
+    <string name="back_again">\'뒤로\' 한번 더 누르시면 종료됩니다.</string>
+    <string name="missing_data">ATLAN 폴더가 없습니다.\n\n%1$s\n또는\n%2$s</string>
+</resources>

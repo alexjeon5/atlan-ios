@@ -143,6 +143,12 @@ std::string fingerprint(const AtlanDataStatus& s) {
     if (portrait != _shownPortrait) [self render];
 }
 
+- (void)setStopped:(BOOL)stopped {
+    if (_stopped == stopped) return;
+    _stopped = stopped;
+    if (self.isViewLoaded) [self render];
+}
+
 - (void)setRunning:(BOOL)running {
     if (_running == running) return;
     _running = running;
@@ -280,6 +286,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
 - (UIView*)buildScreen {
     LauncherSettings* settings = LauncherSettings.shared;
     if (_shown == Screen::settings) return [self settingsScreen];
+    if (_stopped) return [self startScreen];
     if (!_running && settings.needsFolderChoice) return [self chooseScreen];
     if (!_running && !settings.setupDone && !_status.ready()) return [self welcomeScreen];
     if (!_running && _status.ready() && !settings.autoStartAsked) return [self autoStartScreen];
@@ -537,8 +544,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                             radius:m.cardRadius];
     [card addAction:[UIAction actionWithHandler:^(UIAction*) { [weakSelf openSettings:Tab::map]; }]
    forControlEvents:UIControlEventTouchUpInside];
-    LKStartButton* start = [[LKStartButton alloc] initWithTitle:_running ? text::resume : text::start];
-    start.enabled = ready || _running;
+    LKStartButton* start = [[LKStartButton alloc] initWithTitle:_stopped ? text::reopen : _running ? text::resume : text::start];
+    start.enabled = ready || _running || _stopped;
     [start addAction:[UIAction actionWithHandler:^(UIAction*) { [weakSelf startNavigation]; }]
     forControlEvents:UIControlEventTouchUpInside];
     UIButton* gear = LKButton(text::settings, @"slider.horizontal.3", LKButtonSecondary, m.settingsButton,
