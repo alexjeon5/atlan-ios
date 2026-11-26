@@ -32,6 +32,7 @@ public:
     void install_java(AppHost& host, bool frame_requests) override;
     void uninstall_java() override;
     [[nodiscard]] AppStartup startup() const override;
+    [[nodiscard]] std::vector<NativeSet> native_sets() const override;
     bool deliver(AppHost& host) override;
     [[nodiscard]] bool frames_on_request() const override { return on_demand_; }
     [[nodiscard]] bool frame_requested() const override { return render_requested_; }

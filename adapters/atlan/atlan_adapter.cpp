@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/atlan_adapter.hpp"
+#include "adapters/atlan/quad_geometry.hpp"
 #include "shell/app_package.hpp"
 #include "shell/guest_ini.hpp"
 #include "shell/java_services.hpp"
@@ -138,6 +139,11 @@ void AtlanAdapter::install_java(AppHost& host, bool frame_requests) {
 
 void AtlanAdapter::uninstall_java() { java_services_.reset(); }
 
+std::vector<NativeSet> AtlanAdapter::native_sets() const {
+    std::vector<NativeSet> sets;
+    sets.push_back(geometry::quad_geometry_set());
+    return sets;
+}
 AppStartup AtlanAdapter::startup() const {
     AppStartup startup;
     startup.receiver_class = activity_class;
