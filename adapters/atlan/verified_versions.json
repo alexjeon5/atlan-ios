@@ -1,5 +1,8 @@
 {
   "format": 1,
   "updated": "2026-11-26",
-  "builds": []
+  "builds": [
+    {"name": "Atlan5", "version": "8.2.35", "sha256": "571d584e836ef700bd3e740724f4a985a81e5e09d3884f714ac28f6222137a11"},
+    {"name": "Atlan3DA", "version": "6.4.21", "sha256": "72011a020f0b24e850338801f414b0ae18f7fe23c61382cdffd47e2ee0201bcf"}
+  ]
 }
