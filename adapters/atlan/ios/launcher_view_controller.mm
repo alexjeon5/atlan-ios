@@ -312,8 +312,9 @@ std::string fingerprint(const AtlanDataStatus& s) {
 
 - (UIView*)nameLine {
     const auto& m = LauncherMetrics::current();
+    // The trailing spacer keeps the version beside the name when the line is given the full width.
     UIStackView* line = LKRow(@[LKLabel(text::app_name, m.head, UIFontWeightSemibold, LauncherColor.ink),
-                                LKLabel(launcherVersion(), m.caption, UIFontWeightRegular, LauncherColor.muted)], 8);
+                                LKLabel(launcherVersion(), m.caption, UIFontWeightRegular, LauncherColor.muted), LKSpacer()], 8);
     line.alignment = UIStackViewAlignmentFirstBaseline;
     return line;
 }
@@ -550,6 +551,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
         }
     }
     UIStackView* cardContent = LKColumn(@[topColumn, LKSpacer(), LKColumn(bottom, 0)], 0);
+    [cardContent setCustomSpacing:16 afterView:topColumn];  // at least this much above the rows
     LKCard* card = [[LKCard alloc] initWithContent:cardContent
                                            padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, blocked ? m.cardPadding : 4, m.cardPadding)
                                             radius:m.cardRadius];
@@ -562,12 +564,17 @@ std::string fingerprint(const AtlanDataStatus& s) {
     UIButton* gear = LKButton(text::settings, @"slider.horizontal.3", LKButtonSecondary, m.settingsButton,
                               ^{ [weakSelf openSettings:Tab::general]; });
     if (self.portrait) {
-        // Upright: the name at the top; the folder card, the start button and settings low, within thumb reach.
-        // On iPad the whole block sits in the middle.
-        [start.heightAnchor constraintEqualToConstant:m.portraitStart].active = YES;
-        UIStackView* block = LKColumn(@[card, start, gear], m.gap);
-        if (m.container.width > 0) return [self centeredVertically:LKColumn(@[[self nameLine], block], m.gap + 8)];
-        return LKColumn(@[[self nameLine], LKSpacer(), block], m.gap);
+        // Upright: the name, the folder card, then the start button taking the rest of the height (at least the
+        // designed size) so the screen has no empty band; settings at the bottom. On iPad the block sits centred.
+        if (m.container.width > 0) {
+            [start.heightAnchor constraintEqualToConstant:m.portraitStart].active = YES;
+            return [self centeredVertically:LKColumn(@[[self nameLine], LKColumn(@[card, start, gear], m.gap)], m.gap + 8)];
+        }
+        [start.heightAnchor constraintGreaterThanOrEqualToConstant:m.portraitStart].active = YES;
+        [start setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisVertical];
+        [card setContentHuggingPriority:UILayoutPriorityDefaultHigh + 1 forAxis:UILayoutConstraintAxisVertical];
+        [card setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
+        return LKColumn(@[[self nameLine], card, start, gear], m.gap);
     }
     UIStackView* left = LKColumn(@[[self nameLine], card], m.gap);
     UIStackView* right = LKColumn(@[start, gear], m.gap);
