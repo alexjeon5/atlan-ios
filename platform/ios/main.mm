@@ -165,6 +165,9 @@
     using atlan::shell::TouchPhase;
     const auto shown = self.shownRect;
     for (UITouch* touch in touches) {
+        // Touches the launcher (presented over the guest) leaves unhandled travel up the responder chain to this
+        // controller; only those that began on the guest's own view are the guest's.
+        if (![touch.view isDescendantOfView:self.view]) continue;
         std::size_t slot = 0;
         while (slot < _fingers.size() && _fingers[slot] != touch) ++slot;
         if (slot == _fingers.size()) {
