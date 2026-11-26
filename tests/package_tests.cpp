@@ -237,10 +237,10 @@ void data_status(const fs::path& scratch) {
     write(atlan / "app" / "Atlan3d.inf", bytes("Atlan3DA (6.4.21)"));
     write(atlan / "app" / "atlan.dat", encode_dat(zip({{"lib/armeabi/libatlan3dv5.so", elf_like(3), {}}}), bytes({1, 2, 3, 4}), bytes({1, 6, 4, 21})));
     fs::create_directories(atlan / "SYS");
-    write(atlan / "MAP" / "MAP" / "BASE3D.MAP", trailer("261020"));
-    write(atlan / "MAP" / "NDB" / "road.ndb", trailer("261020", "OTHERTAG"));
-    write(atlan / "MAP" / "MAP" / "camerat1.map", trailer("2611"));
-    write(atlan / "MAP" / "MAP" / "camerat2.map", bytes("short"));
+    write(atlan / "map" / "map" / "BASE3D.MAP", trailer("261020"));
+    write(atlan / "map" / "NDB" / "road.ndb", trailer("261020", "OTHERTAG"));
+    write(atlan / "map" / "map" / "camerat1.map", trailer("2611"));
+    write(atlan / "map" / "map" / "camerat2.map", bytes("short"));
     status = inspect_atlan_data(atlan.string());
     check(status.ready(), "all four folders and a package make a ready folder");
     check(status.app_name == "Atlan3DA" && status.app_version == "6.4.21" && status.app_label() == "Atlan3DA 6.4.21", "the app's name and version");

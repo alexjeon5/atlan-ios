@@ -2,6 +2,8 @@
 #pragma once
 #import <UIKit/UIKit.h>
 
+NS_ASSUME_NONNULL_BEGIN
+
 typedef NS_ENUM(NSInteger, LauncherAppearance) { LauncherAppearanceSystem, LauncherAppearanceLight, LauncherAppearanceDark };
 
 // Posted on the main thread whenever a setting changes.
@@ -31,3 +33,5 @@ extern NSNotificationName const LauncherSettingsDidChange;
 
 - (void)applyAppearanceTo:(UIWindow*)window;
 @end
+
+NS_ASSUME_NONNULL_END
