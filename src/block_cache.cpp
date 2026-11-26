@@ -64,10 +64,17 @@ constexpr unsigned fast_undefined_trap = 4;
 constexpr unsigned fast_inline_return = 5;
 constexpr std::uint32_t udf_arm = 0xe7f000f0, udf_thumb = 0xde00;
 unsigned undefined_trap(CpuState&, const a32::FastOp&, Memory&) noexcept { return fast_undefined_trap; }
-// An inline function at the trap; `key` holds its InlineFunction. Returns to LR as BX LR does.
-unsigned inline_call(CpuState& cpu, const a32::FastOp& op, Memory&) noexcept {
+// A PC that cannot be fetched (an import trap, a return sentinel): the execute fault Runtime::step() reports. Such
+// a PC gets a block of this one op, so a repeated import call finds it like any other block.
+constexpr unsigned fast_fetch_fault = 6;
+unsigned fetch_fault(CpuState&, const a32::FastOp&, Memory&) noexcept { return fast_fetch_fault; }
+// An inline function at the trap; `key` holds its InlineFunction. Returns to LR as BX LR does. When the function
+// declines, the trap is reported: `Declined` is the undefined instruction of a replaced function or the fetch fault
+// of an import.
+template <unsigned Declined>
+unsigned inline_call(CpuState& cpu, const a32::FastOp& op, Memory& memory) noexcept {
     auto* function = reinterpret_cast<InlineFunction*>(static_cast<std::uintptr_t>(op.key));
-    if (!function->run(cpu)) return fast_undefined_trap;
+    if (!function->run(cpu, memory)) return Declined;
     ++function->calls;
     cpu.pc = a32::key_from_target(static_cast<std::uint32_t>(cpu.registers[14]));
     cpu.a32_itstate = 0;
@@ -158,7 +165,7 @@ struct BlockRunner::Impl {
                 fast.imm = thumb ? udf_thumb : udf_arm;
                 if (i == 0) {
                     if (const auto found = inlines.find(key); found != inlines.end()) {
-                        fast.run = inline_call;
+                        fast.run = inline_call<fast_undefined_trap>;
                         fast.key = reinterpret_cast<std::uintptr_t>(found->second);
                     }
                 }
@@ -190,6 +197,25 @@ struct BlockRunner::Impl {
             pc = next;
         }
         if (block->fast.empty()) return nullptr;
+        return keep(std::move(block));
+    }
+    // The one-op block of a PC that is not executable: the inline function bound to it, or the fetch fault.
+    Block* build_trap(std::uint64_t key, std::uint8_t itstate) {
+        auto block = std::make_unique<Block>();
+        block->key = key;
+        block->itstate = itstate;
+        a32::FastOp fast{};
+        fast.run = fetch_fault;
+        fast.next_key = key;
+        fast.next_it = itstate;
+        if (const auto found = inlines.find(key); found != inlines.end()) {
+            fast.run = inline_call<fast_fetch_fault>;
+            fast.key = reinterpret_cast<std::uintptr_t>(found->second);
+        }
+        block->fast.push_back(fast);
+        return keep(std::move(block));
+    }
+    Block* keep(std::unique_ptr<Block> block) {
         block->length = block->fast.size();
         if (entries + block->fast.size() > max_entries) flush();
         entries += block->fast.size();
@@ -208,8 +234,9 @@ void BlockRunner::set_inline(std::uint64_t key, InlineFunction* function) {
     flush();
 }
 
-// Runs blocks until an event, the budget, or (when `single`) the end of the first block.
-Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
+// Runs blocks until an event, the budget, or (when `Single`) the end of the first block.
+template <bool Single>
+Result BlockRunner::execute(std::uint64_t budget) noexcept {
     auto& d = *impl_;
     if (budget == 0) return {Event::budget_exhausted, 0};
     if (d.generation != d.memory.code_generation()) {
@@ -218,6 +245,12 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
     }
     std::uint64_t retired = 0;
     Block* previous = nullptr;
+    // Block entries are counted in a register and added to the statistics once, when the run ends.
+    struct Entries {
+        std::uint64_t& total;
+        std::uint64_t count{};
+        ~Entries() { total += count; }
+    } entries{stats_.block_entries};
     // Locals, so the handler calls do not force reloads through `d`.
     CpuState& cpu = d.cpu;
     Memory& memory = d.memory;
@@ -230,19 +263,16 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
                 if (link.key == key && link.itstate == it) { block = link.block; break; }
         }
         if (block != nullptr) {
-            ++stats_.block_entries;
+            ++entries.count;
         } else if (a32::key_is_canonical(key)) {
             Block*& slot = d.slots[slot_of(key, it)];
             if (slot && slot->key == key && slot->itstate == it) {
                 block = slot;
-                ++stats_.block_entries;
-            } else if (d.memory.translate(a32::key_pc(key), MemoryAccess::execute) == nullptr) {
-                // Not executable (an import trap, a return sentinel): the fetch fault Runtime::step() reports.
-                ++stats_.slow_steps;
-                return {Event::memory_fault, retired, a32::key_pc(key), 0, MemoryAccess::execute, false};
+                ++entries.count;
             } else {
                 const std::uint64_t flushes = stats_.flushes;
-                try { block = d.build(key, it); } catch (...) { block = nullptr; }
+                const bool fetches = d.memory.translate(a32::key_pc(key), MemoryAccess::execute) != nullptr;
+                try { block = fetches ? d.build(key, it) : d.build_trap(key, it); } catch (...) { block = nullptr; }
                 // build() may have flushed the table; re-resolve the slot and forget the destroyed predecessor.
                 if (stats_.flushes != flushes || d.store.size() <= 1) previous = nullptr;
                 if (block) {
@@ -260,7 +290,7 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
             auto result = runtime_.step();
             retired += result.retired;
             if (result.event != Event::retired) { result.retired = retired; return result; }
-            if (single) return {Event::retired, retired};
+            if (Single) return {Event::retired, retired};
             if (retired >= budget) return {Event::budget_exhausted, retired};
             previous = nullptr;
             continue;
@@ -302,8 +332,10 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
             }
             if (done != a32::fast_generic) [[unlikely]] {
                 // An inline function returned (the write-back above did not apply: it is the first op of its
-                // block), or UDF #0, reported as Runtime::step() does with the PC at the instruction.
+                // block), a fetch fault, or UDF #0, reported as Runtime::step() does with the PC at the instruction.
                 if (done == fast_inline_return) break;
+                if (done == fast_fetch_fault)
+                    return {Event::memory_fault, retired, a32::key_pc(cpu.pc), 0, MemoryAccess::execute, false};
                 return {Event::undefined_instruction, retired};
             }
             // fast_generic: an instruction without a fast handler.
@@ -332,7 +364,7 @@ Result BlockRunner::execute(std::uint64_t budget, bool single) noexcept {
             if (cpu.pc != e->next_key) break;
             ++op;
         }
-        if (single) return {Event::retired, retired};
+        if (Single) return {Event::retired, retired};
         if (retired >= budget) return {Event::budget_exhausted, retired};
         previous = block;
     }
@@ -345,6 +377,6 @@ std::vector<std::pair<std::string, std::uint64_t>> BlockRunner::generic_forms() 
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
     return out;
 }
-Result BlockRunner::step_block(std::uint64_t budget) noexcept { return execute(budget, true); }
-Result BlockRunner::run(std::uint64_t budget) noexcept { return execute(budget, false); }
+Result BlockRunner::step_block(std::uint64_t budget) noexcept { return execute<true>(budget); }
+Result BlockRunner::run(std::uint64_t budget) noexcept { return execute<false>(budget); }
 }

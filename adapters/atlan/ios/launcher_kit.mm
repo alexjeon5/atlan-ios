@@ -41,11 +41,13 @@
     [super setHighlighted:highlighted];
     self.alpha = highlighted ? 0.7 : 1;
 }
-// Rows inside a tappable card pass touches to it, except real controls such as buttons and switches.
+// Rows inside a tappable card pass touches to it, except real controls such as buttons, switches and text fields
+// (including the inner views of a text field).
 - (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
     UIView* hit = [super hitTest:point withEvent:event];
-    if (!hit || [hit isKindOfClass:UIControl.class]) return hit;
-    return self;
+    for (UIView* view = hit; view && view != self; view = view.superview)
+        if ([view isKindOfClass:UIControl.class]) return hit;
+    return hit ? self : nil;
 }
 @end
 
@@ -283,8 +285,80 @@ LKCard* LKGroup(NSArray<UIView*>* rows) {
                                     radius:m.cardRadius];
 }
 
+@interface LKScrollView : UIScrollView
+@end
+
+@implementation LKScrollView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(keyboardChanged:)
+                                                   name:UIKeyboardWillChangeFrameNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(keyboardChanged:)
+                                                   name:UIKeyboardWillHideNotification object:nil];
+        UITapGestureRecognizer* tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)];
+        tap.cancelsTouchesInView = NO;
+        [self addGestureRecognizer:tap];
+    }
+    return self;
+}
+- (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; }
+- (void)tapped { [self endEditing:YES]; }
+
+static UIView* firstResponderIn(UIView* view) {
+    if (view.isFirstResponder) return view;
+    for (UIView* child in view.subviews)
+        if (UIView* found = firstResponderIn(child)) return found;
+    return nil;
+}
+
+- (void)keyboardChanged:(NSNotification*)note {
+    CGFloat overlap = 0;
+    if (![note.name isEqualToString:UIKeyboardWillHideNotification] && self.window) {
+        const CGRect keyboard = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+        const CGRect mine = [self convertRect:keyboard fromCoordinateSpace:self.window.screen.coordinateSpace];
+        if (CGRectIntersectsRect(mine, self.bounds)) overlap = MAX(0, CGRectGetMaxY(self.bounds) - CGRectGetMinY(mine));
+    }
+    UIEdgeInsets inset = self.contentInset;
+    inset.bottom = overlap;
+    self.contentInset = inset;
+    self.verticalScrollIndicatorInsets = inset;
+    if (UIView* field = firstResponderIn(self); field && overlap > 0)
+        [self scrollRectToVisible:CGRectInset([self convertRect:field.bounds fromView:field], 0, -12) animated:YES];
+}
+@end
+
+UITextField* LKField(NSString* text, CGFloat width, UIKeyboardType keyboard, NSString* (^committed)(NSString*)) {
+    const auto& m = LauncherMetrics::current();
+    UITextField* field = [UITextField new];
+    field.text = text;
+    field.font = LauncherFont(m.value, UIFontWeightMedium);
+    field.textColor = LauncherColor.ink;
+    field.tintColor = LauncherColor.accent;
+    field.textAlignment = NSTextAlignmentRight;
+    field.backgroundColor = LauncherColor.raised;
+    field.layer.cornerRadius = 8;
+    field.keyboardType = keyboard;
+    field.returnKeyType = UIReturnKeyDone;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.spellCheckingType = UITextSpellCheckingTypeNo;
+    field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 1)];
+    field.rightView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 1)];
+    field.leftViewMode = UITextFieldViewModeAlways;
+    field.rightViewMode = UITextFieldViewModeAlways;
+    // Return ends the editing; the end of editing (by return, a tap elsewhere or leaving the pane) commits.
+    [field addAction:[UIAction actionWithHandler:^(UIAction*) {}] forControlEvents:UIControlEventEditingDidEndOnExit];
+    [field addAction:[UIAction actionWithHandler:^(UIAction* action) {
+        UITextField* sender = (UITextField*)action.sender;
+        sender.text = committed(sender.text ?: @"");
+    }] forControlEvents:UIControlEventEditingDidEnd];
+    LKSize(field, width, m.iconButton);
+    [field setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    return field;
+}
+
 UIScrollView* LKScroll(UIView* content) {
-    UIScrollView* scroll = [UIScrollView new];
+    UIScrollView* scroll = [LKScrollView new];
     scroll.alwaysBounceVertical = NO;
     scroll.showsVerticalScrollIndicator = NO;
     content.translatesAutoresizingMaskIntoConstraints = NO;

@@ -15,12 +15,15 @@ bool ImportDispatcher::bind(std::string name, ImportService service) {
 bool ImportDispatcher::bind_trap(std::uint32_t address, std::string name) {
     if (address % 4 != 0) return false;
     resolved_.clear();
-    return traps_.emplace(address, std::move(name)).second;
+    const bool added = traps_.emplace(address, std::move(name)).second;
+    if (added) inline_traps();
+    return added;
 }
 void ImportDispatcher::attach(const elf::Image& image) {
     resolved_.clear();
     for (const auto& import : image.trapped_imports)
         if (import.type != 1) traps_[import.address] = import.name;  // not STT_OBJECT
+    inline_traps();
 }
 namespace {
 constexpr std::uint32_t undefined_arm = 0xe7f000f0;  // UDF #0
@@ -51,7 +54,7 @@ bool ImportDispatcher::replace_function(Runtime& runtime, std::uint32_t address,
     return true;
 }
 bool ImportDispatcher::replace_function_inline(Runtime& runtime, std::uint32_t address, std::string name,
-                                               ImportService service, bool (*inline_run)(CpuState& cpu) noexcept) {
+                                               ImportService service, InlineRun inline_run) {
     if (inline_run == nullptr || !replace_function(runtime, address, name, std::move(service))) return false;
     auto entry = std::make_unique<Inline>();
     entry->key = (address & 1U) != 0 ? uml::cpu::arm64::aarch32::t32_key(address & ~1U) : uml::cpu::arm64::aarch32::a32_key(address);
@@ -60,6 +63,29 @@ bool ImportDispatcher::replace_function_inline(Runtime& runtime, std::uint32_t a
     if (runner_) runner_->set_inline(entry->key, &entry->function);
     inlines_.push_back(std::move(entry));
     return true;
+}
+void ImportDispatcher::bind_inline(const std::string& name, InlineRun inline_run) {
+    import_inlines_.insert_or_assign(name, inline_run);
+    inline_traps();
+}
+void ImportDispatcher::inline_traps() {
+    for (const auto& [address, name] : traps_) {
+        const auto found = import_inlines_.find(name);
+        if (found == import_inlines_.end()) continue;
+        const std::uint64_t key = uml::cpu::arm64::aarch32::a32_key(address);
+        Inline* entry = nullptr;
+        for (const auto& existing : inlines_)
+            if (existing->key == key) entry = existing.get();
+        if (entry != nullptr && entry->function.run == found->second) continue;
+        if (entry == nullptr) {
+            inlines_.push_back(std::make_unique<Inline>());
+            entry = inlines_.back().get();
+            entry->key = key;
+            entry->name = name;
+        }
+        entry->function.run = found->second;
+        if (runner_) runner_->set_inline(entry->key, &entry->function);
+    }
 }
 CallOutcome ImportDispatcher::call(Runtime& runtime, std::uint32_t target,
                                    std::span<const std::uint32_t> arguments,

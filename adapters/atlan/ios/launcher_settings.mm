@@ -16,6 +16,10 @@ NSString* const keySessionLog = @"launcher.sessionLog";
 NSString* const keyPerfLog = @"launcher.perfLog";
 NSString* const keyNetworkLog = @"launcher.networkLog";
 NSString* const keyProfiler = @"launcher.profiler";
+NSString* const keyPinLocation = @"launcher.pinLocation";
+NSString* const keyPinnedLatitude = @"launcher.pinnedLatitude";
+NSString* const keyPinnedLongitude = @"launcher.pinnedLongitude";
+NSString* const keyPinnedCourse = @"launcher.pinnedCourse";
 NSString* const keyPickedFolder = @"launcher.pickedFolder";
 NSString* const keyActiveFolder = @"launcher.activeFolder";
 }
@@ -32,6 +36,7 @@ NSString* const keyActiveFolder = @"launcher.activeFolder";
         settings = [LauncherSettings new];
         [NSUserDefaults.standardUserDefaults registerDefaults:@{
             keyNotchInset: @YES, keyDuckOthers: @YES, keySessionLog: @YES, keyPerfLog: @YES, keyNetworkLog: @NO, keyProfiler: @NO,
+            keyPinLocation: @NO, keyPinnedLatitude: @37.566535, keyPinnedLongitude: @126.977969, keyPinnedCourse: @0.0,
         }];
     });
     return settings;
@@ -64,6 +69,20 @@ NSString* const keyActiveFolder = @"launcher.activeFolder";
 - (void)setNetworkLog:(BOOL)value { [self setFlag:value forKey:keyNetworkLog]; }
 - (BOOL)profiler { return [self flag:keyProfiler]; }
 - (void)setProfiler:(BOOL)value { [self setFlag:value forKey:keyProfiler]; }
+- (BOOL)pinLocation { return [self flag:keyPinLocation]; }
+- (void)setPinLocation:(BOOL)value { [self setFlag:value forKey:keyPinLocation]; }
+- (double)pinnedLatitude { return [NSUserDefaults.standardUserDefaults doubleForKey:keyPinnedLatitude]; }
+- (double)pinnedLongitude { return [NSUserDefaults.standardUserDefaults doubleForKey:keyPinnedLongitude]; }
+- (void)setPinnedLatitude:(double)latitude longitude:(double)longitude {
+    [NSUserDefaults.standardUserDefaults setDouble:latitude forKey:keyPinnedLatitude];
+    [NSUserDefaults.standardUserDefaults setDouble:longitude forKey:keyPinnedLongitude];
+    [self changed];
+}
+- (double)pinnedCourse { return [NSUserDefaults.standardUserDefaults doubleForKey:keyPinnedCourse]; }
+- (void)setPinnedCourse:(double)value {
+    [NSUserDefaults.standardUserDefaults setDouble:value forKey:keyPinnedCourse];
+    [self changed];
+}
 
 - (LauncherAppearance)appearance {
     const NSInteger value = [NSUserDefaults.standardUserDefaults integerForKey:keyAppearance];

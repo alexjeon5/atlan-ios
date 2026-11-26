@@ -249,12 +249,14 @@ void GlContext::draw(const GlCall& c) {
     }
     auto& program = pit->second;
     const auto& linked = program.info->linked;
-    auto draw = std::make_unique<GlDraw>();
+    // One packet reused for every draw, so its vectors keep their capacity instead of being allocated per draw.
+    GlDraw& draw = scratch_;
     const bool elements = c.op == GlOp::draw_elements;
     const std::uint32_t mode = c.a[0];
 
     // indices
-    std::vector<std::uint32_t> raw;
+    auto& indices = draw.indices;
+    indices.clear();
     std::uint32_t vertex_count = 0;
     if (elements) {
         const std::uint32_t count = c.a[1], type = c.a[2];
@@ -269,37 +271,39 @@ void GlContext::draw(const GlCall& c) {
             avail = c.data.size();
         }
         if (!src || size == 0 || avail < std::size_t{count} * size) { ++stats_.draws_dropped; fail(gl_invalid_operation); note("glDrawElements dropped: index data is missing"); return; }
-        raw.resize(count);
+        indices.resize(count);
         for (std::uint32_t i = 0; i < count; ++i) {
-            raw[i] = read_index(src + std::size_t{i} * size, type);
-            vertex_count = std::max(vertex_count, raw[i] + 1);
+            indices[i] = read_index(src + std::size_t{i} * size, type);
+            vertex_count = std::max(vertex_count, indices[i] + 1);
         }
     } else {
         const std::uint32_t first = c.a[1], count = c.a[2];
-        raw.resize(count);
-        for (std::uint32_t i = 0; i < count; ++i) raw[i] = first + i;
+        indices.resize(count);
+        for (std::uint32_t i = 0; i < count; ++i) indices[i] = first + i;
         vertex_count = first + count;
     }
-    if (raw.empty() || vertex_count > (1U << 24)) return;
+    if (indices.empty() || vertex_count > (1U << 24)) return;
     switch (mode) {
-        case 0: draw->primitive = GlPrimitive::points; draw->indices = std::move(raw); break;
-        case 1: draw->primitive = GlPrimitive::lines; draw->indices = std::move(raw); break;
-        case 2: draw->primitive = GlPrimitive::line_strip; draw->indices = std::move(raw); draw->indices.push_back(draw->indices.front()); break;
-        case 3: draw->primitive = GlPrimitive::line_strip; draw->indices = std::move(raw); break;
-        case 4: draw->primitive = GlPrimitive::triangles; draw->indices = std::move(raw); break;
-        case 5: draw->primitive = GlPrimitive::triangle_strip; draw->indices = std::move(raw); break;
+        case 0: draw.primitive = GlPrimitive::points; break;
+        case 1: draw.primitive = GlPrimitive::lines; break;
+        case 2: draw.primitive = GlPrimitive::line_strip; indices.push_back(indices.front()); break;
+        case 3: draw.primitive = GlPrimitive::line_strip; break;
+        case 4: draw.primitive = GlPrimitive::triangles; break;
+        case 5: draw.primitive = GlPrimitive::triangle_strip; break;
         case 6:
-            draw->primitive = GlPrimitive::triangles;
-            for (std::size_t i = 1; i + 1 < raw.size(); ++i) { draw->indices.push_back(raw[0]); draw->indices.push_back(raw[i]); draw->indices.push_back(raw[i + 1]); }
+            draw.primitive = GlPrimitive::triangles;
+            fan_.assign(indices.begin(), indices.end());
+            indices.clear();
+            for (std::size_t i = 1; i + 1 < fan_.size(); ++i) { indices.push_back(fan_[0]); indices.push_back(fan_[i]); indices.push_back(fan_[i + 1]); }
             break;
         default: fail(gl_invalid_enum); return;
     }
-    draw->vertex_count = vertex_count;
+    draw.vertex_count = vertex_count;
 
     // vertex streams, converted to float and widened to the shader attribute's size
-    draw->streams.resize(linked.attributes.size());
+    draw.streams.resize(linked.attributes.size());
     for (std::size_t k = 0; k < linked.attributes.size(); ++k) {
-        auto& stream = draw->streams[k];
+        auto& stream = draw.streams[k];
         const std::uint32_t lanes = linked.attributes[k].type.rows;
         stream.components = lanes;
         stream.values.assign(std::size_t{vertex_count} * lanes, 0.0F);
@@ -327,7 +331,7 @@ void GlContext::draw(const GlCall& c) {
     }
 
     // textures
-    draw->textures.resize(linked.samplers.size());
+    draw.textures.assign(linked.samplers.size(), GlDraw::Binding{});
     for (std::size_t s = 0; s < linked.samplers.size(); ++s) {
         const auto unit = static_cast<std::uint32_t>(program.sampler_units[s]);
         if (auto* t = bound_texture(unit)) {
@@ -335,15 +339,18 @@ void GlContext::draw(const GlCall& c) {
             const bool mipmapped = t->sampler.min_filter >= 0x2700 && t->sampler.min_filter <= 0x2703;
             // GL: a texture sampled with a mipmapped minification filter and no complete chain is incomplete and reads black.
             const bool incomplete = mipmapped && t->image && t->image->mips.empty() && (t->image->width > 1 || t->image->height > 1);
-            if (!incomplete) draw->textures[s].image = t->image;
-            draw->textures[s].sampler = t->sampler;
+            if (!incomplete) draw.textures[s].image = t->image;
+            draw.textures[s].sampler = t->sampler;
         }
     }
-    draw->program = program.info;
-    draw->uniforms = program.uniforms;
-    draw->state = state_;
-    sink_.draw(*draw);
+    draw.program = program.info;
+    draw.uniforms = program.uniforms;
+    draw.state = state_;
+    sink_.draw(draw);
     ++stats_.draws;
+    // The packet keeps its buffers, not its references: deleted programs and textures are released as before.
+    draw.program.reset();
+    for (auto& binding : draw.textures) binding.image.reset();
 }
 
 GlResult GlContext::query_shader(const GlCall& c) const {
