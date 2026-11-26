@@ -39,7 +39,8 @@ void AtlanAdapter::unpack_library(std::vector<std::byte>& bytes, const SessionLo
 
 void AtlanAdapter::configure_files(GuestStdio& stdio, const SessionLog& log) {
     if (!config_.map_root.empty()) {
-        const auto state = stdio.host_path("ATLAN/NAND");
+        const std::filesystem::path state = config_.state_root.empty() ? stdio.host_path("ATLAN/NAND")
+                                                                      : std::filesystem::path(config_.state_root);
         std::error_code error;
         std::filesystem::create_directories(state, error);
         stdio.add_mount("ATLAN/NAND", state);

@@ -16,6 +16,7 @@ NSString* const keyPerfLog = @"launcher.perfLog";
 NSString* const keyNetworkLog = @"launcher.networkLog";
 NSString* const keyProfiler = @"launcher.profiler";
 NSString* const keyPickedFolder = @"launcher.pickedFolder";
+NSString* const keyActiveFolder = @"launcher.activeFolder";
 }
 
 @implementation LauncherSettings {
@@ -129,12 +130,38 @@ NSString* const keyPickedFolder = @"launcher.pickedFolder";
 
 - (BOOL)atlanFolderIsPicked { return self.pickedFolder != nil; }
 
+- (NSArray<NSString*>*)documentsFolders {
+    NSMutableArray<NSString*>* folders = [NSMutableArray array];
+    for (const auto& path : atlan::shell::find_atlan_folders(self.documentsPath.UTF8String ?: ""))
+        if (NSString* folder = [NSString stringWithUTF8String:path.c_str()]) [folders addObject:folder];
+    return folders;
+}
+
+- (void)chooseDocumentsFolder:(NSString*)path {
+    [NSUserDefaults.standardUserDefaults setObject:path.lastPathComponent forKey:keyActiveFolder];
+    if (self.pickedFolder) [self forgetPickedFolder];
+    else [self changed];
+}
+
+// The chosen Documents folder if it is still there, else the only one; nil when that leaves no single answer.
+- (NSString*)documentsChoiceIn:(NSArray<NSString*>*)folders {
+    NSString* chosen = [NSUserDefaults.standardUserDefaults stringForKey:keyActiveFolder];
+    for (NSString* folder in folders)
+        if (chosen && [folder.lastPathComponent isEqualToString:chosen]) return folder;
+    return folders.count == 1 ? folders.firstObject : nil;
+}
+
+- (BOOL)needsFolderChoice {
+    if (self.pickedFolder) return NO;
+    NSArray<NSString*>* folders = self.documentsFolders;
+    return folders.count > 1 && ![self documentsChoiceIn:folders];
+}
+
 - (NSString*)atlanFolder {
-    NSString* base = self.pickedFolder.path ?: self.documentsPath;
-    if (!base) return @"";
-    const std::string resolved = atlan::shell::resolve_atlan_folder(base.UTF8String);
-    // Documents itself is never the ATLAN folder; a picked folder may be.
-    if (!self.pickedFolder && resolved == base.UTF8String) return @"";
-    return [NSString stringWithUTF8String:resolved.c_str()] ?: @"";
+    if (NSString* picked = self.pickedFolder.path) {
+        const std::string resolved = atlan::shell::resolve_atlan_folder(picked.UTF8String);
+        return [NSString stringWithUTF8String:resolved.c_str()] ?: @"";
+    }
+    return [self documentsChoiceIn:self.documentsFolders] ?: @"";
 }
 @end
