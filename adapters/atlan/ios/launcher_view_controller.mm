@@ -76,6 +76,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
     NSTimer* _timer;
     dispatch_queue_t _queue;
     BOOL _shownPortrait;  // the orientation the current screen was built for
+    UIView* _introButtons;  // upright: the intro's buttons, placed at the bottom by intro:content:
+    NSLayoutConstraint* _top;  // iPhone: space above the content
     NSLayoutConstraint* _boxWidth;   // iPad: the centred box, sized per orientation
     NSLayoutConstraint* _boxHeight;
 }
@@ -119,6 +121,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
             _boxHeight.constant = box.height;
         }
     }
+    _top.constant = portrait ? 0 : 16;  // upright the status bar's safe area already leaves room
     if (portrait != _shownPortrait) [self render];
 }
 
@@ -154,18 +157,18 @@ std::string fingerprint(const AtlanDataStatus& s) {
         ]];
     } else {
         // 16 at the top and 24 at the bottom as designed; at the sides the notch's safe area plus a little (at least
-        // 16 when the phone stands upright).
+        // 20 when the phone stands upright).
         NSLayoutConstraint* bottom = [_frame.bottomAnchor constraintEqualToAnchor:view.bottomAnchor constant:-24];
         bottom.priority = UILayoutPriorityDefaultHigh;
         NSLayoutConstraint* leading = [_frame.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12];
         NSLayoutConstraint* trailing = [_frame.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12];
         leading.priority = trailing.priority = UILayoutPriorityDefaultHigh;
         [NSLayoutConstraint activateConstraints:@[
-            [_frame.topAnchor constraintEqualToAnchor:safe.topAnchor constant:16],
+            _top = [_frame.topAnchor constraintEqualToAnchor:safe.topAnchor constant:16],
             [_frame.bottomAnchor constraintLessThanOrEqualToAnchor:view.bottomAnchor constant:-24],
             [_frame.bottomAnchor constraintLessThanOrEqualToAnchor:safe.bottomAnchor],
-            [_frame.leadingAnchor constraintGreaterThanOrEqualToAnchor:view.leadingAnchor constant:16],
-            [_frame.trailingAnchor constraintLessThanOrEqualToAnchor:view.trailingAnchor constant:-16],
+            [_frame.leadingAnchor constraintGreaterThanOrEqualToAnchor:view.leadingAnchor constant:20],
+            [_frame.trailingAnchor constraintLessThanOrEqualToAnchor:view.trailingAnchor constant:-20],
             [_frame.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor],
             [_frame.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor],
             bottom, leading, trailing,
@@ -294,8 +297,23 @@ std::string fingerprint(const AtlanDataStatus& s) {
     [buttons.firstObject setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisHorizontal];
     UIStackView* row = LKRow(buttons, 8);
     row.alignment = UIStackViewAlignmentFill;
-    if (self.portrait) return LKColumn(@[top, LKColumn(@[block, row], 16)], 24);
+    if (self.portrait) {
+        // Upright the buttons go to the bottom of the screen, under the screen's content (see intro:content:).
+        _introButtons = row;
+        return LKColumn(@[top, block], 20);
+    }
     return LKColumn(@[top, LKSpacer(), LKColumn(@[block, row], 16)], 0);
+}
+
+// A first-run screen: the intro column beside its content, or upright the intro, the content and the buttons at
+// the bottom.
+- (UIView*)intro:(UIView*)left content:(UIView*)content {
+    const auto& m = LauncherMetrics::current();
+    if (!self.portrait) return [self pair:left width:m.introColumn with:content width:0 spacing:24 grow:content];
+    UIStackView* column = LKColumn(@[left, content, LKSpacer(), _introButtons ?: [UIView new]], 20);
+    [column setCustomSpacing:16 afterView:column.arrangedSubviews[2]];
+    _introButtons = nil;
+    return column;
 }
 
 - (UIView*)twoColumns:(UIView*)left right:(UIView*)right spacing:(CGFloat)spacing {
@@ -354,7 +372,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                               padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding)
                                                radius:m.cardRadius];
     UIView* right = LKColumn(@[ways, layout], m.gap);
-    return [self pair:left width:m.introColumn with:right width:0 spacing:24 grow:right];
+    return [self intro:left content:right];
 }
 
 - (UIView*)autoStartScreen {
@@ -383,7 +401,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
                                            padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding)
                                             radius:m.cardRadius];
     UIView* right = LKColumn(@[notes, data], m.gap);
-    return [self pair:left width:m.introColumn with:right width:0 spacing:24 grow:right];
+    return [self intro:left content:right];
 }
 
 - (void)answerAutoStart:(BOOL)on {
@@ -446,7 +464,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
     list.distribution = UIStackViewDistributionFillEqually;
     // Two or three fill the column; more scroll.
     UIView* right = _choices.size() <= 3 ? list : LKScroll(list);
-    return [self pair:left width:m.introColumn with:right width:0 spacing:24 grow:right];
+    return [self intro:left content:right];
 }
 
 - (void)setPending:(std::size_t)index {
@@ -508,15 +526,30 @@ std::string fingerprint(const AtlanDataStatus& s) {
     UIButton* gear = LKButton(text::settings, @"slider.horizontal.3", LKButtonSecondary, m.settingsButton,
                               ^{ [weakSelf openSettings:Tab::general]; });
     if (self.portrait) {
-        // Upright: the folder card on top, the start button and settings under it, within thumb reach.
+        // Upright: the name at the top; the folder card, the start button and settings low, within thumb reach.
+        // On iPad the whole block sits in the middle.
         [start.heightAnchor constraintEqualToConstant:m.portraitStart].active = YES;
-        [card setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisVertical];
-        return LKColumn(@[[self nameLine], card, start, gear], m.gap);
+        UIStackView* block = LKColumn(@[card, start, gear], m.gap);
+        if (m.container.width > 0) return [self centeredVertically:LKColumn(@[[self nameLine], block], m.gap + 8)];
+        return LKColumn(@[[self nameLine], LKSpacer(), block], m.gap);
     }
     UIStackView* left = LKColumn(@[[self nameLine], card], m.gap);
     UIStackView* right = LKColumn(@[start, gear], m.gap);
     LKSize(right, m.startColumn, 0);
     return [self twoColumns:left right:right spacing:24];
+}
+
+- (UIView*)centeredVertically:(UIView*)content {
+    UIView* box = [UIView new];
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [box addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [content.leadingAnchor constraintEqualToAnchor:box.leadingAnchor],
+        [content.trailingAnchor constraintEqualToAnchor:box.trailingAnchor],
+        [content.centerYAnchor constraintEqualToAnchor:box.centerYAnchor],
+        [content.topAnchor constraintGreaterThanOrEqualToAnchor:box.topAnchor],
+    ]];
+    return box;
 }
 
 - (void)startNavigation {
