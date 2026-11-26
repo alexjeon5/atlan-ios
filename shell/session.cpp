@@ -297,6 +297,7 @@ void GuestSession::run() {
             }
             auto sets = runtime_library_sets();
             for (auto& set : image_library_sets()) sets.push_back(std::move(set));
+            for (auto& set : adapter.native_sets()) sets.push_back(std::move(set));
             install_native_functions(dispatcher, runtime, image.exports, std::move(sets), native_options);
             dispatcher.reset_import_counts();
             if (profiler) profiler->reset();

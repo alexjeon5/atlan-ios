@@ -29,9 +29,14 @@ std::optional<std::map<std::string, NativeSignature>> parse_native_signatures(co
             why = "line " + std::to_string(number) + ": " + what;
             return std::nullopt;
         };
-        if (!(words >> mode) || (mode != "arm" && mode != "thumb")) return bad("expected arm or thumb after the name");
-        while (words >> more) hex += more;
+        if (!(words >> mode) || (mode != "arm" && mode != "thumb" && mode != "symbol")) return bad("expected arm, thumb or symbol after the name");
         NativeSignature signature;
+        if (mode == "symbol") {
+            if (!(words >> signature.symbol) || (words >> more)) return bad("expected one exported name after symbol");
+            if (!out.emplace(name, std::move(signature)).second) return bad("name given twice");
+            continue;
+        }
+        while (words >> more) hex += more;
         signature.thumb = mode == "thumb";
         if (hex.empty() || hex.size() % 2 != 0) return bad("expected pairs of hex digits or ??");
         const auto digit = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
@@ -115,8 +120,13 @@ unsigned install_native_functions(ImportDispatcher& dispatcher, Runtime& runtime
             for (const auto& symbol : member.symbols)
                 if (const auto it = functions.find(symbol); it != functions.end()) add(it->second);
             if (addresses.empty())
-                if (const auto it = options.signatures.find(member.name); it != options.signatures.end())
-                    if (const auto address = find_signature(runtime.memory, options.code_base, options.code_bytes, it->second)) add(*address);
+                if (const auto it = options.signatures.find(member.name); it != options.signatures.end()) {
+                    if (!it->second.symbol.empty()) {
+                        if (const auto named = functions.find(it->second.symbol); named != functions.end()) add(named->second);
+                    } else if (const auto address = find_signature(runtime.memory, options.code_base, options.code_bytes, it->second)) {
+                        add(*address);
+                    }
+                }
             if (!addresses.empty()) located.emplace(member.name, std::move(addresses));
             else if (member.required) missing += (missing.empty() ? "" : ", ") + member.name;
         }

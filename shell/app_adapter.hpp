@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include "atlan/native_functions.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -69,6 +70,10 @@ public:
     // Replaces a packaged library (an APK, an app-specific wrapper) by the ELF image inside it. Bytes that are no
     // package are left alone. Throws std::runtime_error naming what is wrong with a damaged package.
     virtual void unpack_library(std::vector<std::byte>& bytes, const SessionLog& log) { (void)bytes; (void)log; }
+    // Host replacements for functions of this app's own code (atlan/native_functions.hpp), installed with the
+    // engine's sets. Their members are located through the embedder's signature file (by byte signature or by a
+    // "symbol" line), so no app-specific name or address has to live in the sources.
+    [[nodiscard]] virtual std::vector<NativeSet> native_sets() const { return {}; }
     // Lays out the guest's view of the data folder (aliases, read filters) before stdio is installed.
     virtual void configure_files(GuestStdio& stdio, const SessionLog& log) { (void)stdio; (void)log; }
     // Registers the Java methods the guest calls, before JNI_OnLoad. `frame_requests`: the embedder wants frames

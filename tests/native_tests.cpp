@@ -174,6 +174,15 @@ void replacement() {
     check(!parse_native_signatures("name arm 0011", why) && !why.empty(), "a short signature is rejected");
     check(!parse_native_signatures("name mips 0011223344556677", why), "an unknown mode is rejected");
     check(!parse_native_signatures("name arm ??11223344556677 88", why), "a wildcard first byte is rejected");
+    // Located by an exported name that the signature file supplies.
+    const auto by_symbol = parse_native_signatures("__aeabi_uidivmod symbol private_divide\n", why);
+    check(by_symbol && by_symbol->at("__aeabi_uidivmod").symbol == "private_divide", "a symbol line");
+    Guest renamed;
+    renamed.put(code, divide_code);
+    renamed.seal();
+    renamed.exports = {{"private_divide", code, 76, 2, 1}};
+    check(renamed.install(*by_symbol) == 1 && renamed.dispatcher.replaces(code), "located by a name from the signature file");
+    check(!parse_native_signatures("name symbol", why) && !parse_native_signatures("name symbol a b", why), "a symbol line takes one name");
 
     // A Thumb function.
     Guest thumb;

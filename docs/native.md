@@ -39,6 +39,8 @@ inflate 스트림 집합이 설치되면 디코더 내부 상태가 호스트에
 
 이미지가 이름을 export하지 않을 때만 쓴다. 한 줄에 `이름 arm|thumb HEX`이고 HEX는 두 자리씩의 바이트, 임의 바이트는 `??`, `#` 뒤는 주석이다. 고정 바이트가 8개 이상이고 첫 바이트가 고정이어야 하며, 실행 가능 영역에서 정확히 한 곳만 맞아야 채택된다. 이름은 집합 멤버 이름이다. 채택된 주소도 같은 자가 검증을 거친다.
 
+`이름 symbol EXPORT이름` 줄은 바이트 대신 export 이름으로 찾게 한다. 앱 고유 함수의 집합은 어댑터가 `AppAdapter::native_sets()`로 내고, 멤버 이름은 일반적인 이름으로 둔다. 실제 export 이름이나 바이트는 사용자의 로컬 파일에만 있다.
+
 - `atlan-session`: `ATLAN_NATIVE_SIGNATURES=파일`
 - iOS 앱: Documents의 `native.sig`(없어도 됨)
 

@@ -64,11 +64,14 @@ struct NativeSet {
 };
 
 // A function start as bytes of code: `mask` selects the bits that must equal `bytes`.
+// Or, with `symbol` set, the exported name that locates it (a name the embedder keeps out of its sources).
 struct NativeSignature {
     bool thumb{};
     std::vector<std::uint8_t> bytes, mask;
+    std::string symbol;
 };
-// Parses lines "NAME arm|thumb HEX", HEX being byte pairs with ?? for any byte; '#' starts a comment.
+// Parses lines "NAME arm|thumb HEX", HEX being byte pairs with ?? for any byte, and "NAME symbol EXPORTED";
+// '#' starts a comment.
 // nullopt with `why` set if a line is malformed.
 [[nodiscard]] std::optional<std::map<std::string, NativeSignature>> parse_native_signatures(const std::string& text, std::string& why);
 
