@@ -68,6 +68,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
     Screen _shown;
     Tab _tab;
     AtlanDataStatus _status;
+    std::vector<std::pair<std::string, AtlanDataStatus>> _choices;  // every ATLAN folder in Documents
+    std::size_t _pending;  // the folder marked on the first-run choice screen
     std::string _fingerprint;
     BOOL _known;         // a check has finished
     BOOL _checking;
@@ -163,19 +165,26 @@ std::string fingerprint(const AtlanDataStatus& s) {
     if (_checking) return;
     _checking = YES;
     NSString* folder = LauncherSettings.shared.atlanFolder;
+    NSArray<NSString*>* folders = LauncherSettings.shared.documentsFolders;
     __weak LauncherViewController* weakSelf = self;
     dispatch_async(_queue, ^{
         auto status = std::make_shared<AtlanDataStatus>(atlan::shell::inspect_atlan_data(folder.UTF8String ?: ""));
-        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf checked:*status]; });
+        auto choices = std::make_shared<std::vector<std::pair<std::string, AtlanDataStatus>>>();
+        for (NSString* each in folders)
+            choices->emplace_back(each.UTF8String ?: "", atlan::shell::inspect_atlan_data(each.UTF8String ?: ""));
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf checked:*status choices:*choices folder:folder]; });
     });
 }
 
-- (void)checked:(const AtlanDataStatus&)status {
+- (void)checked:(const AtlanDataStatus&)status choices:(const std::vector<std::pair<std::string, AtlanDataStatus>>&)choices
+         folder:(NSString*)folder {
     _checking = NO;
-    const auto print = fingerprint(status) + (LauncherSettings.shared.atlanFolderIsPicked ? "p" : "d");
+    std::string print = fingerprint(status) + (LauncherSettings.shared.atlanFolderIsPicked ? "p" : "d") + (folder.UTF8String ?: "");
+    for (const auto& [path, each] : choices) print += "\n" + path + fingerprint(each);
     if (_known && print == _fingerprint) return;
     _known = YES;
     _status = status;
+    _choices = choices;
     _fingerprint = print;
     if (status.ready() && !LauncherSettings.shared.setupDone) LauncherSettings.shared.setupDone = YES;
     [self render];
@@ -211,6 +220,7 @@ std::string fingerprint(const AtlanDataStatus& s) {
 - (UIView*)buildScreen {
     LauncherSettings* settings = LauncherSettings.shared;
     if (_shown == Screen::settings) return [self settingsScreen];
+    if (!_running && settings.needsFolderChoice) return [self chooseScreen];
     if (!_running && !settings.setupDone && !_status.ready()) return [self welcomeScreen];
     if (!_running && _status.ready() && !settings.autoStartAsked) return [self autoStartScreen];
     return [self startScreen];
@@ -324,6 +334,65 @@ std::string fingerprint(const AtlanDataStatus& s) {
     box.layoutMarginsRelativeArrangement = YES;
     box.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(12, 0, 12, 0);
     return box;
+}
+
+// The three values the launcher shows for a data set, side by side under a caption each.
+- (UIView*)valueGrid:(const AtlanDataStatus&)status {
+    const auto& m = LauncherMetrics::current();
+    NSMutableArray<UIView*>* cells = [NSMutableArray array];
+    for (NSArray<NSString*>* pair in @[@[text::app_row, ns(status.app_label())], @[text::map_row, ns(status.map)],
+                                       @[text::safety_row, ns(status.safety_main)]])
+        [cells addObject:LKColumn(@[LKLabel(pair[0], m.caption, UIFontWeightRegular, LauncherColor.muted),
+                                    LKLabel(pair[1], m.body, UIFontWeightMedium, LauncherColor.ink)], 0)];
+    UIStackView* grid = LKRow(cells, 12);
+    grid.distribution = UIStackViewDistributionFillEqually;
+    grid.alignment = UIStackViewAlignmentTop;
+    return grid;
+}
+
+// First run with several ATLAN folders in Documents: one card per folder, the first preselected.
+- (UIView*)chooseScreen {
+    const auto& m = LauncherMetrics::current();
+    __weak LauncherViewController* weakSelf = self;
+    if (_pending >= _choices.size()) _pending = 0;
+    UIView* left = [self introColumn:[self titleBlock:text::choose_title
+                                                 body:[NSString stringWithFormat:text::choose_body, (unsigned long)_choices.size()]]
+                             buttons:@[LKButton(text::choose_use, nil, LKButtonPrimary, m.button, ^{ [weakSelf useChoice]; })]];
+    NSMutableArray<UIView*>* cards = [NSMutableArray array];
+    for (std::size_t index = 0; index < _choices.size(); ++index) {
+        const auto& choice = _choices[index];
+        NSString* name = ns(choice.first).lastPathComponent;
+        UIView* title = LKRow(@[LKRadio(index == _pending),
+                                LKColumn(@[LKLabel(name, m.value, UIFontWeightMedium, LauncherColor.ink),
+                                           LKLabel([NSString stringWithFormat:text::location_in_documents, name], m.caption,
+                                                   UIFontWeightRegular, LauncherColor.muted)], 0), LKSpacer()], 12);
+        UIStackView* values = LKColumn(@[[self valueGrid:choice.second]], 0);
+        values.layoutMarginsRelativeArrangement = YES;
+        values.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(0, 32, 0, 0);
+        LKCard* card = [[LKCard alloc] initWithContent:LKColumn(@[title, LKSpacer(), values], 8)
+                                               padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding)
+                                                radius:m.cardRadius];
+        card.selectedLook = index == _pending;
+        card.accessibilityLabel = name;
+        card.accessibilityTraits = UIAccessibilityTraitButton | (index == _pending ? UIAccessibilityTraitSelected : 0);
+        [card addAction:[UIAction actionWithHandler:^(UIAction*) { [weakSelf setPending:index]; }]
+       forControlEvents:UIControlEventTouchUpInside];
+        [cards addObject:card];
+    }
+    UIStackView* list = LKColumn(cards, m.gap);
+    list.distribution = UIStackViewDistributionFillEqually;
+    // Two or three fill the column; more scroll.
+    UIView* right = _choices.size() <= 3 ? list : LKScroll(list);
+    return [self twoColumns:left right:right spacing:24];
+}
+
+- (void)setPending:(std::size_t)index {
+    _pending = index;
+    [self render];
+}
+
+- (void)useChoice {
+    if (_pending < _choices.size()) [LauncherSettings.shared chooseDocumentsFolder:ns(_choices[_pending].first)];
 }
 
 - (UIView*)startScreen {
@@ -466,7 +535,10 @@ std::string fingerprint(const AtlanDataStatus& s) {
     const auto& m = LauncherMetrics::current();
     __weak LauncherViewController* weakSelf = self;
     LauncherSettings* settings = LauncherSettings.shared;
-    NSString* where = settings.atlanFolderIsPicked ? (settings.pickedFolder.lastPathComponent ?: text::unknown) : text::location_documents;
+    NSString* active = settings.atlanFolder;
+    NSString* where = settings.atlanFolderIsPicked ? (settings.pickedFolder.lastPathComponent ?: text::unknown)
+                    : active.length ? [NSString stringWithFormat:text::location_in_documents, active.lastPathComponent]
+                                    : text::unknown;
     NSMutableArray<UIView*>* buttons = [NSMutableArray array];
     if (settings.atlanFolderIsPicked)
         [buttons addObject:LKButton(text::use_documents, nil, LKButtonRaised, m.iconButton, ^{ [LauncherSettings.shared forgetPickedFolder]; })];
@@ -484,7 +556,59 @@ std::string fingerprint(const AtlanDataStatus& s) {
         LKListRow(text::safety_row, nil, LKValue(ns(_status.safety_main)), m.row, YES, nil),
     ], 0);
     UIView* content = LKColumn(@[rows, LKSpacer(), LKLabel(text::map_footnote, m.caption, UIFontWeightRegular, LauncherColor.muted)], 12);
-    return [[LKCard alloc] initWithContent:content padding:UIEdgeInsetsMake(4, m.cardPadding, m.cardPadding, m.cardPadding) radius:m.cardRadius];
+    LKCard* card = [[LKCard alloc] initWithContent:content padding:UIEdgeInsetsMake(4, m.cardPadding, m.cardPadding, m.cardPadding) radius:m.cardRadius];
+    if (_choices.size() < 2) return card;
+    return [self multiFolderPane];
+}
+
+// Several ATLAN folders in Documents: pick one (used from the next start) and see the chosen one's state.
+- (UIView*)multiFolderPane {
+    const auto& m = LauncherMetrics::current();
+    __weak LauncherViewController* weakSelf = self;
+    LauncherSettings* settings = LauncherSettings.shared;
+    NSString* active = settings.atlanFolder;
+    NSMutableArray<UIView*>* options = [NSMutableArray arrayWithObject:LKLabel(text::atlan_folders, m.caption, UIFontWeightRegular, LauncherColor.muted)];
+    for (const auto& choice : _choices) {
+        NSString* path = ns(choice.first);
+        const BOOL on = !settings.atlanFolderIsPicked && [path isEqualToString:active];
+        NSString* detail = choice.second.ready() ? ns(choice.second.app_label()) : statusTitle(choice.second);
+        UIButtonConfiguration* config = UIButtonConfiguration.plainButtonConfiguration;
+        config.contentInsets = NSDirectionalEdgeInsetsZero;
+        UIButton* option = [UIButton buttonWithConfiguration:config primaryAction:[UIAction actionWithHandler:^(UIAction*) {
+            [LauncherSettings.shared chooseDocumentsFolder:path];
+        }]];
+        UIStackView* row = LKRow(@[LKRadio(on), LKColumn(@[LKLabel(path.lastPathComponent, m.value, UIFontWeightMedium, LauncherColor.ink),
+                                                          LKLabel(detail, m.caption, UIFontWeightRegular, LauncherColor.muted)], 0),
+                                   LKSpacer()], 12);
+        row.userInteractionEnabled = NO;
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        [option addSubview:row];
+        [NSLayoutConstraint activateConstraints:@[
+            [row.leadingAnchor constraintEqualToAnchor:option.leadingAnchor], [row.trailingAnchor constraintEqualToAnchor:option.trailingAnchor],
+            [row.centerYAnchor constraintEqualToAnchor:option.centerYAnchor], [option.heightAnchor constraintEqualToConstant:56],
+        ]];
+        option.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", path.lastPathComponent, detail];
+        if (on) option.accessibilityTraits |= UIAccessibilityTraitSelected;
+        [options addObject:option];
+    }
+    UIView* footer = LKColumn(@[LKLabel(text::applies_next_start, m.caption, UIFontWeightRegular, LauncherColor.muted),
+                                LKButton(text::pick_other, @"folder", LKButtonRaised, m.iconButton, ^{ [weakSelf pickFolder]; })], 12);
+    LKCard* chooser = [[LKCard alloc] initWithContent:LKColumn(@[LKScroll(LKColumn(options, 0)), footer], 12)
+                                              padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, m.cardPadding, m.cardPadding)
+                                               radius:m.cardRadius];
+
+    const bool ready = _status.ready();
+    UIView* rows = LKColumn(@[
+        LKLabel(text::chosen_folder, m.caption, UIFontWeightRegular, LauncherColor.muted),
+        LKListRow(text::status, nil, LKStatus(ready ? LauncherColor.positive : LauncherColor.negative, statusTitle(_status)), m.row, NO, nil),
+        LKListRow(text::app_row, nil, LKValue(ns(_status.app_label())), m.row, YES, nil),
+        LKListRow(text::map_row, nil, LKValue(ns(_status.map)), m.row, YES, nil),
+        LKListRow(text::safety_row, nil, LKValue(ns(_status.safety_main)), m.row, YES, nil),
+        LKSpacer(),
+    ], 0);
+    LKCard* chosen = [[LKCard alloc] initWithContent:rows padding:UIEdgeInsetsMake(m.cardPadding, m.cardPadding, 4, m.cardPadding) radius:m.cardRadius];
+    LKSize(chosen, m.sideColumn, 0);
+    return [self twoColumns:chooser right:chosen spacing:m.gap];
 }
 
 - (UIView*)versionsPane {

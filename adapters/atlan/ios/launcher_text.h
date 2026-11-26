@@ -41,6 +41,15 @@ static NSString* const auto_return_body = @"내비게이션에서 FINE DRIVE 버
 static NSString* const auto_later = @"나중에 변경";
 static NSString* const auto_later_body = @"설정의 일반 탭에서 언제든지 변경할 수 있습니다";
 
+// Several ATLAN folders
+static NSString* const choose_title = @"사용할 ATLAN 폴더를\n선택해 주세요";
+static NSString* const choose_body = @"ATLAN 폴더가 %lu개 있습니다. 설정의 지도 데이터 탭에서 다른 폴더로 변경할 수 있습니다.";
+static NSString* const choose_use = @"선택한 폴더 사용";
+static NSString* const atlan_folders = @"ATLAN 폴더";
+static NSString* const chosen_folder = @"선택한 폴더";
+static NSString* const applies_next_start = @"변경한 폴더는 다음 내비게이션 시작부터 적용됩니다";
+static NSString* const location_in_documents = @"앱 Documents/%@";
+
 // Start
 static NSString* const start = @"내비게이션 시작";
 static NSString* const resume = @"내비게이션으로 돌아가기";
@@ -72,7 +81,6 @@ static NSString* const notch_detail = @"아이폰에서 노치 쪽 화면을 비
 
 // Map data
 static NSString* const location = @"위치";
-static NSString* const location_documents = @"앱 Documents/ATLAN";
 static NSString* const pick_other = @"다른 폴더 선택";
 static NSString* const use_documents = @"앱 폴더 사용";
 static NSString* const status = @"상태";

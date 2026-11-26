@@ -39,7 +39,8 @@
     CLLocationManager* _location;
     atlan::shell::SessionLogFile _logFile;
     NSString* _package;                        // the app package in the ATLAN folder
-    NSString* _mapRoot;                        // the ATLAN folder when the user picked one elsewhere, else nil
+    NSString* _mapRoot;                        // the ATLAN folder when it is not Documents/ATLAN, else nil
+    NSString* _stateRoot;                      // where that data set's NAND state is kept; nil: Documents/ATLAN/NAND
     BOOL _launched;                            // the first screen has been chosen
     LauncherViewController* _launcher;
     NSTimer* _watch;                           // brings the launcher back when a run ends by itself
@@ -186,7 +187,13 @@
 - (void)findPackage {
     LauncherSettings* settings = LauncherSettings.shared;
     NSString* folder = settings.atlanFolder;
-    _mapRoot = settings.atlanFolderIsPicked && folder.length ? folder : nil;
+    // Documents/ATLAN is where the app looks by itself; another data set beside it (ATLAN_RTA, ...) or a folder
+    // picked elsewhere is mounted in its place. A data set in Documents keeps its own NAND state inside it.
+    const BOOL standard = !settings.atlanFolderIsPicked &&
+                          [folder.lastPathComponent caseInsensitiveCompare:@"ATLAN"] == NSOrderedSame &&
+                          [folder.stringByDeletingLastPathComponent isEqualToString:self.documentsPath];
+    _mapRoot = folder.length && !standard ? folder : nil;
+    _stateRoot = _mapRoot && !settings.atlanFolderIsPicked ? [folder stringByAppendingPathComponent:@"NAND"] : nil;
     const std::string path = _mapRoot ? atlan::shell::find_package_in(_mapRoot.UTF8String)
                                       : atlan::shell::find_package(self.documentsPath.UTF8String);
     _package = path.empty() ? nil : [NSString stringWithUTF8String:path.c_str()];
@@ -303,6 +310,7 @@
     const bool perfLog = settings.perfLog, networkLog = settings.networkLog;
     config.perf_log = perfLog;  // the 10-second frame report also lists block cache coverage and the busiest imports
     if (_mapRoot) app.map_root = _mapRoot.UTF8String;
+    if (_stateRoot) app.state_root = _stateRoot.UTF8String;
     app.http = atlan::apple_http_fetch();
     app.network_available = atlan::apple_network_available();
     // Optional byte signatures for run-time library functions the guest image does not export.

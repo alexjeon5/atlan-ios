@@ -25,8 +25,13 @@
     return self;
 }
 - (void)refreshColors {
-    self.layer.borderColor = [LauncherColor.line resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+    UIColor* border = _selectedLook ? LauncherColor.lineStrong : LauncherColor.line;
+    self.layer.borderColor = [border resolvedColorWithTraitCollection:self.traitCollection].CGColor;
     self.layer.shadowColor = [LauncherColor.shadow resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+}
+- (void)setSelectedLook:(BOOL)selectedLook {
+    _selectedLook = selectedLook;
+    [self refreshColors];
 }
 - (void)traitCollectionDidChange:(UITraitCollection*)previous {
     [super traitCollectionDidChange:previous];
@@ -129,6 +134,22 @@ UIView* LKDot(UIColor* color, CGFloat size) {
     dot.layer.cornerRadius = size / 2;
     LKSize(dot, size, size);
     return dot;
+}
+
+UIView* LKRadio(BOOL on) {
+    UIView* ring = [UIView new];
+    ring.layer.cornerRadius = 10;
+    ring.layer.borderWidth = 1.5;
+    ring.backgroundColor = on ? LauncherColor.accent : UIColor.clearColor;
+    ring.layer.borderColor = (on ? LauncherColor.accent : LauncherColor.muted).CGColor;  // fixed accent; muted is close in both modes
+    LKSize(ring, 20, 20);
+    if (on) {
+        UIView* dot = LKDot(LauncherColor.onAccent, 8);
+        [ring addSubview:dot];
+        [NSLayoutConstraint activateConstraints:@[[dot.centerXAnchor constraintEqualToAnchor:ring.centerXAnchor],
+                                                  [dot.centerYAnchor constraintEqualToAnchor:ring.centerYAnchor]]];
+    }
+    return ring;
 }
 
 UIImageView* LKIcon(NSString* symbol, CGFloat size, UIColor* color) {

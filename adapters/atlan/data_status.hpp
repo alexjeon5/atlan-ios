@@ -4,6 +4,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // What the launcher shows about an ATLAN folder before the app runs: which of its top folders are there, the app's
 // own name and version, and the dates of the map and safe-driving data. Only small files and file tails are read.
@@ -28,6 +29,10 @@ struct AtlanDataStatus {
 
 // Inspects the ATLAN folder at `folder` (folder and file names in any case).
 [[nodiscard]] AtlanDataStatus inspect_atlan_data(const std::string& folder);
+
+// Folders directly inside `parent` that look like an ATLAN folder (they hold at least one of APP, UI, MAP, Sys in
+// any case), by name. Lets several data sets sit side by side, e.g. ATLAN and ATLAN_RTA in the app's Documents.
+[[nodiscard]] std::vector<std::string> find_atlan_folders(const std::string& parent);
 
 // The child of `picked` named ATLAN (any case) when there is one, e.g. when the user picked a whole SD card copy;
 // otherwise `picked` itself.

@@ -26,9 +26,12 @@ public:
         // whether a network is available (nullptr: always). Called from host threads and the guest thread.
         HttpFetch http;
         std::function<bool()> network_available;
-        // The ATLAN folder when it lies outside the data root (a folder the user picked elsewhere), read in place.
-        // What the app writes stays in the data root's ATLAN/NAND. Empty: the data root's ATLAN folder.
+        // The ATLAN folder when it is not the data root's ATLAN (another data set beside it, or a folder the user
+        // picked elsewhere), read in place. Empty: the data root's ATLAN folder.
         std::string map_root;
+        // Where the app's own state (its NAND folder) is kept when `map_root` is set. Empty: the data root's
+        // ATLAN/NAND.
+        std::string state_root;
     };
     AtlanAdapter();
     explicit AtlanAdapter(Config config);
