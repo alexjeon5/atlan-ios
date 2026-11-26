@@ -27,6 +27,9 @@ public:
         // The ATLAN folder when it lies outside the data root (a folder the user picked elsewhere), read in place.
         // What the app writes stays in the data root's ATLAN/NAND. Empty: the data root's ATLAN folder.
         std::string map_root;
+        // Native replacements of the app's own functions compare every input class one by one before they are
+        // installed instead of a sample. Takes far longer; for checking a new build of the app once.
+        bool exhaustive_native_checks{};
     };
     AtlanAdapter();
     explicit AtlanAdapter(Config config);
