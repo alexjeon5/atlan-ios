@@ -32,7 +32,9 @@ int main(int argc, char** argv) {
     context.set_log([](const std::string& line) { std::cout << "gl: " << line << std::endl; });
     const bool raw = std::getenv("ATLAN_RAW_GL") != nullptr;
     atlan::shell::SessionConfig config;
-    config.adapter = std::make_shared<atlan::shell::AtlanAdapter>();
+    atlan::shell::AtlanAdapter::Config adapter_config;
+    adapter_config.exhaustive_native_checks = std::getenv("ATLAN_NATIVE_CHECK_ALL") != nullptr;  // slow; new app builds
+    config.adapter = std::make_shared<atlan::shell::AtlanAdapter>(std::move(adapter_config));
     config.library_path = argv[1];
     config.data_root = argv[2];
     if (raw) config.gl_backend = &recorder;

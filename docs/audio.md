@@ -19,6 +19,10 @@
 
 OpenSL ES와 별개로, 앱의 Java 쪽이 미디어 플레이어로 데이터 폴더의 WAV 파일을 직접 재생하는 경우가 있다. 엔진은 `atlan/wav.hpp`의 `parse_wav`(16비트 PCM, `WAVE_FORMAT_EXTENSIBLE` 포함)와 `play_wav_file`(파일 하나를 처음부터 한 번 재생하는 스트림)을 제공하고, 어댑터는 `AppHost::audio()`로 세션과 같은 `AudioSink`를 받아 쓴다. 게스트의 OpenSL ES 출력과 같은 장치·오디오 세션으로 나간다. 어떤 파일을 언제 재생하고 멈추는지는 어댑터가 정하고, 스트림은 `uninstall_java()`에서 닫는다.
 
+## iOS 오디오 세션
+
+세션은 `Playback` 카테고리, `VoicePrompt` 모드로 다른 앱 소리와 섞어서(`MixWithOthers`) 재생한다. 들리는 PCM(약 -54 dBFS 이상의 샘플)이 스트림에 들어오거나 장치로 나가면 그때부터 마지막 소리 뒤 1초까지만 `DuckOthers`(말소리 앱은 `InterruptSpokenAudioAndMixWithOthers`)로 다른 앱 소리를 낮춘다. 게스트가 재생 상태를 켜 둔 채 버퍼를 넣는지와 무관하게 실제 소리로 판단한다. 다른 앱은 세션을 다시 활성화해야 덕킹 변경을 따르므로, 바뀔 때마다 실행 중인 큐를 멈추고 세션을 끄고(덕킹을 풀 때는 다른 앱에 알림) 옵션을 바꿔 다시 켠 뒤 큐를 재개한다. 큐는 버퍼를 그대로 들고 있어서 소리가 빠지지 않는다. 백그라운드에서는 덕킹하지 않는다(정지된 앱은 덕킹을 풀 수 없다). `AppleAudioSink::set_duck_others(false)`면 늘 섞기만 한다. iOS 셸은 런처 설정 > 일반 > 소리 토글을 이 값으로 넘긴다.
+
 ## 완료 콜백
 
 게스트 콜백은 오디오 장치 스레드가 아니라 게스트 스레드에서만 돈다. 임베더가 서비스 밖(최상위)에서 `OpenSles::pump`를 주기적으로 부르면, 장치가 재생을 끝낸 버퍼마다 콜백(`caller`=큐 인터페이스, `context`)을 호출한다. 재생된 양은 `AudioStream::played_bytes()`로 판단한다.
