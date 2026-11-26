@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/data_status.hpp"
-#include "shell/app_package.hpp"
+#include "adapters/atlan/app_package.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>

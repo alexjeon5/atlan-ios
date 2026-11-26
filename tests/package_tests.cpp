@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Synthetic APK and encoded .dat packages: DEFLATE decoding, library selection, .dat decoding and discovery, and the
 // launcher's view of a synthetic data folder.
-#include "shell/app_package.hpp"
+#include "adapters/atlan/app_package.hpp"
 #include "adapters/atlan/data_status.hpp"
 #include <chrono>
 #include <cstdio>

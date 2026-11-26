@@ -9,7 +9,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include "adapters/atlan/atlan_adapter.hpp"
 #include "atlan/demo.hpp"
-#include "shell/app_package.hpp"
+#include "adapters/atlan/app_package.hpp"
 #include "adapters/atlan/data_status.hpp"
 #include <string>
 #include <cstdio>
@@ -274,7 +274,7 @@
     return [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject.path;
 }
 
-// The app as installed on Android: ATLAN/APP/atlan.dat or an APK in the ATLAN folder (shell/app_package.hpp), in
+// The app as installed on Android: ATLAN/APP/atlan.dat or an APK in the ATLAN folder (adapters/atlan/app_package.hpp), in
 // the app's Documents or in a folder the user picked in the launcher.
 - (void)findPackage {
     LauncherSettings* settings = LauncherSettings.shared;

@@ -4,7 +4,7 @@
 
 ## 온라인 상태
 
-설정의 `USECONNECTIONMANAGER`가 켜져 있으면(기본값 1) 게스트는 Java 쪽이 온라인 상태 메시지를 보내기 전까지 오프라인으로 동작한다. 원본 Java 코드는 게스트가 `MainActivity.SendMsgFromAtlan`으로 길안내 시작(17)을 알리면 핸들러에서 `nativeReceiveMsgData(REC_ONLINE_STATE = 0x429, 연결 여부, 0, null)`로 답하고, 연결 상태가 바뀔 때마다(`CONNECTIVITY_CHANGE`) 같은 메시지를 다시 보낸다. `shell/java_services.*`가 이를 그대로 따르고, 게스트가 직접 묻는 `MainActivity.IsConnected()`에도 답한다. 연결 여부는 `SessionConfig::network_available`(iOS: Network 프레임워크 경로 감시, 없으면 항상 연결)로 정한다.
+설정의 `USECONNECTIONMANAGER`가 켜져 있으면(기본값 1) 게스트는 Java 쪽이 온라인 상태 메시지를 보내기 전까지 오프라인으로 동작한다. 원본 Java 코드는 게스트가 `MainActivity.SendMsgFromAtlan`으로 길안내 시작(17)을 알리면 핸들러에서 `nativeReceiveMsgData(REC_ONLINE_STATE = 0x429, 연결 여부, 0, null)`로 답하고, 연결 상태가 바뀔 때마다(`CONNECTIVITY_CHANGE`) 같은 메시지를 다시 보낸다. `adapters/atlan/java_services.*`가 이를 그대로 따르고, 게스트가 직접 묻는 `MainActivity.IsConnected()`에도 답한다. 연결 여부는 `SessionConfig::network_available`(iOS: Network 프레임워크 경로 감시, 없으면 항상 연결)로 정한다.
 
 ## Java 쪽 HTTP
 

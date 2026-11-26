@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include "shell/guest_ini.hpp"
+#include "adapters/atlan/guest_ini.hpp"
 #include <cstdint>
 
 namespace atlan::shell {
