@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "adapters/atlan/charset_conversion.hpp"
+#include "adapters/atlan/glyph_cache.hpp"
 #include "adapters/atlan/quad_geometry.hpp"
 #include "adapters/atlan/speed_readout.hpp"
 #include "atlan/audio.hpp"
@@ -381,6 +382,20 @@ void speed_readout() {
         check(!factory(0x05d12003) && !factory(0xe5512003) && !factory(0xe7d12003) && !factory(0xe5f12003), "nothing else");
     }
 }
+// The glyph pool size instruction: only an always-executed MOV of an immediate below the new size is replaced.
+void glyph_cache() {
+    using namespace atlan::shell::glyph_cache;
+    const auto move = decode_move_immediate(0xe3a02a01);  // mov r2, #4096
+    check(move && move->rd == 2 && move->value == 4096, "MOV immediate with a rotation");
+    check(decode_move_immediate(0xe3a01020)->value == 32 && decode_move_immediate(0xe3a0f020) == std::nullopt, "no PC");
+    check(!decode_move_immediate(0x03a02a01) && !decode_move_immediate(0xe3b02a01) && !decode_move_immediate(0xe1a02003),
+          "not conditional, flag-setting or register moves");
+    const auto set = glyph_cache_set();
+    check(set.members.size() == 1 && set.instructions.size() == 1, "one instruction");
+    const auto& factory = set.instructions.begin()->second;
+    check(static_cast<bool>(factory(0xe3a02a01)), "a 4 KB pool is enlarged");
+    check(!factory(0xe3a02601) && !factory(0xe3a02602), "a pool already as large is left alone");
+}
 // The app's geometry as the host computes it (the comparison with the guest's own code runs at install).
 void quad_geometry() {
     using namespace atlan::shell::geometry;
@@ -474,6 +489,7 @@ int main() {
     try {
         quad_geometry();
         speed_readout();
+        glyph_cache();
         text_conversion();
         home_button();
         frame_hash();
