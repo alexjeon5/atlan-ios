@@ -11,6 +11,7 @@ NSString* const keyAutoStartAsked = @"launcher.autoStartAsked";
 NSString* const keySetupDone = @"launcher.setupDone";
 NSString* const keyAppearance = @"launcher.appearance";
 NSString* const keyNotchInset = @"launcher.notchInset";
+NSString* const keyDuckOthers = @"launcher.duckOthers";
 NSString* const keySessionLog = @"launcher.sessionLog";
 NSString* const keyPerfLog = @"launcher.perfLog";
 NSString* const keyNetworkLog = @"launcher.networkLog";
@@ -30,7 +31,7 @@ NSString* const keyActiveFolder = @"launcher.activeFolder";
     dispatch_once(&once, ^{
         settings = [LauncherSettings new];
         [NSUserDefaults.standardUserDefaults registerDefaults:@{
-            keyNotchInset: @YES, keySessionLog: @YES, keyPerfLog: @YES, keyNetworkLog: @NO, keyProfiler: @NO,
+            keyNotchInset: @YES, keyDuckOthers: @YES, keySessionLog: @YES, keyPerfLog: @YES, keyNetworkLog: @NO, keyProfiler: @NO,
         }];
     });
     return settings;
@@ -53,6 +54,8 @@ NSString* const keyActiveFolder = @"launcher.activeFolder";
 - (void)setSetupDone:(BOOL)value { [self setFlag:value forKey:keySetupDone]; }
 - (BOOL)notchInset { return [self flag:keyNotchInset]; }
 - (void)setNotchInset:(BOOL)value { [self setFlag:value forKey:keyNotchInset]; }
+- (BOOL)duckOthers { return [self flag:keyDuckOthers]; }
+- (void)setDuckOthers:(BOOL)value { [self setFlag:value forKey:keyDuckOthers]; }
 - (BOOL)sessionLog { return [self flag:keySessionLog]; }
 - (void)setSessionLog:(BOOL)value { [self setFlag:value forKey:keySessionLog]; }
 - (BOOL)perfLog { return [self flag:keyPerfLog]; }

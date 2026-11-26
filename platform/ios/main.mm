@@ -231,6 +231,7 @@
 
 - (void)settingsChanged {
     [self layoutSurface];  // the notch inset may have been switched
+    atlan::AppleAudioSink::set_duck_others(LauncherSettings.shared.duckOthers);
 }
 
 // A line of the shell itself, kept in the session log file.
@@ -257,6 +258,7 @@
     } catch (const std::exception&) {
         [self note:@"selftest failed"];
     }
+    atlan::AppleAudioSink::set_duck_others(LauncherSettings.shared.duckOthers);
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged)
         name:LauncherSettingsDidChange object:nil];
 }
