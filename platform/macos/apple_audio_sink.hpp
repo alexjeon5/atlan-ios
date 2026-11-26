@@ -10,8 +10,8 @@ namespace atlan {
 // runs ahead of what is audible by at most the queue depth (three ~20 ms
 // buffers). flush() drops the ring; data already in device buffers still plays.
 // On iOS the first stream that plays activates a voice-prompt audio session that mixes with other apps.
-// While audible PCM plays (and for a short tail after it) the session lowers other apps' audio, unless
-// set_duck_others(false). Starting, pausing and disposing queues and session changes run on a serial
+// While a prompt plays (one appended buffer audible for at least 0.7 s, so not a button click) and for a
+// short tail after it, the session lowers other apps' audio, unless set_duck_others(false). Starting, pausing and disposing queues and session changes run on a serial
 // dispatch queue so the guest thread never waits for the device.
 class AppleAudioSink final : public AudioSink {
 public:
