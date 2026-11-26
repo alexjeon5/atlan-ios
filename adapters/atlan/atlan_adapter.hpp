@@ -32,6 +32,9 @@ public:
         // Where the app's own state (its NAND folder) is kept when `map_root` is set. Empty: the data root's
         // ATLAN/NAND.
         std::string state_root;
+        // Native replacements of the app's own functions compare every input class one by one before they are
+        // installed instead of a sample. Takes far longer; for checking a new build of the app once.
+        bool exhaustive_native_checks{};
     };
     AtlanAdapter();
     explicit AtlanAdapter(Config config);
