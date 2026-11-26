@@ -155,5 +155,7 @@ private:
     GlClear clear_;
     std::uint32_t unpack_alignment_{4};
     std::uint64_t next_serial_{1};
+    GlDraw scratch_;                  // the packet draw() fills and hands to the sink
+    std::vector<std::uint32_t> fan_;  // a fan's indices before draw() expands them
 };
 }

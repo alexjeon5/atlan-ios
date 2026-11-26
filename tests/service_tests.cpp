@@ -50,7 +50,8 @@ const Trap traps[] = {{"strcmp", 0xf0000000}, {"strncmp", 0xf0000004}, {"memcmp"
                       {"mkdir", 0xf000005c}, {"remove", 0xf0000060}, {"rename", 0xf0000064}, {"open", 0xf0000068},
                       {"read", 0xf000006c}, {"write", 0xf0000070}, {"close", 0xf0000074}, {"lseek", 0xf0000078},
                       {"fgets", 0xf000007c}, {"srand48", 0xf0000080}, {"lrand48", 0xf0000084}, {"umask", 0xf0000088},
-                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}, {"qsort", 0xf00000bc}, {"cmp", 0xf00000c0}};
+                      {"fsync", 0xf000008c}, {"ftruncate", 0xf0000090}, {"strtok_r", 0xf0000094}, {"atoi", 0xf0000098}, {"strcasecmp", 0xf000009c}, {"strncasecmp", 0xf00000a0}, {"strstr", 0xf00000a4}, {"strtol", 0xf00000a8}, {"sqrt", 0xf00000ac}, {"strtok", 0xf00000b0}, {"setjmp", 0xf00000b4}, {"longjmp", 0xf00000b8}, {"qsort", 0xf00000bc}, {"cmp", 0xf00000c0},
+                      {"memset", 0xf00000c4}, {"memcpy", 0xf00000c8}, {"memmove", 0xf00000cc}, {"strlen", 0xf00000d0}};
 std::uint32_t trap(const char* name) {
     for (const auto& t : traps) if (std::strcmp(t.name, name) == 0) return t.address;
     throw std::logic_error("unknown trap");
@@ -522,9 +523,39 @@ void jni_korean_strings() {
           "input statistics classify CP949, UTF-8, ASCII and malformed input");
 }
 }
+// memcmp, strcmp, strncmp, memset, memcpy, memmove and strlen run inline from the block cache; the step path runs
+// their services. Both give the same results, the inline calls are counted with the imports, and a call that
+// faults is left to the service, which reports it without having changed memory.
+void inline_fast_paths() {
+    for (const bool cached : {true, false}) {
+        Fixture f;
+        f.dispatcher.set_block_cache(cached);
+        put_text(f.runtime.memory, data, "abcdef");
+        put_text(f.runtime.memory, data + 0x10, "abcxyz");
+        check(f.call("memcmp", {data, data + 0x10, 6}).stop == atlan::Stop::returned && f.r0() == std::uint32_t('d' - 'x'), "memcmp difference");
+        check(f.call("memcmp", {data, data + 0x10, 3}).stop == atlan::Stop::returned && f.r0() == 0, "memcmp equal prefix");
+        check(f.call("strncmp", {data, data + 0x10, 4}).stop == atlan::Stop::returned && f.r0() == std::uint32_t('d' - 'x'), "strncmp difference");
+        check(f.call("strcmp", {data, data}).stop == atlan::Stop::returned && f.r0() == 0, "strcmp equal");
+        check(f.call("strlen", {data}).stop == atlan::Stop::returned && f.r0() == 6, "strlen");
+        check(f.call("memset", {data + 0x20, 0x41, 5}).stop == atlan::Stop::returned && f.r0() == data + 0x20, "memset returns dest");
+        check(f.call("memcpy", {data + 0x40, data + 0x20, 5}).stop == atlan::Stop::returned && f.r0() == data + 0x40, "memcpy returns dest");
+        check(text_at(f.runtime.memory, data + 0x40) == "AAAAA", "memcpy copies");
+        check(f.call("memmove", {data + 0x41, data + 0x40, 5}).stop == atlan::Stop::returned && text_at(f.runtime.memory, data + 0x40) == "AAAAAA",
+              "memmove overlap");
+        // A copy that runs off the mapping: the service reports it and nothing was written.
+        put_text(f.runtime.memory, data + 0x3ff0, "keep");
+        check(f.call("memcpy", {data + 0x3ff0, data, 0x20}).stop == atlan::Stop::service_error, "memcpy past the mapping fails");
+        check(text_at(f.runtime.memory, data + 0x3ff0) == "keep", "failed memcpy wrote nothing");
+        check(f.call("memcmp", {data, 0x9000000, 4}).stop == atlan::Stop::service_error, "memcmp of unmapped memory fails");
+        const auto& counts = f.dispatcher.import_counts();
+        check(counts.count("memcmp") != 0 && counts.at("memcmp") == 3, "memcmp calls counted");
+        check(counts.count("memcpy") != 0 && counts.at("memcpy") == 2, "memcpy calls counted");
+    }
+}
 int main() {
     try {
         strings();
+        inline_fast_paths();
         printf_family();
         mapping();
         files();
