@@ -399,6 +399,29 @@ void libc_extras() {
         check(guest_ordered, "qsort orders the array through a guest comparator past the caller's budget");
         check(f.dispatcher.remaining_budget() == 0, "the comparator's instructions are charged to the caller");
     }
+    // A comparator that only orders one field is answered on the host: the same order, no guest instructions.
+    for (const bool is_signed : {false, true}) {
+        constexpr std::uint32_t code = 0x41000;
+        const std::uint32_t words[] = {0xe5903004, 0xe5912004, 0xe1530002, is_signed ? 0xca000002U : 0x8a000002U, is_signed ? 0xa3a00000U : 0x23a00000U,
+                                       is_signed ? 0xb3e00000U : 0x33e00000U, 0xe12fff1e, 0xe3a00001, 0xe12fff1e};
+        std::array<std::byte, sizeof words> bytes{};
+        std::memcpy(bytes.data(), words, sizeof words);
+        f.runtime.memory.map(code, 0x1000, atlan::Permissions::read_execute, bytes);
+        const std::int32_t keys[] = {5, -2, 9, 0, 3, 3, -7};
+        for (unsigned i = 0; i < 7; ++i) {  // 8-byte elements: an id, then the key
+            put32(f.runtime.memory, data + 0x400 + 8 * i, i);
+            put32(f.runtime.memory, data + 0x404 + 8 * i, static_cast<std::uint32_t>(keys[i]));
+        }
+        f.runtime.cpu.registers[13] = stack;
+        const std::vector<std::uint32_t> args{data + 0x400, 7, 8, code};
+        const auto sorted = f.dispatcher.call(f.runtime, trap("qsort"), args, stack, sentinel, 1000);
+        // unsigned: 0, 3, 3, 5, 9, then -7 (0xfffffff9) and -2 (0xfffffffe) as large numbers
+        const std::uint32_t expected_ids[2][7] = {{3, 4, 5, 0, 2, 6, 1}, {6, 1, 3, 4, 5, 0, 2}};
+        bool ids = sorted.stop == atlan::Stop::returned && sorted.retired == 0;
+        for (unsigned i = 0; i < 7; ++i) ids &= get32(f.runtime.memory, data + 0x400 + 8 * i) == expected_ids[is_signed][i];
+        check(ids, is_signed ? "a signed field comparator orders on the host, stable" : "an unsigned field comparator orders on the host, stable");
+        f.runtime.memory.unmap(code, 0x1000);
+    }
     // setjmp saves callee-saved state; longjmp resumes at the setjmp return address with the given value.
     f.runtime.cpu.registers[4] = 0x1234; f.runtime.cpu.registers[14] = 0xffff0000; f.runtime.cpu.registers[13] = stack;
     check(f.call("setjmp", {data + 0x300}).stop == atlan::Stop::returned && f.r0() == 0, "setjmp returns 0");

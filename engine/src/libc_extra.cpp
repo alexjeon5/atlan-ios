@@ -33,6 +33,31 @@ void double_result(ImportCall& call, double value) {
     call.runtime().cpu.registers[1] = static_cast<std::uint32_t>(bits >> 32);
 }
 void float_result(ImportCall& call, float value) { call.set_result(std::bit_cast<std::uint32_t>(value)); }
+bool get_word(Memory& memory, std::uint32_t address, std::uint32_t& out) {
+    std::array<std::byte, 4> bytes{};
+    if (!memory.read(address, bytes)) return false;
+    out = 0;
+    for (unsigned i = 0; i < 4; ++i) out |= std::to_integer<std::uint32_t>(bytes[i]) << (8 * i);
+    return true;
+}
+// A qsort comparator that orders by one 32-bit field, `a->f > b->f ? 1 : a->f >= b->f ? 0 : -1`, in the A32 form
+// compilers emit for it:
+//   ldr r3, [r0, #K]; ldr r2, [r1, #K]; cmp r3, r2; bhi|bgt 1f; movcs|movge r0, #0; mvncc|mvnlt r0, #0; bx lr;
+//   1: mov r0, #1; bx lr
+struct FieldOrder { std::uint32_t offset{}; bool is_signed{}; };
+std::optional<FieldOrder> field_comparator(Memory& memory, std::uint32_t address) {
+    if ((address & 3U) != 0) return std::nullopt;
+    std::array<std::uint32_t, 9> w{};
+    for (unsigned i = 0; i < w.size(); ++i)
+        if (!get_word(memory, address + 4 * i, w[i])) return std::nullopt;
+    const std::uint32_t offset = w[0] & 0xfffU;
+    if ((w[0] & 0xfffff000U) != 0xe5903000U || w[1] != (0xe5912000U | offset) || w[2] != 0xe1530002U || w[6] != 0xe12fff1eU ||
+        w[7] != 0xe3a00001U || w[8] != 0xe12fff1eU)
+        return std::nullopt;
+    if (w[3] == 0x8a000002U && w[4] == 0x23a00000U && w[5] == 0x33e00000U) return FieldOrder{offset, false};
+    if (w[3] == 0xca000002U && w[4] == 0xa3a00000U && w[5] == 0xb3e00000U) return FieldOrder{offset, true};
+    return std::nullopt;
+}
 }
 void install_libc_extra(ImportDispatcher& dispatcher) {
     // void* memchr(const void* s, int c, size_t n)
@@ -188,7 +213,18 @@ void install_libc_extra(ImportDispatcher& dispatcher) {
         std::vector<std::byte> data(std::size_t{count} * size);
         if (!call.runtime().memory.read(base, data)) return "qsort array is unreadable";
         std::optional<std::string> failure;
+        // A comparator that only compares one field is answered from the fields, read once (the elements do not move
+        // while the sort compares): the same order, without a guest call per comparison.
+        std::vector<std::uint32_t> keys;
+        const auto field = field_comparator(call.runtime().memory, compare);
+        if (field) {
+            keys.resize(count);
+            for (std::uint32_t i = 0; i < count; ++i)
+                if (!get_word(call.runtime().memory, base + i * size + field->offset, keys[i])) { keys.clear(); break; }  // the guest's comparator faults itself
+        }
         const auto less_or_equal = [&](std::uint32_t a, std::uint32_t b) {  // true when element a sorts before or equal to b
+            if (!keys.empty())
+                return field->is_signed ? static_cast<std::int32_t>(keys[a]) <= static_cast<std::int32_t>(keys[b]) : keys[a] <= keys[b];
             if (failure) return true;
             const std::array<std::uint32_t, 2> args{base + a * size, base + b * size};
             const auto outcome = call.dispatcher().call_back(call.runtime(), compare, args);
