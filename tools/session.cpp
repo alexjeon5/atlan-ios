@@ -7,11 +7,13 @@
 #include "adapters/atlan/atlan_adapter.hpp"
 #include "preview_sink.hpp"
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <thread>
 #include <vector>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 int main(int argc, char** argv) {
     if (argc < 3) { std::cerr << "usage: atlan-session LIBRARY DATA_ROOT [GL_TRACE_FILE [--sources]]\n"; return 2; }
@@ -51,9 +53,11 @@ int main(int argc, char** argv) {
     if (const char* profile = std::getenv("ATLAN_PROFILE")) config.profile_path = profile;  // per-function profile files
     if (const char* budget = std::getenv("ATLAN_INIT_BUDGET")) config.native_init_budget = std::strtoull(budget, nullptr, 10);
     if (const char* frames = std::getenv("ATLAN_FRAMES")) config.render_frames = static_cast<std::uint32_t>(std::atoi(frames));
-    // ATLAN_TAP=X,Y: where the test tap lands in guest screen pixels (default 400,240).
+    // ATLAN_TAP=X,Y: where the test tap lands in guest screen pixels (default 400,240); ATLAN_TAP=none: no test tap.
     float tap_x = 400, tap_y = 240;
-    if (const char* tap = std::getenv("ATLAN_TAP")) std::sscanf(tap, "%f,%f", &tap_x, &tap_y);
+    const char* tap_setting = std::getenv("ATLAN_TAP");
+    const bool test_tap = !tap_setting || std::string(tap_setting) != "none";
+    if (tap_setting && test_tap) std::sscanf(tap_setting, "%f,%f", &tap_x, &tap_y);
     // ATLAN_INPUT_CFG: input bindings file (shell/input.hpp). With it, one location fix and one tap are queued before the first frame, to exercise the bound native methods headless.
     atlan::shell::InputQueue input;
     if (const char* path = std::getenv("ATLAN_INPUT_CFG")) {
@@ -63,8 +67,10 @@ int main(int argc, char** argv) {
         config.input_bindings = std::move(*bindings);
         config.input = &input;
         input.push(atlan::shell::LocationFix{37.5665, 126.9780, 38.0, 0.0, 0.0, 5.0, 1700000000000ULL});
-        input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap_x, tap_y, 1000});
-        input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap_x, tap_y, 1050});
+        if (test_tap) {
+            input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap_x, tap_y, 1000});
+            input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::up, 0, tap_x, tap_y, 1050});
+        }
     }
     // ATLAN_INTERACTIVE_SECONDS=N: keep drawing after the first frames for N seconds (the interactive loop);
     // ATLAN_ON_DEMAND=1 draws those frames only when the guest asks for one.
@@ -88,11 +94,26 @@ int main(int argc, char** argv) {
                 if (*list == ';') ++list;
             }
         }
+        // ATLAN_DRIVE="LAT,LON,COURSE,KMH[,FROM_MS]": from FROM_MS after the start (default 0), one location fix per second
+        // driving straight from LAT,LON at COURSE degrees and KMH, stamped with the wall clock (needs ATLAN_INPUT_CFG).
+        struct Drive { double lat{}, lon{}, course{}, kmh{}; long from_ms{}; bool on{}; } drive;
+        if (const char* d = std::getenv("ATLAN_DRIVE"))
+            drive.on = std::sscanf(d, "%lf,%lf,%lf,%lf,%ld", &drive.lat, &drive.lon, &drive.course, &drive.kmh, &drive.from_ms) >= 4;
+        long next_fix_ms = drive.from_ms;
         const auto start = std::chrono::steady_clock::now();
         const auto deadline = start + std::chrono::seconds(std::atoi(interactive));
         std::size_t next_tap = 0;
         while (session.state() == atlan::shell::SessionState::running && std::chrono::steady_clock::now() < deadline) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            if (drive.on && elapsed >= next_fix_ms) {
+                const double metres = drive.kmh / 3.6 * static_cast<double>(next_fix_ms - drive.from_ms) / 1000.0;
+                const double rad = drive.course * 3.14159265358979323846 / 180.0;
+                const double lat = drive.lat + metres * std::cos(rad) / 111320.0;
+                const double lon = drive.lon + metres * std::sin(rad) / (111320.0 * std::cos(drive.lat * 3.14159265358979323846 / 180.0));
+                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                input.push(atlan::shell::LocationFix{lat, lon, 38.0, drive.kmh / 3.6, drive.course, 8.0, static_cast<std::uint64_t>(now_ms)});
+                next_fix_ms += 1000;
+            }
             if (next_tap < taps.size() && elapsed >= taps[next_tap].ms) {
                 const auto& tap = taps[next_tap++];
                 input.push(atlan::shell::TouchEvent{atlan::shell::TouchPhase::down, 0, tap.x, tap.y, static_cast<std::uint64_t>(elapsed)});

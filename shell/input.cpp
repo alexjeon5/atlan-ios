@@ -93,7 +93,9 @@ bool parameters(const std::string& signature, std::string& out, std::string& err
     }
     return true;
 }
-bool is_text(InputSource source) { return source == InputSource::gga || source == InputSource::rmc; }
+bool is_text(InputSource source) {
+    return source == InputSource::gga || source == InputSource::gsa || source == InputSource::gsv || source == InputSource::rmc;
+}
 
 struct SourceName { const char* name; InputSource source; bool touch, location; };
 constexpr SourceName sources[] = {
@@ -103,6 +105,7 @@ constexpr SourceName sources[] = {
     {"longitude", InputSource::longitude, false, true}, {"altitude", InputSource::altitude, false, true},
     {"speed", InputSource::speed, false, true},     {"course", InputSource::course, false, true},
     {"accuracy", InputSource::accuracy, false, true}, {"gga", InputSource::gga, false, true},
+    {"gsa", InputSource::gsa, false, true},         {"gsv", InputSource::gsv, false, true},
     {"rmc", InputSource::rmc, false, true}};
 
 bool number(const std::string& text, double& out) {
@@ -209,13 +212,51 @@ std::string clock(const UtcTime& t) {
     std::snprintf(out, sizeof out, "%02d%02d%02d.%02d", t.hour, t.minute, centis / 100, centis % 100);
     return out;
 }
+
+// The nominal sky every sentence describes (see nmea_gga): PRN, elevation and azimuth in degrees, C/N0 in dB-Hz.
+struct Satellite { int prn, elevation, azimuth, snr; };
+constexpr Satellite sky[] = {{2, 62, 40, 44},  {5, 45, 110, 42},  {12, 30, 200, 38}, {15, 72, 300, 45},
+                             {18, 25, 330, 35}, {21, 50, 160, 41}, {24, 15, 80, 32},  {29, 38, 250, 39}};
+constexpr int sky_size = static_cast<int>(sizeof sky / sizeof sky[0]);
+double hdop(const LocationFix& fix) { return std::clamp(fix.accuracy_m / 5.0, 0.5, 50.0); }
 }
 
 std::string nmea_gga(const LocationFix& fix) {
     const auto t = utc(fix.time_ms);
     char rest[128];
-    std::snprintf(rest, sizeof rest, ",1,08,%.1f,%.1f,M,0.0,M,,", std::clamp(fix.accuracy_m / 5.0, 0.5, 50.0), fix.altitude_m);
+    std::snprintf(rest, sizeof rest, ",1,%02d,%.1f,%.1f,M,0.0,M,,", sky_size, hdop(fix), fix.altitude_m);
     return sentence("GPGGA," + clock(t) + "," + angle(fix.latitude, 2, 'N', 'S') + "," + angle(fix.longitude, 3, 'E', 'W') + rest);
+}
+
+std::string nmea_gsa(const LocationFix& fix) {
+    // Auto mode, 3D fix, the 12 satellite slots, PDOP, HDOP, VDOP and the NMEA 4.1 system id (1: GPS).
+    std::string body = "GPGSA,A,3";
+    char field[32];
+    for (int i = 0; i < 12; ++i) {
+        if (i < sky_size) std::snprintf(field, sizeof field, ",%02d", sky[i].prn);
+        else std::snprintf(field, sizeof field, ",");
+        body += field;
+    }
+    const double h = hdop(fix);
+    std::snprintf(field, sizeof field, ",%.1f,%.1f,%.1f,1", std::min(99.0, h * 1.5), h, std::min(99.0, h * 1.2));
+    return sentence(body + field);
+}
+
+std::vector<std::string> nmea_gsv(const LocationFix&) {
+    constexpr int per_sentence = 4;
+    const int count = (sky_size + per_sentence - 1) / per_sentence;
+    std::vector<std::string> out;
+    for (int n = 0; n < count; ++n) {
+        char field[64];
+        std::snprintf(field, sizeof field, "GPGSV,%d,%d,%02d", count, n + 1, sky_size);
+        std::string body = field;
+        for (int i = n * per_sentence; i < std::min(sky_size, (n + 1) * per_sentence); ++i) {
+            std::snprintf(field, sizeof field, ",%02d,%02d,%03d,%02d", sky[i].prn, sky[i].elevation, sky[i].azimuth, sky[i].snr);
+            body += field;
+        }
+        out.push_back(sentence(body));
+    }
+    return out;
 }
 
 std::string nmea_rmc(const LocationFix& fix) {
@@ -226,6 +267,26 @@ std::string nmea_rmc(const LocationFix& fix) {
     std::snprintf(date, sizeof date, "%02d%02d%02d", t.day, t.month, t.year % 100);
     return sentence("GPRMC," + clock(t) + ",A," + angle(fix.latitude, 2, 'N', 'S') + "," + angle(fix.longitude, 3, 'E', 'W') + "," +
                     speed + "," + course + "," + date + ",,,A");
+}
+
+namespace {
+std::vector<std::string> sentences(InputSource source, const LocationFix& fix) {
+    switch (source) {
+        case InputSource::gga: return {nmea_gga(fix)};
+        case InputSource::gsa: return {nmea_gsa(fix)};
+        case InputSource::gsv: return nmea_gsv(fix);
+        default: return {nmea_rmc(fix)};
+    }
+}
+}
+
+std::size_t native_call_count(const NativeBinding& binding, const InputEvent& event) {
+    const auto* fix = std::get_if<LocationFix>(&event);
+    std::size_t count = 1;
+    if (!fix) return count;
+    for (const auto& a : binding.arguments)
+        if (is_text(a.source)) count = std::max(count, sentences(a.source, *fix).size());
+    return count;
 }
 
 std::optional<InputBindings> parse_input_bindings(const std::string& text, std::string& error) {
@@ -283,7 +344,7 @@ std::optional<InputBindings> load_input_bindings(const std::string& path, std::s
 
 std::optional<std::vector<std::uint32_t>> native_call_words(
     const NativeBinding& binding, const InputEvent& event, const std::array<std::int32_t, 4>& actions,
-    std::uint32_t env, std::uint32_t receiver, std::string& error, const StringArgument& strings) {
+    std::uint32_t env, std::uint32_t receiver, std::string& error, const StringArgument& strings, std::size_t part) {
     std::string types;
     if (!parameters(binding.signature, types, error)) return std::nullopt;
     if (types.size() != binding.arguments.size()) {
@@ -301,7 +362,8 @@ std::optional<std::vector<std::uint32_t>> native_call_words(
         if (is_text(source) || types[i] == 's') {
             const auto* fix = std::get_if<LocationFix>(&event);
             if (!is_text(source) || types[i] != 's' || !fix) { error = binding.name + binding.signature + " text argument mismatch"; return std::nullopt; }
-            const auto handle = strings ? strings(i, source == InputSource::gga ? nmea_gga(*fix) : nmea_rmc(*fix)) : 0;
+            const auto texts = sentences(source, *fix);
+            const auto handle = strings ? strings(i, texts[std::min(part, texts.size() - 1)]) : 0;
             if (handle == 0) { error = binding.name + binding.signature + " cannot create its String argument"; return std::nullopt; }
             words.push_back(handle);
             continue;

@@ -458,6 +458,8 @@ void GuestSession::run() {
                     for (const auto* binding : bindings) {
                     const auto target = resolve(*binding);
                     if (target.address == 0) continue;
+                    const auto calls = native_call_count(*binding, event);
+                    for (std::size_t part = 0; part < calls; ++part) {
                     std::string why;
                     const auto words = native_call_words(*binding, event, config_.input_bindings.actions, java.env(), target.receiver, why,
                                                          [&](std::size_t index, const std::string& text) -> std::uint32_t {
@@ -465,8 +467,8 @@ void GuestSession::run() {
                         if (handle == 0) handle = java.new_string(text);
                         else if (!java.set_string_text(handle, text)) return 0;
                         return handle;
-                    });
-                    if (!words) { note("input: " + why); continue; }
+                    }, part);
+                    if (!words) { note("input: " + why); break; }
                     note(std::string("input: first ") + (touch ? "touch" : "location") + " event -> " + binding->class_name + "." + binding->name);
                     const auto r = dispatcher.call(runtime, target.address, *words, stack_base + stack_bytes,
                                                    return_sentinel, config_.surface_call_budget);
@@ -474,6 +476,7 @@ void GuestSession::run() {
                         log_(describe_state(runtime, dispatcher));
                         fail(describe_stop("input " + binding->name, r));
                         return false;
+                    }
                     }
                     }
                 }
