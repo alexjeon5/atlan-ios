@@ -67,12 +67,16 @@ void AtlanAdapter::configure_files(GuestStdio& stdio, const SessionLog& log) {
     stdio.add_alias("/data/app_storage/Atlan", "ATLAN/NAND");  // stock NANDPATH/CONFIGPATH/SDIPATH: app-written state
     stdio.add_alias("/finetmp/atlan", "ATLAN/NAND/finetmp");  // scratch folder
     stdio.add_anchor("atlan", "ATLAN");
-    // The guest reads a copy of the settings file with one entry controlled here.
+    // The guest reads a copy of the settings file with two entries controlled here.
     // CLOUDMAPPATH: where downloaded map tiles would be kept. The stock value names a folder that does not exist,
     // which keeps the downloader off; a missing or writable value turns it on, and its map read thread is never
     // started here, so the first tile request would stop the guest. Always serve the stock value.
+    // STARTMODEUSE: 1 leaves the choice of map (dynamic 3D, realtime 3D, classic 2D) to the head unit's launcher,
+    // which does not exist here, so the map could never be changed. 0 lets the app offer it itself: a choice screen
+    // at start (continues with the last map after a few seconds) and a map change button in the exit dialog.
+    // Builds without the feature ignore the entry.
     stdio.add_read_filter(settings_file, [](std::string text) {
-        return ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2');
+        return ini_set(ini_set(std::move(text), "CLOUDMAPPATH", "/map/CLOUD_MAP", '2'), "STARTMODEUSE", "0", '1');
     });
     use_connection_manager_ = ini_number(settings, "USECONNECTIONMANAGER").value_or(1) != 0;
     splash_sound_ = stdio.host_path(splash_sound_file);
