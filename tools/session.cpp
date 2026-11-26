@@ -96,18 +96,20 @@ int main(int argc, char** argv) {
                 if (*list == ';') ++list;
             }
         }
-        // ATLAN_DRIVE="LAT,LON,COURSE,KMH[,FROM_MS]": from FROM_MS after the start (default 0), one location fix per second
-        // driving straight from LAT,LON at COURSE degrees and KMH, stamped with the wall clock (needs ATLAN_INPUT_CFG).
-        struct Drive { double lat{}, lon{}, course{}, kmh{}; long from_ms{}; bool on{}; } drive;
+        // ATLAN_DRIVE="LAT,LON,COURSE,KMH[,FROM_MS[,TO_MS]]": from FROM_MS after the start (default 0) until TO_MS (default:
+        // the end), one location fix per second driving straight from LAT,LON at COURSE degrees and KMH, stamped with the
+        // wall clock (needs ATLAN_INPUT_CFG). Stopping before the end looks like losing the signal (a tunnel).
+        struct Drive { double lat{}, lon{}, course{}, kmh{}; long from_ms{}, to_ms{-1}; bool on{}; } drive;
         if (const char* d = std::getenv("ATLAN_DRIVE"))
-            drive.on = std::sscanf(d, "%lf,%lf,%lf,%lf,%ld", &drive.lat, &drive.lon, &drive.course, &drive.kmh, &drive.from_ms) >= 4;
+            drive.on = std::sscanf(d, "%lf,%lf,%lf,%lf,%ld,%ld", &drive.lat, &drive.lon, &drive.course, &drive.kmh, &drive.from_ms,
+                                   &drive.to_ms) >= 4;
         long next_fix_ms = drive.from_ms;
         const auto start = std::chrono::steady_clock::now();
         const auto deadline = start + std::chrono::seconds(std::atoi(interactive));
         std::size_t next_tap = 0;
         while (session.state() == atlan::shell::SessionState::running && std::chrono::steady_clock::now() < deadline) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-            if (drive.on && elapsed >= next_fix_ms) {
+            if (drive.on && elapsed >= next_fix_ms && (drive.to_ms < 0 || next_fix_ms < drive.to_ms)) {
                 const double metres = drive.kmh / 3.6 * static_cast<double>(next_fix_ms - drive.from_ms) / 1000.0;
                 const double rad = drive.course * 3.14159265358979323846 / 180.0;
                 const double lat = drive.lat + metres * std::cos(rad) / 111320.0;
