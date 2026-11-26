@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include "adapters/atlan/cached_lookup.hpp"
 #include "adapters/atlan/speed_readout.hpp"
 #include "shell/app_adapter.hpp"
 #include "shell/http_client.hpp"
@@ -74,5 +75,7 @@ private:
     std::uint64_t render_requests_{};
     // Speed of the latest fix, for the screens that show speeds above the app's 255 km/h (speed_readout.hpp).
     speed::FixSpeed fix_speed_ = speed::make_fix_speed();
+    // The map mode kept between file changes (cached_lookup.hpp).
+    cached_lookup::Shared map_mode_ = cached_lookup::make_state();
 };
 }

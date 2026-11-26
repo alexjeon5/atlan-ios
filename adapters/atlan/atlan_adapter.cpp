@@ -44,6 +44,7 @@ void AtlanAdapter::unpack_library(std::vector<std::byte>& bytes, const SessionLo
 }
 
 void AtlanAdapter::configure_files(GuestStdio& stdio, const SessionLog& log) {
+    cached_lookup::attach(map_mode_, &stdio);
     if (!config_.map_root.empty()) {
         const std::filesystem::path state = config_.state_root.empty() ? stdio.host_path("ATLAN/NAND")
                                                                       : std::filesystem::path(config_.state_root);
@@ -185,6 +186,7 @@ std::vector<NativeSet> AtlanAdapter::native_sets() const {
     sets.push_back(geometry::quad_geometry_set());
     for (auto& set : charset::conversion_sets(config_.exhaustive_native_checks)) sets.push_back(std::move(set));
     for (auto& set : speed::speed_readout_sets(fix_speed_)) sets.push_back(std::move(set));
+    for (auto& set : cached_lookup::cached_lookup_sets(map_mode_)) sets.push_back(std::move(set));
     return sets;
 }
 
@@ -205,6 +207,7 @@ AppStartup AtlanAdapter::startup() const {
 }
 
 bool AtlanAdapter::deliver(AppHost& host) {
+    cached_lookup::arm(map_mode_);  // start-up is over
     if (!java_services_) return true;
     // Replies of the Java side (online state, finished HTTP requests), on the guest thread like input.
     for (const auto& due : java_services_->take_due())
