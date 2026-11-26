@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "atlan/native_functions.hpp"
+#include "shell/dex.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -75,6 +76,9 @@ public:
     // Replaces a packaged library (an APK, an app-specific wrapper) by the ELF image inside it. Bytes that are no
     // package are left alone. Throws std::runtime_error naming what is wrong with a damaged package.
     virtual void unpack_library(std::vector<std::byte>& bytes, const SessionLog& log) { (void)bytes; (void)log; }
+    // The Java methods the app's package names (its classes.dex), known after unpack_library(); empty when unknown.
+    // Input bindings whose native the app declares with another signature are skipped (shell/input.hpp).
+    [[nodiscard]] virtual std::vector<JavaMethod> java_methods() const { return {}; }
     // Host replacements for functions of this app's own code (atlan/native_functions.hpp), installed with the
     // engine's sets. Their members are located through the embedder's signature file (by byte signature or by a
     // "symbol" line), so no app-specific name or address has to live in the sources.

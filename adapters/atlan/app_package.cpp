@@ -355,6 +355,17 @@ GuestPackage open_package(std::span<const std::byte> file) {
     const Entry& library = native_library(entries);
     package.entry = library.name;
     package.library = extract(zip, library);
+    // The Java side's method table, so native methods bound by name can be checked against their declared signature.
+    // A damaged dex only loses that check, not the run.
+    for (const auto& entry : entries) {
+        const std::string_view name = entry.name;
+        if (!name.starts_with("classes") || !name.ends_with(".dex") || name.find('/') != std::string_view::npos) continue;
+        try {
+            auto methods = dex_methods(extract(zip, entry));
+            package.java_methods.insert(package.java_methods.end(), std::make_move_iterator(methods.begin()), std::make_move_iterator(methods.end()));
+        } catch (const std::runtime_error&) {
+        }
+    }
     return package;
 }
 

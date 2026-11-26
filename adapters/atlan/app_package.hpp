@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include "shell/dex.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -14,6 +15,7 @@ struct GuestPackage {
     std::vector<std::byte> library;  // the ARM32 ELF shared object
     std::string entry;               // its path inside the APK, e.g. lib/armeabi/libatlan3dv5.so
     std::string version;             // assets/version.txt, else the .dat header; empty if neither
+    std::vector<JavaMethod> java_methods;  // named in classes*.dex; empty when the package has none readable
 };
 
 // True when the bytes start an APK (a ZIP local header) or an encoded .dat whose payload starts one. `file_size` is the

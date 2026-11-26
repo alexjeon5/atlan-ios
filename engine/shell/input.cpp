@@ -58,17 +58,27 @@ SurfacePoint to_surface(double x, double y, ViewRect shown, PixelSize surface) n
 }
 
 bool InputBindings::empty() const noexcept {
-    for (const auto& binding : touch) if (binding) return false;
+    for (const auto& rules : touch) if (!rules.empty()) return false;
     return location.empty();
 }
 
 std::vector<const NativeBinding*> InputBindings::matching(const InputEvent& event) const {
     std::vector<const NativeBinding*> out;
     if (const auto* t = std::get_if<TouchEvent>(&event)) {
-        if (const auto& binding = touch[static_cast<std::size_t>(t->phase)]) out.push_back(&*binding);
+        if (const auto& rules = touch[static_cast<std::size_t>(t->phase)]; !rules.empty()) out.push_back(&rules.front());
     } else {
         for (const auto& binding : location) out.push_back(&binding);
     }
+    return out;
+}
+
+InputBindings choose_bindings(const InputBindings& all, const std::function<bool(const NativeBinding&)>& fits) {
+    InputBindings out;
+    out.actions = all.actions;
+    for (std::size_t phase = 0; phase < all.touch.size(); ++phase)
+        for (const auto& rule : all.touch[phase])
+            if (fits(rule)) { out.touch[phase].push_back(rule); break; }
+    for (const auto& rule : all.location) if (fits(rule)) out.location.push_back(rule);
     return out;
 }
 
@@ -354,6 +364,7 @@ std::size_t native_call_count(const NativeBinding& binding, const InputEvent& ev
 
 std::optional<InputBindings> parse_input_bindings(const std::string& text, std::string& error) {
     InputBindings out;
+    std::array<bool, 4> from_plain_touch{};  // the phase's rules come from plain `touch` lines
     std::istringstream lines(text);
     std::string line;
     for (unsigned n = 1; std::getline(lines, line); ++n) {
@@ -391,8 +402,15 @@ std::optional<InputBindings> parse_input_bindings(const std::string& text, std::
             binding.arguments.push_back(a);
         }
         if (!touch) out.location.push_back(std::move(binding));
-        else if (phase >= 0) out.touch[static_cast<std::size_t>(phase)] = std::move(binding);
-        else for (auto& slot : out.touch) slot = binding;
+        else if (phase >= 0) {
+            auto& rules = out.touch[static_cast<std::size_t>(phase)];
+            if (from_plain_touch[static_cast<std::size_t>(phase)]) rules.clear();  // the phase's own rule replaces plain ones
+            from_plain_touch[static_cast<std::size_t>(phase)] = false;
+            rules.push_back(std::move(binding));
+        } else {
+            for (std::size_t i = 0; i < out.touch.size(); ++i)
+                if (from_plain_touch[i] || out.touch[i].empty()) { out.touch[i].push_back(binding); from_plain_touch[i] = true; }
+        }
     }
     return out;
 }

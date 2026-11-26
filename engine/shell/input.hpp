@@ -88,12 +88,17 @@ struct NativeBinding {
     std::vector<InputArgument> arguments;
 };
 struct InputBindings {
-    std::array<std::optional<NativeBinding>, 4> touch;  // indexed by TouchPhase
+    // Indexed by TouchPhase. Several rules for one phase are alternatives (builds of an app that take different
+    // parameters): the first is called; choose_bindings() first drops those the app does not declare.
+    std::array<std::vector<NativeBinding>, 4> touch;
     std::vector<NativeBinding> location;                // every rule is called for each fix, in order
     std::array<std::int32_t, 4> actions{0, 2, 1, 3};    // value of `action` per TouchPhase (down, move, up, cancel)
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] std::vector<const NativeBinding*> matching(const InputEvent& event) const;
 };
+// The bindings for the running app: the rules for which `fits` holds (the session checks the app's declared
+// signature), per touch phase only the first of them. A phase whose rules all fail has no rule.
+[[nodiscard]] InputBindings choose_bindings(const InputBindings& all, const std::function<bool(const NativeBinding&)>& fits);
 
 // Parses a bindings text. One rule per line, '#' starts a comment:
 //   touch[.down|.move|.up|.cancel] CLASS METHOD SIGNATURE ARG...
@@ -101,7 +106,8 @@ struct InputBindings {
 //   actions DOWN MOVE UP CANCEL
 // ARG is a source name (action pointer x y time latitude longitude altitude speed course accuracy gga gsa gsv rmc),
 // optionally followed by *FACTOR (speed*3.6), or a number (a constant). `touch` without a phase binds all four
-// phases; several `location` rules are all called. The argument count must equal the signature's parameter count.
+// phases and `touch.PHASE` replaces it for that phase; several rules of the same form are alternatives for their
+// phases, in file order (see InputBindings::touch); several `location` rules are all called. The argument count must equal the signature's parameter count.
 // Parameters must be primitives, or Ljava/lang/String; for a text source.
 // On failure returns nullopt and sets `error` to "line N: reason".
 [[nodiscard]] std::optional<InputBindings> parse_input_bindings(const std::string& text, std::string& error);

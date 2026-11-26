@@ -34,7 +34,7 @@ target_link_libraries(atlan_runtime PRIVATE kernarium_aarch32)
 target_compile_options(atlan_runtime PRIVATE -Wall -Wextra -Werror)
 
 # Engine side of the embedding: the guest session and app-neutral host plumbing (docs/engine-adapter.md).
-add_library(atlan_shell STATIC engine/shell/data_file.cpp engine/shell/json.cpp engine/shell/sha256.cpp engine/shell/log_file.cpp engine/shell/input.cpp engine/shell/session.cpp engine/shell/http_client.cpp)
+add_library(atlan_shell STATIC engine/shell/data_file.cpp engine/shell/json.cpp engine/shell/sha256.cpp engine/shell/log_file.cpp engine/shell/input.cpp engine/shell/dex.cpp engine/shell/session.cpp engine/shell/http_client.cpp)
 target_include_directories(atlan_shell PUBLIC engine .)  # "shell/..." from engine/, "adapters/..." and "platform/..." from the root
 target_link_libraries(atlan_shell PUBLIC atlan_runtime)
 target_compile_options(atlan_shell PRIVATE -Wall -Wextra -Werror)

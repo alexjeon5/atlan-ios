@@ -72,8 +72,9 @@ void bindings_text() {
         "location example/Input onSentence (Ljava/lang/String;)V gsv\n"
         "actions 10 12 11 13\n", error);
     check(parsed.has_value() && error.empty(), "bindings text parses");
-    check(!parsed->empty() && parsed->touch[0]->name == "onTouch" && parsed->touch[1]->name == "onTouch" &&
-          parsed->touch[2]->name == "onRelease" && parsed->touch[3]->arguments.size() == 4, "touch rules bind phases");
+    check(!parsed->empty() && parsed->touch[0].front().name == "onTouch" && parsed->touch[1].front().name == "onTouch" &&
+          parsed->touch[2].size() == 1 && parsed->touch[2].front().name == "onRelease" &&
+          parsed->touch[3].front().arguments.size() == 4, "touch rules bind phases");
     check(parsed->location.size() == 3 && parsed->location[0].arguments[2].source == InputSource::speed &&
           parsed->location[0].arguments[2].scale == 3.6 && parsed->location[0].arguments[4].source == InputSource::constant &&
           parsed->location[0].arguments[4].scale == 7, "factors and constants parse");
@@ -83,6 +84,26 @@ void bindings_text() {
     check(parsed->matching(InputEvent{LocationFix{}}).size() == 3 &&
           parsed->matching(InputEvent{TouchEvent{TouchPhase::up, 0, 0, 0, 0}}).front()->name == "onRelease", "events find their bindings");
     check(InputBindings{}.empty() && InputBindings{}.matching(InputEvent{LocationFix{}}).empty(), "empty bindings bind nothing");
+
+    // Two builds of one app export the same touch native with different parameters: both rules are kept as
+    // alternatives, and choose_bindings() keeps the first one the running build declares.
+    const auto builds = parse_input_bindings(
+        "touch example/Input onTouch (IIJFF)I 1 action time x y\n"
+        "touch example/Input onTouch (IJFF)V action time x y\n"
+        "touch.up example/Input onRelease (I)V pointer\n"
+        "location example/Input onFix (D)V latitude\n"
+        "location example/Input onFix (F)V latitude\n", error);
+    check(builds && builds->touch[0].size() == 2 && builds->touch[2].size() == 1 && builds->location.size() == 2,
+          "touch rules of the same form are alternatives");
+    check(builds->matching(InputEvent{TouchEvent{}}).size() == 1 &&
+          builds->matching(InputEvent{TouchEvent{}}).front()->signature == "(IIJFF)I", "without a choice the first alternative is called");
+    const auto newer = choose_bindings(*builds, [](const NativeBinding& b) { return b.signature != "(IIJFF)I" && b.signature != "(F)V"; });
+    check(newer.touch[0].size() == 1 && newer.touch[0].front().signature == "(IJFF)V" && newer.touch[3].front().signature == "(IJFF)V" &&
+          newer.touch[2].front().name == "onRelease", "the declared alternative is chosen per phase");
+    check(newer.location.size() == 1 && newer.location[0].signature == "(D)V", "location rules the app does not declare are dropped");
+    const auto older = choose_bindings(*builds, [](const NativeBinding&) { return true; });
+    check(older.touch[1].size() == 1 && older.touch[1].front().signature == "(IIJFF)I", "the first fitting alternative wins");
+    check(choose_bindings(*builds, [](const NativeBinding&) { return false; }).empty(), "a phase without a fitting rule binds nothing");
 
     const auto rejected = [&](const char* text, const char* fragment) {
         error.clear();

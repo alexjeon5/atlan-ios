@@ -399,6 +399,31 @@ void GuestSession::run() {
             report_java();
             if (outcome.stop != Stop::returned) { fail(stopped("JNI_OnLoad", outcome)); return; }
             log_("JNI_OnLoad returned 0x" + hex(runtime.cpu.registers[0]));
+            // Input rules for this build: a native exported by name may take other parameters in another build of the
+            // app, so a rule whose method the app declares (its classes.dex, or RegisterNatives) with another
+            // signature is skipped, and the next alternative for that touch phase is used.
+            const InputBindings input_bindings = [&] {
+                std::map<std::string, std::vector<std::string>> declared;  // "class.name" -> signatures, bound methods only
+                const auto key = [](std::string_view cls, std::string_view name) { return std::string(cls) + "." + std::string(name); };
+                for (const auto& rules : config_.input_bindings.touch)
+                    for (const auto& b : rules) declared[key(b.class_name, b.name)];
+                for (const auto& b : config_.input_bindings.location) declared[key(b.class_name, b.name)];
+                const auto add = [&](std::string_view cls, std::string_view name, const std::string& signature) {
+                    if (const auto it = declared.find(key(cls, name)); it != declared.end()) it->second.push_back(signature);
+                };
+                for (const auto& m : adapter.java_methods()) add(m.class_name, m.name, m.signature);
+                for (const auto& m : java.native_methods()) add(m.class_name, m.name, m.signature);
+                std::set<std::string> skipped;
+                return choose_bindings(config_.input_bindings, [&](const NativeBinding& b) {
+                    const auto& signatures = declared[key(b.class_name, b.name)];
+                    if (signatures.empty() || std::find(signatures.begin(), signatures.end(), b.signature) != signatures.end()) return true;
+                    std::string list;
+                    for (const auto& signature : signatures) if (list.find(signature) == std::string::npos) list += (list.empty() ? "" : " ") + signature;
+                    if (const auto line = key(b.class_name, b.name) + b.signature; skipped.insert(line).second)
+                        log_("input: skip " + line + ", the app declares " + list);
+                    return false;
+                });
+            }();
             // The adapter's entry points and the natives its input bindings call: a build that renamed or dropped one
             // is listed now (the session would otherwise only note it where the call is due).
             {
@@ -410,8 +435,8 @@ void GuestSession::run() {
                 for (const auto& entry : entries)
                     if (host.function(entry) == 0) { log_("compat missing_entry " + entry); ++missing; }
                 std::vector<const NativeBinding*> bindings;
-                for (const auto& touch : config_.input_bindings.touch) if (touch) bindings.push_back(&*touch);
-                for (const auto& location : config_.input_bindings.location) bindings.push_back(&location);
+                for (const auto& rules : input_bindings.touch) for (const auto& touch : rules) bindings.push_back(&touch);
+                for (const auto& location : input_bindings.location) bindings.push_back(&location);
                 std::set<std::string> seen;
                 for (const auto* b : bindings) {
                     const auto line = b->class_name + "." + b->name + b->signature;
@@ -521,12 +546,12 @@ void GuestSession::run() {
                 bool fresh_fix = false;
                 for (const auto& event : events)
                     if (const auto* fix = std::get_if<LocationFix>(&event)) { location_watch.observe(*fix, now_ms); fresh_fix = true; }
-                if (!fresh_fix && !config_.input_bindings.location.empty())
+                if (!fresh_fix && !input_bindings.location.empty())
                     if (const auto lost = location_watch.lost(now_ms)) events.emplace_back(*lost);
                 for (const auto& event : events) {
                     const bool touch = std::holds_alternative<TouchEvent>(event);
                     if (const auto* fix = std::get_if<LocationFix>(&event)) adapter.location_delivered(*fix);
-                    const auto bindings = config_.input_bindings.matching(event);
+                    const auto bindings = input_bindings.matching(event);
                     if (bindings.empty()) note(std::string("input: no binding for ") + (touch ? "touch" : "location") + " events");
                     for (const auto* binding : bindings) {
                     const auto target = resolve(*binding);
@@ -534,7 +559,7 @@ void GuestSession::run() {
                     const auto calls = native_call_count(*binding, event);
                     for (std::size_t part = 0; part < calls; ++part) {
                     std::string why;
-                    const auto words = native_call_words(*binding, event, config_.input_bindings.actions, java.env(), target.receiver, why,
+                    const auto words = native_call_words(*binding, event, input_bindings.actions, java.env(), target.receiver, why,
                                                          [&](std::size_t index, const std::string& text) -> std::uint32_t {
                         auto& handle = text_arguments[{binding, index}];
                         if (handle == 0) handle = java.new_string(text);

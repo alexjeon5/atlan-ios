@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Synthetic APK and encoded .dat packages: DEFLATE decoding, library selection, .dat decoding and discovery, and the
-// launcher's view of a synthetic data folder.
+// Synthetic APK and encoded .dat packages: DEFLATE decoding, library selection, .dat decoding and discovery, the Java
+// method table of a synthetic classes.dex, and the launcher's view of a synthetic data folder.
 #include "adapters/atlan/app_package.hpp"
 #include "adapters/atlan/data_status.hpp"
 #include "adapters/atlan/verified_versions.hpp"
+#include "shell/dex.hpp"
 #include "shell/json.hpp"
 #include "shell/sha256.hpp"
 #include <chrono>
@@ -126,6 +127,70 @@ Bytes elf_like(unsigned tag) {
     for (unsigned i = 0; i < 37; ++i) data.push_back(std::byte((tag * 31 + i) & 255));
     return data;
 }
+// A minimal dex file: the header's string, type, proto and method tables and nothing else. Each method is
+// {class descriptor, name, return type, parameter types}.
+struct DexMethodSpec { std::string cls, name, ret; std::vector<std::string> params; };
+Bytes dex_file(const std::vector<DexMethodSpec>& methods) {
+    std::vector<std::string> strings;
+    const auto string_index = [&](const std::string& text) {
+        for (std::size_t i = 0; i < strings.size(); ++i) if (strings[i] == text) return static_cast<std::uint32_t>(i);
+        strings.push_back(text);
+        return static_cast<std::uint32_t>(strings.size() - 1);
+    };
+    std::vector<std::uint32_t> types;  // descriptor string index per type
+    const auto type_index = [&](const std::string& descriptor) {
+        const auto s = string_index(descriptor);
+        for (std::size_t i = 0; i < types.size(); ++i) if (types[i] == s) return static_cast<std::uint32_t>(i);
+        types.push_back(s);
+        return static_cast<std::uint32_t>(types.size() - 1);
+    };
+    struct Proto { std::uint32_t shorty, ret; std::vector<std::uint32_t> params; };
+    std::vector<Proto> protos;
+    struct Method { std::uint32_t cls, proto, name; };
+    std::vector<Method> ids;
+    for (const auto& m : methods) {
+        Proto p{string_index("V"), type_index(m.ret), {}};
+        for (const auto& t : m.params) p.params.push_back(type_index(t));
+        protos.push_back(p);
+        ids.push_back({type_index(m.cls), static_cast<std::uint32_t>(protos.size() - 1), string_index(m.name)});
+    }
+    // Layout: header, string_ids, type_ids, proto_ids, method_ids, then type lists and string data.
+    const std::uint32_t string_ids = 0x70, type_ids = string_ids + 4 * static_cast<std::uint32_t>(strings.size());
+    const std::uint32_t proto_ids = type_ids + 4 * static_cast<std::uint32_t>(types.size());
+    const std::uint32_t method_ids = proto_ids + 12 * static_cast<std::uint32_t>(protos.size());
+    Bytes data;  // after the tables
+    const std::uint32_t data_start = method_ids + 8 * static_cast<std::uint32_t>(ids.size());
+    std::vector<std::uint32_t> list_offsets;
+    for (const auto& p : protos) {
+        if (p.params.empty()) { list_offsets.push_back(0); continue; }
+        while (data.size() % 4) data.push_back(std::byte{0});
+        list_offsets.push_back(data_start + static_cast<std::uint32_t>(data.size()));
+        le(data, static_cast<std::uint32_t>(p.params.size()), 4);
+        for (auto t : p.params) le(data, t, 2);
+    }
+    std::vector<std::uint32_t> string_offsets;
+    for (const auto& text : strings) {
+        string_offsets.push_back(data_start + static_cast<std::uint32_t>(data.size()));
+        data.push_back(std::byte(text.size()));  // ULEB128 length, short strings only
+        for (char c : text) data.push_back(std::byte(c));
+        data.push_back(std::byte{0});
+    }
+    Bytes out = bytes("dex\n035");
+    out.push_back(std::byte{0});
+    out.resize(0x38);
+    le(out, static_cast<std::uint32_t>(strings.size()), 4); le(out, string_ids, 4);
+    le(out, static_cast<std::uint32_t>(types.size()), 4); le(out, type_ids, 4);
+    le(out, static_cast<std::uint32_t>(protos.size()), 4); le(out, proto_ids, 4);
+    le(out, 0, 4); le(out, 0, 4);  // fields
+    le(out, static_cast<std::uint32_t>(ids.size()), 4); le(out, method_ids, 4);
+    out.resize(0x70);
+    for (auto offset : string_offsets) le(out, offset, 4);
+    for (auto t : types) le(out, t, 4);
+    for (std::size_t i = 0; i < protos.size(); ++i) { le(out, protos[i].shorty, 4); le(out, protos[i].ret, 4); le(out, list_offsets[i], 4); }
+    for (const auto& m : ids) { le(out, m.cls, 2); le(out, m.proto, 2); le(out, m.name, 4); }
+    out.insert(out.end(), data.begin(), data.end());
+    return out;
+}
 void write(const fs::path& path, const Bytes& data) {
     fs::create_directories(path.parent_path());
     std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
@@ -187,6 +252,28 @@ void packages() {
     Bytes cut = apk;
     cut.resize(cut.size() - 30);
     throws([&] { (void)open_package(cut); }, "ZIP", "a truncated APK is rejected");
+}
+
+void java_methods() {
+    using atlan::shell::dex_methods, atlan::shell::open_package;
+    const Bytes dex = dex_file({{"Lexample/Input;", "onTouch", "V", {"I", "J", "F", "F"}},
+                                {"Lexample/Input;", "onFix", "Z", {"Ljava/lang/String;", "[B"}},
+                                {"Lexample/Other;", "run", "V", {}}});
+    const auto methods = dex_methods(dex);
+    check(methods.size() == 3 && methods[0].class_name == "example/Input" && methods[0].name == "onTouch" &&
+          methods[0].signature == "(IJFF)V", "a dex method reads as class, name and JNI signature");
+    check(methods[1].signature == "(Ljava/lang/String;[B)Z" && methods[2].class_name == "example/Other" && methods[2].signature == "()V",
+          "reference, array and empty parameter lists read");
+    throws([] { (void)dex_methods(Bytes(0x80, std::byte{'x'})); }, "no dex magic", "junk is no dex");
+    Bytes cut = dex;
+    cut.resize(0x80);
+    throws([&] { (void)dex_methods(cut); }, "outside", "a truncated dex is rejected");
+
+    const auto package = open_package(zip({{"classes.dex", dex, {}}, {"classes2.dex", dex_file({{"Lb/C;", "m", "I", {"D"}}}), {}},
+                                           {"assets/classes.dex", dex, {}}, {"lib/armeabi/libatlan3dv5.so", elf_like(1), {}}}));
+    check(package.java_methods.size() == 4 && package.java_methods[3].signature == "(D)I", "every top-level classes*.dex is read");
+    check(open_package(zip({{"classes.dex", bytes("d"), {}}, {"lib/armeabi/libatlan3dv5.so", elf_like(1), {}}})).java_methods.empty(),
+          "a damaged dex leaves the table empty, the package still opens");
 }
 
 void discovery(const fs::path& scratch) {
@@ -344,6 +431,7 @@ int main() {
         fs::remove_all(scratch);
         inflating();
         packages();
+        java_methods();
         discovery(scratch);
         data_status(scratch);
         digests();

@@ -44,6 +44,7 @@ public:
     [[nodiscard]] std::string find_library(const std::string& data_root) const override;
     [[nodiscard]] std::string missing_library() const override;
     void unpack_library(std::vector<std::byte>& bytes, const SessionLog& log) override;
+    [[nodiscard]] std::vector<JavaMethod> java_methods() const override { return java_methods_; }
     void configure_files(GuestStdio& stdio, const SessionLog& log) override;
     void install_java(AppHost& host, bool frame_requests) override;
     void uninstall_java() override;
@@ -59,6 +60,7 @@ public:
 
 private:
     Config config_;
+    std::vector<JavaMethod> java_methods_;  // from the package's classes.dex
     bool use_connection_manager_{true};  // system.ini USECONNECTIONMANAGER (the stock value is 1)
     std::unique_ptr<JavaServices> java_services_;
     // The start-up sound the Java side plays with a MediaPlayer while its splash screen shows. It runs to its end

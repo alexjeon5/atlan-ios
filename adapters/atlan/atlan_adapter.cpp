@@ -37,8 +37,10 @@ std::string AtlanAdapter::missing_library() const { return "no guest library or 
 void AtlanAdapter::unpack_library(std::vector<std::byte>& bytes, const SessionLog& log) {
     if (!is_package(bytes)) return;
     auto package = open_package(bytes);
-    log("package " + package.entry + (package.version.empty() ? "" : " version " + package.version));
+    log("package " + package.entry + (package.version.empty() ? "" : " version " + package.version) +
+        " java_methods=" + std::to_string(package.java_methods.size()));
     bytes = std::move(package.library);
+    java_methods_ = std::move(package.java_methods);
 }
 
 void AtlanAdapter::configure_files(GuestStdio& stdio, const SessionLog& log) {

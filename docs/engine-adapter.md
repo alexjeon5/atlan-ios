@@ -73,7 +73,7 @@ tools/, tests/, bench/  엔진 도구와 합성 테스트 (아틀란 쪽 도구�
 
    그래서 별도 인터페이스를 끼우면 같은 일을 하는 층만 하나 늘어난다. 앱마다 클래스 조회를 거부하거나 필드 기본값을 바꿔야 하는 경우가 생기면 그때 `install_java`에 훅을 더한다.
 2. **`AppAdapter`** (`engine/shell/app_adapter.hpp`, 계획 때 이름은 `AppProfile`): `SessionConfig::adapter`로 넘기고 `GuestSession`이 이것만 보고 구동한다. 세션 하나에 어댑터 하나다.
-   - 라이브러리: `find_library`(데이터 폴더에서 찾기), `missing_library`, `unpack_library`(APK·앱 고유 포장 풀기)
+   - 라이브러리: `find_library`(데이터 폴더에서 찾기), `missing_library`, `unpack_library`(APK·앱 고유 포장 풀기), `java_methods`(패키지 classes.dex의 메서드 표, 입력 규칙의 시그니처 확인용)
    - 파일: `configure_files`(별칭, 읽기 필터)
    - Java: `install_java`/`uninstall_java`(Java 메서드 등록과 정리), `deliver`(Java 쪽이 나중에 보내는 응답을 게스트 호출로 전달)
    - 시작 순서: `startup()`이 돌려주는 `AppStartup` 값(receiver 클래스, init, 표면 호출 목록, 프레임 호출, 종료 폴링)

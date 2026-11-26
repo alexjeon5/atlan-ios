@@ -6,7 +6,7 @@
 
 1. UI 스레드가 `InputQueue`에 `TouchEvent`·`LocationFix`를 넣는다. 같은 손가락의 연속 move와 연속 위치 값은 최신 값으로 합쳐지고, 큐가 가득 차면(256) move와 위치만 버린다. down/up/cancel은 항상 들어간다.
 2. 게스트 스레드(`GuestSession`)가 프레임마다 `renderGLSF` 전에 큐를 비우고, 이벤트마다 바인딩된 네이티브 메서드를 한 번 호출한다.
-3. 대상 주소는 `RegisterNatives`로 등록된 (클래스, 이름, 시그니처)에서 찾고, 없으면 `Java_<클래스>_<이름>` export에서 찾는다. `this`는 그 클래스의 호스트 객체 하나를 재사용한다.
+3. 대상 주소는 `RegisterNatives`로 등록된 (클래스, 이름, 시그니처)에서 찾고, 없으면 `Java_<클래스>_<이름>` export에서 찾는다. `this`는 그 클래스의 호스트 객체 하나를 재사용한다. export 이름에는 시그니처가 없어서 같은 앱의 다른 빌드가 같은 이름으로 다른 매개변수를 받을 수 있다. 그래서 JNI_OnLoad 뒤에 규칙을 한 번 고른다(아래 "빌드별 규칙").
 4. 바인딩이 없는 이벤트, 등록도 export도 안 된 메서드는 로그에 한 번 남기고 버린다(`input: …`). 호출이 게스트 안에서 멈추면 다른 네이티브 호출처럼 세션이 실패로 끝난다.
 
 `SessionConfig::interactive`가 켜져 있으면 첫 `render_frames` 프레임과 기존 `pump`·오디오 단계가 끝난 뒤(로그 `interactive`), 중지될 때까지 입력 전달 → `renderGLSF` → swap → 게스트 스레드 `pump` → 오디오 콜백을 반복한다. 프레임 간격의 하한은 `frame_interval_ms`(기본 33ms)다. `render_on_demand`가 켜져 있으면(iOS 앱) `renderGLSF`는 게스트가 프레임을 요청했을 때만 부른다. 요청은 게스트 GL 스레드의 `callBackGLThread` 콜백이고, 안드로이드 쪽 Java 코드처럼 `isStateReady` → `isGLInit` → `setState(3)` 순서로 응답한다(`RENDERMODE_WHEN_DIRTY`). 요청이 없으면 `idle_redraw_ms`(기본 1초)마다 같은 질문을 직접 해서 준비된 경우에만 그린다. 준비되지 않은 상태에서 `renderGLSF`를 부르면 화면을 검게 지우기만 하므로 그 경우에는 그리지 않는다. 지도 화면에서는 게스트가 프레임이 끝날 때마다 바로 다음 프레임을 요청하므로 그리는 횟수는 줄지 않는다(서버 45초 측정: 요청 376회, 그린 프레임 373개). `ATLAN_INTERACTIVE_SECONDS=N`과 `ATLAN_ON_DEMAND=1`로 헤드리스에서 확인한다.
@@ -25,7 +25,7 @@ actions DOWN MOVE UP CANCEL
 - 터치 값: `action`(단계별 코드, 기본 0/2/1/3 = down/move/up/cancel), `pointer`(손가락 번호), `x`·`y`(게스트 표면 픽셀, 좌상단 원점), `time`(단조 시간 ms).
 - 위치 값: `latitude`·`longitude`(도), `altitude`(m), `speed`(m/s, 모르면 음수), `course`(도, 모르면 음수), `accuracy`(m), `time`(Unix epoch ms).
 - 위치 문장 값: `gga`, `gsa`, `gsv`, `rmc`. `Ljava/lang/String;` 매개변수에만 쓸 수 있고, 위치 값으로 만든 NMEA 0183 문장(체크섬, CR LF 포함) 하나를 String 객체로 넘긴다. `gsv`는 문장이 여러 개(지금은 2개)라서 그 규칙은 위치 값마다 문장 수만큼 호출된다. String 객체는 인자마다 하나를 만들어 내용만 바꿔 재사용한다.
-- `touch`는 네 단계 모두에, `touch.up` 같은 형태는 한 단계에만 적용된다. `location` 규칙은 여러 개를 쓸 수 있고 위치 값마다 순서대로 모두 호출된다.
+- `touch`는 네 단계 모두에, `touch.up` 같은 형태는 한 단계에만 적용되고 그 단계의 `touch` 규칙을 대신한다. 같은 형태의 터치 규칙이 여러 개면 빌드별 대안이다(아래). `location` 규칙은 여러 개를 쓸 수 있고 위치 값마다 순서대로 모두 호출된다.
 - 숫자 값은 시그니처의 타입으로 변환한다. `Z B C S I`는 반올림한 32비트 정수(범위 밖은 포화), `J`는 64비트 정수, `F`·`D`는 부동소수다. 그 밖의 매개변수 타입은 거부한다.
 - 인자 수가 시그니처와 다르거나 알 수 없는 이름이 있으면 `line N: 이유`로 파일 전체를 거부한다.
 
@@ -39,6 +39,24 @@ location example/Input onSentence (Ljava/lang/String;)V gsa
 location example/Input onSentence (Ljava/lang/String;)V gsv
 location example/Input onSentence (Ljava/lang/String;)V rmc
 ```
+
+### 빌드별 규칙
+
+어댑터는 앱 패키지의 `classes*.dex`에서 메서드 표(클래스, 이름, 시그니처)를 읽어 준다(`AppAdapter::java_methods`, `shell/dex.hpp`). 세션은 JNI_OnLoad 뒤에 이 표와 `RegisterNatives`로 등록된 메서드를 합쳐 규칙을 고른다(`choose_bindings`).
+
+- 앱이 그 (클래스, 이름)을 다른 시그니처로만 선언했으면 그 규칙은 빼고 로그에 `input: skip CLASS.NAMESIG, the app declares …`를 남긴다.
+- 터치 단계마다 남은 대안 중 파일에서 먼저 나온 것 하나만 쓴다. 남은 것이 없으면 그 단계는 바인딩이 없다.
+- 남은 `location` 규칙은 모두 호출된다.
+- 선언 정보가 없으면(패키지가 아닌 라이브러리를 직접 실행, dex가 손상됨) 모든 규칙이 남고, 터치는 첫 대안을 쓴다.
+
+그래서 한 파일에 두 빌드의 규칙을 함께 적어 둘 수 있다. 합성 예:
+
+```text
+touch example/Input onTouch (IIJFF)I 1 action time x y   # 이전 빌드
+touch example/Input onTouch (IJFF)V action time x y      # 매개변수가 바뀐 빌드
+```
+
+AAPCS32에서는 두 시그니처의 인자 워드 배치가 같아도(`I`가 하나 줄면 `J`가 짝수 워드로 밀려 같은 자리에 온다) 앱이 각 워드를 다르게 읽으므로, 맞지 않는 규칙으로 호출하면 오류 없이 엉뚱한 값이 들어간다.
 
 호출 인자는 AAPCS32(softfp) 규칙으로 놓는다. `env`, `this` 다음에 매개변수가 오고, 64비트 값(`J`, `D`)은 짝수 번째 워드에서 시작하는 두 워드(하위 먼저)다.
 
@@ -70,4 +88,4 @@ CoreLocation은 위성 정보를 공개하지 않는다. 그래서 위치 값의
 
 ## 검증 상태
 
-`tests/input_tests.cpp`가 큐 합치기, 바인딩 파싱·거부, NMEA 문장(GGA, GSA, GSV, RMC), 문장 여러 개인 규칙의 호출 횟수, 인자 워드 배치, 합성 게스트 함수로의 전달을 확인한다. 실제 라이브러리에서 인자 순서와 단위가 맞는지, 실기기에서 CoreLocation과 터치가 동작하는지는 이 테스트로 확인되지 않는다.
+`tests/input_tests.cpp`가 큐 합치기, 바인딩 파싱·거부, 빌드별 대안 고르기, NMEA 문장(GGA, GSA, GSV, RMC), 문장 여러 개인 규칙의 호출 횟수, 인자 워드 배치, 합성 게스트 함수로의 전달을 확인한다. `tests/package_tests.cpp`가 합성 dex의 메서드 표 읽기를 확인한다. 실제 라이브러리에서 인자 순서와 단위가 맞는지, 실기기에서 CoreLocation과 터치가 동작하는지는 이 테스트로 확인되지 않는다.
