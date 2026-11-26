@@ -41,9 +41,13 @@ UIView* LKSwitchRow(NSString* title, NSString* detail, BOOL on, CGFloat height, 
 UISegmentedControl* LKSegments(NSArray<NSString*>* options, NSInteger selected, void (^changed)(NSInteger));
 UIView* LKSegmentRow(NSString* title, NSString* detail, NSArray<NSString*>* options, NSInteger selected, CGFloat height,
                      void (^changed)(NSInteger));
+// A one-line text field in the list's value style. `committed` gets the text when editing ends and returns what the
+// field shows afterwards (the value as stored, or the previous one when the text was not accepted).
+UITextField* LKField(NSString* text, CGFloat width, UIKeyboardType keyboard, NSString* (^committed)(NSString*));
 // Small grey heading above a block, e.g. "방법 1".
 UIView* LKCaptionBlock(NSString* caption, NSString* body);
 // Rows inside one card, separated by hairlines.
 LKCard* LKGroup(NSArray<UIView*>* rows);
-// Content in a vertical scroll view, for panes that may be taller than the screen.
+// Content in a vertical scroll view, for panes that may be taller than the screen. It keeps a text field being
+// edited inside it clear of the keyboard; a tap outside the field ends the editing.
 UIScrollView* LKScroll(UIView* content);

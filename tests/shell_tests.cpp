@@ -2,6 +2,7 @@
 #include "adapters/atlan/charset_conversion.hpp"
 #include "adapters/atlan/quad_geometry.hpp"
 #include "atlan/audio.hpp"
+#include "shell/coordinate.hpp"
 #include "shell/data_file.hpp"
 #include "shell/render_config.hpp"
 #include "shell/guest_ini.hpp"
@@ -362,6 +363,23 @@ void quad_geometry() {
     o = rectangle_overlap(square, {20, 20}, {30, 30});
     check(!o.any && o.points.empty(), "no overlap");
 }
+void coordinates() {
+    using atlan::shell::parse_coordinate;
+    const auto near = [](std::optional<atlan::shell::GeoPoint> p, double lat, double lon) {
+        return p && std::fabs(p->latitude - lat) < 1e-9 && std::fabs(p->longitude - lon) < 1e-9;
+    };
+    check(near(parse_coordinate("37.566535, 126.977969"), 37.566535, 126.977969), "comma-separated pair");
+    check(near(parse_coordinate("  37.5 126 "), 37.5, 126), "space-separated pair");
+    check(near(parse_coordinate("-33.8688,151.2093"), -33.8688, 151.2093), "signed latitude");
+    check(near(parse_coordinate("37.56654\u00b0 N, 126.97797\u00b0 E"), 37.56654, 126.97797), "map app copy with hemispheres");
+    check(near(parse_coordinate("33.8688 S 70.5 w"), -33.8688, -70.5), "south and west are negative");
+    check(near(parse_coordinate("126.97797 E, 37.56654 N"), 37.56654, 126.97797), "longitude first when marked");
+    check(near(parse_coordinate(".5, -.25"), 0.5, -0.25), "leading dots");
+    for (const char* bad : {"", "37.5", "37.5, 126.9, 10", "91, 10", "10, 181", "abc 37 126", "37 N 126 N", "-37 S, 126",
+                            "N 37, 126"})
+        check(!parse_coordinate(bad), bad);
+}
+
 int main() {
     try {
         quad_geometry();
@@ -423,6 +441,7 @@ int main() {
                   fs::exists(logs / "session-20200103-000000.log") && fs::exists(logs / "other.txt") && fs::exists(path),
                   "only the newest session logs are kept; other files are left alone");
         }
+        coordinates();
         data_files();
         sessions();
         adapter_sessions();
