@@ -30,6 +30,8 @@
 | `shell/java_services.*`, `shell/app_package.*`, `shell/guest_ini.*` | 어댑터 | `atlan_adapter` 라이브러리로 빌드. 파일 위치는 단계 5에서 `adapters/atlan/`로 옮김. APK 읽기 자체는 범용이라 그때 엔진 쪽으로 나눔 |
 | `shell/data_file.*` | **경계** | 부분 읽기·교체·거부 메커니즘은 엔진, 헤더 형식 검증은 어댑터 |
 | `shell/render_config.hpp` | 확인 필요 | 앱 고유 값이 있으면 어댑터로 |
+| `platform/gles`, `platform/android` | 엔진 쪽 호스트 계층 | 기기 GLES2·EGL, Android 액티비티·JNI·OpenSL ES. 앱은 `make_app_adapter`(`platform/android/android_app.hpp`)와 `GuestActivity` 하위 클래스로만 들어온다. [Android](android.md) |
+| `adapters/atlan/android` | 어댑터 | 아틀란 APK의 매니페스트·액티비티(데이터 폴더, 뒤로 두 번 종료)와 `make_app_adapter` |
 | `platform/ios`, `platform/macos` | 엔진 쪽 호스트 계층 | 앱 고유 UI·번들 설정은 어댑터. iOS 앱은 지금 `AtlanAdapter`를 직접 만들고, 데이터 폴더 이름과 로그 분류도 아직 앱 기준 |
 
 앱별 어댑터가 가져야 하는 것:

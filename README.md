@@ -11,7 +11,7 @@ ctest --test-dir build --output-on-failure
 ./build/atlan-poc
 ```
 
-C++20과 CMake 3.22 이상이 필요하다. Apple 전용 코드는 `platform/ios`와 `platform/macos`에 분리되어 있다. iOS 데모는 같은 합성 프로그램의 결과를 표시하며, Xcode 생성·컴파일 방법은 [iOS 빌드](docs/ios.md)에 있다. 인텔 맥·Apple Silicon의 CLI와 네이티브 테스트 앱은 [macOS 로컬 테스트](docs/macos.md)를 참고한다.
+C++20과 CMake 3.22 이상이 필요하다. Apple 전용 코드는 `platform/ios`와 `platform/macos`에 분리되어 있다. iOS 데모는 같은 합성 프로그램의 결과를 표시하며, Xcode 생성·컴파일 방법은 [iOS 빌드](docs/ios.md)에 있다. 인텔 맥·Apple Silicon의 CLI와 네이티브 테스트 앱은 [macOS 로컬 테스트](docs/macos.md)를 참고한다. 64비트 전용 Android 기기용 arm64-v8a APK는 [Android](docs/android.md)에 있다(`platform/android`, `platform/gles`).
 
 ELF32 공유 라이브러리 로더와 scalar ARM/Thumb 함수 호출을 제공한다. [ELF 지원 범위](docs/elf.md)와 `atlan-elf --help`를 참고한다. Bionic·JNI·DEX, 그래픽·오디오 브리지, AOT와 최종 IPA는 후속 작업이다. VFP/NEON은 아직 실행하지 않으며 지원하지 않는 명령은 명시적 이벤트로 중단한다. JIT 권한이나 런타임 실행 메모리 할당은 사용하지 않는다.
 

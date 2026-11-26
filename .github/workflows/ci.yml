@@ -51,6 +51,16 @@ jobs:
           name: atlan-runtime-ios-unsigned
           path: out/AtlanRuntime-unsigned.ipa
           if-no-files-found: error
+  android-build:
+    # Compiles the arm64-v8a APK of the Android host (no app data or local files go in); it is not uploaded.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: adapters/atlan/android/build.sh --out build-android
+      - run: |
+          apk=build-android/atlan.runtime-arm64-v8a.apk
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libatlanhost.so'
+          if unzip -l "$apk" | grep -E 'lib/(armeabi|x86)|\.(apk|dat)$'; then exit 1; fi
   macos-universal:
     # Not needed for the iOS IPA; only on a manual run, so a push does not hold a macOS runner for it.
     if: github.event_name == 'workflow_dispatch'
