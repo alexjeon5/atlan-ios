@@ -46,6 +46,7 @@
     NSTimer* _watch;                           // brings the launcher back when a run ends by itself
     BOOL _landscape;                           // locked to landscape: the navigation runs or is about to
     BOOL _startPending;                        // start the navigation once the screen has turned to landscape
+    BOOL _stopped;                             // a run stopped by itself; the app has to be opened again
 }
 
 // Bindings from host input to the guest's native methods: Documents/input.cfg (format in shell/input.hpp).
@@ -277,6 +278,7 @@
 - (void)launcherWantsNavigation:(LauncherViewController*)launcher {
     (void)launcher;
     if (self.running) { [self dismissViewControllerAnimated:YES completion:nil]; return; }
+    if (_stopped) { exit(0); }
     [self startInLandscape];
     __weak ShellViewController* weakSelf = self;
     [self dismissViewControllerAnimated:YES completion:^{ [weakSelf startIfLandscape]; }];
@@ -332,6 +334,11 @@
     if (self.running || !_session) return;
     [_watch invalidate];
     _watch = nil;
+    // A run that stopped on its own is not started again in this process: a second guest session after a stop has
+    // crashed the app. The launcher offers to close the app instead; opening it again starts cleanly.
+    _stopped = YES;
+    if (!_launcher) _launcher = [[LauncherViewController alloc] initWithDelegate:self];
+    _launcher.stopped = YES;
     [self showLauncher];
 }
 
