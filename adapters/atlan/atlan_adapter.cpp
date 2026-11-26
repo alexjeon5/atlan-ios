@@ -148,7 +148,10 @@ void AtlanAdapter::install_java(AppHost& host, bool frame_requests) {
     });
     // Other void UI callbacks the guest raises: recorded in the log, no host effect yet.
     struct Callback { const char* cls; const char* name; const char* signature; };
+    // JniIsArService: the guest reports whether its AR service is on; the Java side only stores the value for its
+    // camera overlay, which the host does not have.
     for (const Callback& cb : {Callback{activity_class, "JniArSettingData", "(IIII)V"},
+                               Callback{activity_class, "JniIsArService", "(I)V"},
                                Callback{activity_class, "SendMsgFromTPEGD", "(III[B)V"},
                                Callback{gl_thread_class, "callBackGLThread", "()V"}}) {
         if (on_demand_ && std::string_view(cb.name) == "callBackGLThread") continue;

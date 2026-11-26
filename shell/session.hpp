@@ -24,7 +24,7 @@ struct SessionConfig {
     std::uint64_t initializer_budget{3000000};  // retired instructions per initializer
     AudioSink* audio_sink{};                    // device sink; nullptr uses a silent recording sink
     std::string data_root;                      // guest-visible file root (the app Documents folder); empty disables stdio
-    std::uint64_t native_init_budget{200000000};  // retired instructions for the adapter's init entry point
+    std::uint64_t native_init_budget{2000000000};  // retired instructions for the adapter's init entry point (a settings file read on later starts can take ~300M)
     std::uint64_t surface_call_budget{2000000000};  // retired instructions per surface, frame or other entry call
     std::uint32_t render_frames{3};               // frame calls after the surfaces are created
     GlBackend* gl_backend{};                      // GLES2/EGL sink (Metal on devices); nullptr uses a no-op backend
