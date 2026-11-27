@@ -337,15 +337,16 @@
     dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf applyFramePolicy]; });
 }
 
-// Frames slow down as the device warms up, and in Low Power Mode, below the 20 per second the run allows at most.
+// Frames slow down when the device is hot, and in Low Power Mode, below the 20 per second the run allows at most.
+// A phone in a car mount, charging, with the screen on, often reports `serious` for a whole drive, so that state
+// only trims the rate; `fair` keeps it.
 - (void)applyFramePolicy {
     if (!_session) return;
     NSProcessInfo* info = NSProcessInfo.processInfo;
     std::uint32_t floor = 0;
     switch (info.thermalState) {
-    case NSProcessInfoThermalStateFair: floor = 67; break;       // 15 frames per second
-    case NSProcessInfoThermalStateSerious: floor = 100; break;   // 10
-    case NSProcessInfoThermalStateCritical: floor = 200; break;  // 5
+    case NSProcessInfoThermalStateSerious: floor = 67; break;    // 15 frames per second
+    case NSProcessInfoThermalStateCritical: floor = 100; break;  // 10
     default: break;
     }
     if (info.lowPowerModeEnabled) floor = std::max<std::uint32_t>(floor, 100);
