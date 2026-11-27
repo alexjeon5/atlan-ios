@@ -246,10 +246,10 @@ int main() {
         check(back.bytes.size() == 64 * 32 * 4 && std::to_integer<int>(back.bytes[(16 * 64 + 31) * 4]) == 255 &&
               std::to_integer<int>(back.bytes[(16 * 64 + 33) * 4]) == 0, "read_pixels reads the guest's pixels");
         margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
-        quad({-1, -1, 0, -1, -1, 1, 0, 1}, {1, 0, 0, 1});
+        quad({-1, -1, -0.5F, -1, -1, 1, -0.5F, 1}, {1, 0, 0, 1});
         margin.execute(op(GlOp::swap_buffers));
         if (frame_width == 80)
-            check(near(at(frame, 80, 8, 16), 0, 0, 255) && near(at(frame, 80, 18, 16), 255, 0, 0), "a panel on the left edge stays out of the margin");
+            check(near(at(frame, 80, 8, 16), 0, 0, 255) && near(at(frame, 80, 18, 16), 255, 0, 0), "a narrow panel on the left edge stays out of the margin");
         margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
         quad({-1, -1, 1, -1, -1, 1, 1, 1}, {0, 1, 0, 1});
         margin.execute(op(GlOp::viewport, {8, 0, 16, 32}));  // inside the surface: shifted, not widened

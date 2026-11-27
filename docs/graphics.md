@@ -44,7 +44,7 @@ Android에서는 이 세 층을 쓰지 않는다. `platform/gles/gles_backend.*`
 
 - 모든 정점 셰이더의 `main`을 `atlan_guest_main`으로 바꾸고, 그 뒤에 호스트 uniform `atlan_margin_x`(vec2: x 배율, w 오프셋)로 클립 공간 x를 바꾸는 새 `main`을 붙인다. GLES 경로는 이 GLSL을 드라이버가, Metal 경로는 번역기가 그대로 받는다.
 - 게스트 viewport가 표면 왼쪽/오른쪽 끝에 닿으면 그쪽 여백만큼 viewport를 넓히고 uniform으로 게스트 픽셀 위치를 유지한다. 그래서 게스트가 화면 밖으로 그린 지도가 여백에 보인다. 끝에 닿지 않는 viewport는 left만큼 옮기기만 한다. 게스트 화면 안의 것은 늘어나거나 움직이지 않는다.
-- 양쪽 끝을 모두 덮는 draw(하늘, 메뉴 배경, 전체 폭 바, 화면 전환 때 캡처한 화면 그림)는 여백 viewport에 한 번 더 그려 가장자리 열을 여백 끝까지 늘인다. 이를 알려면 draw의 위치가 필요해서, 앱이 위치 attribute와 클립 공간 행렬 uniform 이름을 준다(`set_scene_names`, 아틀란은 `AtlanAdapter::position_attribute`/`clip_matrix`). 클라이언트 배열이나 이 장식자가 본 작은 VBO(16 KiB 이하), 정점 256개 이하만 본다. 한쪽 끝에서 시작해 위나 아래 끝에 붙은 띠(폭 1/3 이상, 또는 전에 본 띠와 같은 높이: 조각으로 스크롤되는 하늘)는 그쪽 여백으로 잇는다. 한쪽 끝에만 닿은 패널·버튼, 위아래를 모두 덮는 패널은 잇지 않는다.
+- 양쪽 끝을 모두 덮는 draw(하늘, 메뉴 배경, 전체 폭 바, 화면 전환 때 캡처한 화면 그림)는 여백 viewport에 한 번 더 그려 가장자리 열을 여백 끝까지 늘인다. 이를 알려면 draw의 위치가 필요해서, 앱이 위치 attribute와 클립 공간 행렬 uniform 이름을 준다(`set_scene_names`, 아틀란은 `AtlanAdapter::position_attribute`/`clip_matrix`). 클라이언트 배열이나 이 장식자가 본 작은 VBO(16 KiB 이하), 정점 256개 이하만 본다. 한쪽 끝에서 끝나는 draw는 폭이 1/3 이상이거나(패널, 교차로 그림, 조각난 배경), 위나 아래 끝에 붙은 띠로서 최근 본 띠와 높이가 같으면(스크롤되는 하늘의 좁은 조각) 그쪽 여백으로 잇는다. 작은 버튼은 잇지 않는다. 끝을 넘어 뻗은 draw(지도 조각)는 넓힌 viewport로 이미 여백에 보이므로 다시 그리지 않는다. 이걸 다시 그리면 화면 밖 지도 조각이 여백 위쪽에 밝은 사각형으로 번졌다.
 - `glReadPixels`는 left만큼 옮겨 게스트 영역을 읽는다. 여백이 0이면 게스트 프레임이 그대로 나온다.
 - 검증: `gl-margin-tests`(셰이더 재작성, viewport·uniform 값, 여백 재그리기, 번역기 통과), `gles-backend`(Mesa 픽셀), `metal-render`(Metal 픽셀). 서버에서는 `ATLAN_GLES=DIR ATLAN_MARGIN=L,R atlan-session …`으로 실제 게스트 화면을 넓힌 프레임으로 저장해 볼 수 있다.
 

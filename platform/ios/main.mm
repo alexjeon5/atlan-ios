@@ -35,7 +35,7 @@
     atlan::shell::SurfaceState _surface;
     UIView* _metalView;
     std::unique_ptr<atlan::MetalGlBackend> _gl;
-    std::unique_ptr<atlan::MarginGlBackend> _margin;  // between the guest and _gl: the experimental map under the notch's strip
+    std::unique_ptr<atlan::MarginGlBackend> _margin;  // between the guest and _gl: the map under the notch's strip
     CAMetalLayer* _layer;
     atlan::shell::InputQueue _input;
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
@@ -81,12 +81,12 @@
                                                              : UIEdgeInsetsMake(0, notch, 0, 0);
 }
 
-// The display less the notch's strip.
-- (atlan::shell::ViewRect)safeRect {
+// Where the guest surface is shown inside the metal view; touches map through the same rectangle.
+- (atlan::shell::ViewRect)shownRect {
     // The guest's screen is stretched over the whole display whatever its size, as the app's Android layout does
-    // on a phone; its UI is laid out for exactly that size. Only the notch's strip is left out (black, or the map
-    // with the experimental setting; layoutSurface), since the notch would cover the guest's text there. The rounded
-    // corners and the home indicator are left as they are.
+    // on a phone; its UI is laid out for exactly that size. Only the notch's strip is left out (the map runs on under
+    // it, or it stays black; layoutSurface), since the notch would cover the guest's text there. The rounded corners
+    // and the home indicator are left as they are.
     const CGSize view = _metalView.bounds.size;
     const UIEdgeInsets notch = self.notchInsets;
     const CGFloat width = view.width - notch.left - notch.right;
@@ -94,29 +94,14 @@
     return {notch.left, 0, width, view.height};
 }
 
-// Where the guest surface is shown inside the metal view; touches map through the same rectangle. Normally the
-// whole safe rectangle. With the experimental balanced aspect, on a display wider than the guest's surface, the
-// surface is stretched only half as much and centred; the map fills the sides (layoutSurface).
-- (atlan::shell::ViewRect)shownRect {
-    const auto safe = self.safeRect;
-    const auto guest = self.touchSurface;
-    if (!LauncherSettings.shared.balancedAspect || guest.width == 0 || guest.height == 0 || !(safe.height > 0)) return safe;
-    const double guestAspect = static_cast<double>(guest.width) / guest.height;
-    const double stretch = safe.width / safe.height / guestAspect;  // 1: the display has the guest's shape
-    if (!(stretch > 1)) return safe;
-    const double width = safe.height * guestAspect * (1 + (stretch - 1) / 2);
-    return {safe.x + (safe.width - width) / 2, safe.y, width, safe.height};
-}
-
-// The layer covers the safe rectangle, or with the experimental notch map the whole view. Where it reaches past
-// the guest's surface (shownRect), the margin backend shows what the guest draws past its edge: the map, while its
-// buttons and text stay on the surface.
+// The layer covers the guest's surface (shownRect) and, with the notch map setting, the notch's strip too, where the
+// margin backend shows what the guest draws past its edge: the map, while its buttons and text stay on the surface.
 - (void)layoutSurface {
     if (!_layer) return;
     const auto shown = self.shownRect;
     const CGSize view = _metalView.bounds.size;
     const auto guest = self.touchSurface;
-    const auto area = LauncherSettings.shared.notchMap ? atlan::shell::ViewRect{0, 0, view.width, view.height} : self.safeRect;
+    const auto area = LauncherSettings.shared.notchMap ? atlan::shell::ViewRect{0, 0, view.width, view.height} : shown;
     const CGFloat leftPoints = MAX(0.0, shown.x - area.x);
     const CGFloat rightPoints = MAX(0.0, area.x + area.width - shown.x - shown.width);
     std::uint32_t left = 0, right = 0;
@@ -459,7 +444,7 @@
     config.library_path = library.UTF8String;
     config.audio_sink = &_audio;
     config.data_root = self.documentsPath.UTF8String;
-    const auto display = self.safeRect;  // the display less the notch's strip
+    const auto display = self.shownRect;  // the display less the notch's strip
     _surface.set(atlan::shell::render_size(display.width, display.height,
                                            self.view.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale));
     config.surface = &_surface;

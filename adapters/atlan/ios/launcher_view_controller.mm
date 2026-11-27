@@ -681,8 +681,12 @@ std::string fingerprint(const AtlanDataStatus& s) {
     }
     NSMutableArray<UIView*>* screenRows = [NSMutableArray arrayWithObject:appearance];
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone)
-        [screenRows addObject:LKSwitchRow(text::notch, text::notch_detail, settings.notchInset, 60,
-                                          ^(BOOL on) { LauncherSettings.shared.notchInset = on; })];
+        [screenRows addObjectsFromArray:@[
+            LKSwitchRow(text::notch, text::notch_detail, settings.notchInset, 60,
+                        ^(BOOL on) { LauncherSettings.shared.notchInset = on; }),
+            LKSwitchRow(text::notch_map, text::notch_map_detail, settings.notchMap, 60,
+                        ^(BOOL on) { LauncherSettings.shared.notchMap = on; }),
+        ]];
     return LKScroll(LKColumn(@[
         [self sectionCaption:text::section_start top:0],
         LKGroup(@[LKSwitchRow(text::auto_start, text::auto_start_detail, settings.autoStart, 72,
@@ -828,18 +832,8 @@ std::string fingerprint(const AtlanDataStatus& s) {
 - (UIView*)developerPane {
     const auto& m = LauncherMetrics::current();
     LauncherSettings* settings = LauncherSettings.shared;
-    NSMutableArray<UIView*>* sections = [NSMutableArray array];
-    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone) {
-        [sections addObject:[self sectionCaption:text::section_experimental top:0]];
-        [sections addObject:LKGroup(@[
-            LKSwitchRow(text::notch_map, text::notch_map_detail, settings.notchMap, m.settingsRow,
-                        ^(BOOL on) { LauncherSettings.shared.notchMap = on; }),
-            LKSwitchRow(text::balanced_aspect, text::balanced_aspect_detail, settings.balancedAspect, m.settingsRow,
-                        ^(BOOL on) { LauncherSettings.shared.balancedAspect = on; }),
-        ])];
-    }
-    [sections addObjectsFromArray:@[
-        [self sectionCaption:text::section_logs top:sections.count ? 12 : 0],
+    return LKScroll(LKColumn(@[
+        [self sectionCaption:text::section_logs top:0],
         LKGroup(@[
             LKSwitchRow(text::session_log, text::session_log_detail, settings.sessionLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.sessionLog = on; }),
             LKSwitchRow(text::perf_log, text::perf_log_detail, settings.perfLog, m.settingsRow, ^(BOOL on) { LauncherSettings.shared.perfLog = on; }),
@@ -865,7 +859,6 @@ std::string fingerprint(const AtlanDataStatus& s) {
                 return pinnedCourse();
             }), m.settingsRow, NO, nil),
         ]),
-    ]];
-    return LKScroll(LKColumn(sections, 0));
+    ], 0));
 }
 @end

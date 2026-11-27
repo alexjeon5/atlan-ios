@@ -273,10 +273,10 @@ int main() {
               "a full-width backdrop continues over the margin");
         mg.op(GlOp::clear, {0x4100});
         mg.uniform4(c, 1, 0, 0, 1);
-        mg.draw(5, {{a, {3, {-1, -1, 0, 0, -1, 0, -1, 1, 0, 0, 1, 0}}}}, 4);
+        mg.draw(5, {{a, {3, {-1, -1, 0, -0.5F, -1, 0, -1, 1, 0, -0.5F, 1, 0}}}}, 4);
         mg.op(GlOp::swap_buffers);
         check(wide.read_back(px, pw, ph) && pw == 80 && near(pixel(8, 16), 0, 0, 255) && near(pixel(18, 16), 255, 0, 0),
-              "a panel on the left edge stays out of the margin");
+              "a narrow panel on the left edge stays out of the margin");
     }
 
     // every program in a shader container builds a Metal pipeline

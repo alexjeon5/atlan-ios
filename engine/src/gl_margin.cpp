@@ -112,14 +112,24 @@ MarginGlBackend::Edges MarginGlBackend::backdrop_edges(const GlCall& draw) {
         under = std::min(under, y / w);
         over = std::max(over, y / w);
     }
-    // Across the whole width: both sides. A band along the top or the bottom edge from one side, at least a third of
-    // the width, or at the height of such a band seen before (a backdrop drawn in tiles that scroll, like a sky):
-    // that side. A panel or button at one edge, or a full-height panel: neither.
+    // Across the whole width: both sides. From one side, at least a third of the width (a panel or picture there,
+    // or a backdrop drawn in tiles), or a band along the top or bottom edge at the height of such a draw seen before
+    // (the narrow end of a scrolling tiled sky): that side. Buttons and smaller boxes at an edge: neither.
+    // A draw reaching past an edge (scene geometry, or a backdrop wider than the screen) already shows in that
+    // margin through the widened viewport; only one ending on the edge is continued.
+    left = left && low >= -1.01F;
+    right = right && high <= 1.01F;
     if (left && right) return {true, true};
-    if (top == bottom || (!left && !right)) return {};
-    const bool seen = std::abs(under - band_.first) < 0.002F && std::abs(over - band_.second) < 0.002F;
-    if (high - low < 2.0F / 3 && !seen) return {};
-    band_ = {under, over};
+    if (!left && !right) return {};
+    const bool band = top != bottom;
+    const auto same = [&](const std::pair<float, float>& b) { return std::abs(under - b.first) < 0.002F && std::abs(over - b.second) < 0.002F; };
+    const auto seen = band ? std::find_if(bands_.begin(), bands_.end(), same) : bands_.end();
+    if (high - low < 2.0F / 3 && seen == bands_.end()) return {};
+    if (band) {  // most recent first; a sky band recurs every frame and stays in the list
+        if (seen != bands_.end()) bands_.erase(seen);
+        bands_.insert(bands_.begin(), {under, over});
+        if (bands_.size() > 8) bands_.pop_back();
+    }
     return {left, right};
 }
 

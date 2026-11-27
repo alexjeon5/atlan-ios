@@ -117,15 +117,15 @@ int main(int argc, char** argv) {
         gl.matrix4(3, identity());
         gl.op(GlOp::viewport, {0, 0, 800, 480});
         const auto draws = [&] { return inner.of(GlOp::draw_arrays).size(); };
-        gl.draw(5, {{0, {2, {-1, -1, 0, -1, -1, 1, 0, 1}}}}, 4);
-        check(draws() == 1, "a panel on the left edge is drawn once");
+        gl.draw(5, {{0, {2, {-1, -1, -0.5F, -1, -1, 1, -0.5F, 1}}}}, 4);
+        check(draws() == 1, "a narrow panel on the left edge is drawn once");
         gl.draw(5, {{0, {2, {-1, -1, 1, -1, -1, 1, 1, 1}}}}, 4);
         check(draws() == 3, "a full-width backdrop is drawn again for the margin");
         const auto viewports = inner.of(GlOp::viewport);
         check(viewports.size() >= 3 && viewports[viewports.size() - 2].a[0] == 0 && viewports[viewports.size() - 2].a[2] == 60 &&
               viewports.back().a[2] == 860, "into the margin's own viewport, then back");
         const auto margin_t = floats(inner.of(GlOp::uniform_2fv).back());
-        gl.draw(5, {{0, {2, {-1, -1, 0, -1, -1, 1, 0, 1}}}}, 4);
+        gl.draw(5, {{0, {2, {-1, -1, -0.5F, -1, -1, 1, -0.5F, 1}}}}, 4);
         const auto t = floats(inner.of(GlOp::uniform_2fv).back());
         check(close(t[0], 800.0F / 860), "the next draw gets the guest transform back");
         // guest pixel 2 (NDC -1 + 4/800) lands on the margin's outer edge, the rest far beyond
@@ -136,6 +136,10 @@ int main(int argc, char** argv) {
         check(draws() == 7, "but not a small box in the corner");
         gl.draw(5, {{0, {2, {-1, 0.8F, -0.8F, 0.8F, -1, 1, -0.8F, 1}}}}, 4);
         check(draws() == 9, "unless it is the narrow end of that band (a scrolling sky tile)");
+        gl.draw(5, {{0, {2, {-1, -1, 0, -1, -1, 1, 0, 1}}}}, 4);
+        check(draws() == 11, "a wide picture on the left edge (a junction view) continues over the margin");
+        gl.draw(5, {{0, {2, {-3, 0.8F, -0.5F, 0.8F, -3, 1.2F, -0.5F, 1.2F}}}}, 4);
+        check(draws() == 12, "geometry reaching past the edge is drawn once, through the widened viewport");
         Recorder bare;
         MarginGlBackend plain(bare);
         Driver g2{plain};

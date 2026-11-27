@@ -44,7 +44,7 @@ private:
     GlResult draw(const GlCall& call);
     struct Edges { bool left{}, right{}; };
     [[nodiscard]] Edges backdrop_edges(const GlCall& draw);  // the margins a backdrop draw continues into
-    std::pair<float, float> band_{9, 9};  // NDC y extent of the last band backdrop
+    std::vector<std::pair<float, float>> bands_;  // NDC y extents of recent band backdrops, newest first
     GlBackend& inner_;
     std::atomic<std::uint64_t> pending_{0};  // (width << 32) | (left << 16) | right; 0 = unchanged
     std::uint32_t width_{}, left_{}, right_{};
