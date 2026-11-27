@@ -499,6 +499,7 @@
         _layer = layer;
         _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
         _margin = std::make_unique<atlan::MarginGlBackend>(*_gl);
+        _margin->set_scene_names(atlan::shell::AtlanAdapter::position_attribute, atlan::shell::AtlanAdapter::clip_matrix);
         [self layoutSurface];
         atlan::shell::SessionLogFile* logFile = &_logFile;  // outlives the backend and the session
         _gl->set_log([logFile](const std::string& line) { logFile->write("gl " + line); });

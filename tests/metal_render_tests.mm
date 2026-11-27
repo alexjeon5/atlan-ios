@@ -244,10 +244,12 @@ int main() {
         atlan::MetalGlBackend wide(80, 32);
         atlan::MarginGlBackend margin(wide);
         margin.set_layout(64, 16, 0);
+        margin.set_scene_names("a_pos", "u_m");
         Driver mg{margin};
-        const auto p = mg.program(flat_vs, flat_fs);
-        check(mg.linked(p), "rewritten flat program links");
+        const auto p = mg.program("attribute vec3 a_pos; uniform mat4 u_m; void main(){ gl_Position = u_m * vec4(a_pos, 1.0); }", flat_fs);
+        check(mg.linked(p), "rewritten program links");
         mg.op(GlOp::use_program, {p});
+        mg.matrix4(mg.uniform(p, "u_m"), gltest::identity());
         const auto c = mg.uniform(p, "u_color"), a = mg.attrib(p, "a_pos");
         std::vector<std::uint8_t> px;
         std::uint32_t pw = 0, ph = 0;
@@ -268,7 +270,13 @@ int main() {
         mg.draw(5, {{a, {3, {-1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0}}}}, 4);
         mg.op(GlOp::swap_buffers);
         check(wide.read_back(px, pw, ph) && pw == 80 && near(pixel(1, 16), 0, 255, 0) && near(pixel(78, 16), 0, 255, 0),
-              "a full-width backdrop spans the margin");
+              "a full-width backdrop continues over the margin");
+        mg.op(GlOp::clear, {0x4100});
+        mg.uniform4(c, 1, 0, 0, 1);
+        mg.draw(5, {{a, {3, {-1, -1, 0, 0, -1, 0, -1, 1, 0, 0, 1, 0}}}}, 4);
+        mg.op(GlOp::swap_buffers);
+        check(wide.read_back(px, pw, ph) && pw == 80 && near(pixel(8, 16), 0, 0, 255) && near(pixel(18, 16), 255, 0, 0),
+              "a panel on the left edge stays out of the margin");
     }
 
     // every program in a shader container builds a Metal pipeline

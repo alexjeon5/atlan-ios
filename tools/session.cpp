@@ -81,6 +81,7 @@ int main(int argc, char** argv) {
         if (const char* m = std::getenv("ATLAN_MARGIN")) {
             std::sscanf(m, "%u,%u", &margin_left, &margin_right);
             margin = std::make_unique<atlan::MarginGlBackend>(*gles);
+            margin->set_scene_names(atlan::shell::AtlanAdapter::position_attribute, atlan::shell::AtlanAdapter::clip_matrix);
         }
         atlan::MarginGlBackend* margins = margin.get();
         app.on_set_surfaces = [backend, margins, margin_left, margin_right](std::int32_t w, std::int32_t h) {

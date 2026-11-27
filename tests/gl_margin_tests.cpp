@@ -22,13 +22,14 @@ std::string slurp(const std::string& path) {
     check(bool(in), "cannot open " + path);
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
-// Records what reaches the wrapped backend; the margin uniform is at location 7.
+// Records what reaches the wrapped backend; the margin uniform is at location 7, a matrix "m" at 3, attribute "p" at 0.
 struct Recorder final : GlBackend {
     std::vector<GlCall> calls;
     GlResult execute(const GlCall& c) override {
         calls.push_back(c);
         GlResult r;
-        if (c.op == GlOp::get_uniform_location && c.text == MarginGlBackend::uniform_name) r.value = 7;
+        if (c.op == GlOp::get_uniform_location) r.value = c.text == MarginGlBackend::uniform_name ? 7 : c.text == "m" ? 3 : ~0u;
+        if (c.op == GlOp::get_attrib_location) r.value = c.text == "p" ? 0 : ~0u;
         return r;
     }
     std::vector<GlCall> of(GlOp op) const {
@@ -37,8 +38,8 @@ struct Recorder final : GlBackend {
         return out;
     }
 };
-std::array<float, 4> floats(const GlCall& c) {
-    std::array<float, 4> v{};
+std::array<float, 2> floats(const GlCall& c) {
+    std::array<float, 2> v{};
     std::memcpy(v.data(), c.data.data(), std::min(c.data.size(), sizeof v));
     return v;
 }
@@ -51,7 +52,7 @@ int main(int argc, char** argv) {
         const std::string plain = "attribute vec4 p;\nvoid main()\n{\n\tgl_Position = p;\n}\n";
         const auto patched = MarginGlBackend::patch_vertex_shader(plain);
         check(patched.find("void atlan_guest_main()") != std::string::npos, "main is renamed");
-        check(patched.find("uniform highp vec4 atlan_margin_x;") != std::string::npos, "the host uniform is declared");
+        check(patched.find("uniform highp vec2 atlan_margin_x;") != std::string::npos, "the host uniform is declared");
         check(patched.rfind("void main()") > patched.find("atlan_guest_main()"), "a new main follows");
         const auto commented = MarginGlBackend::patch_vertex_shader("// void main() here\n/* void main( */ void  main ( void ) { gl_Position = vec4(0.0); }");
         check(commented.find("// void main() here") == 0 && commented.find("void  atlan_guest_main ( void )") != std::string::npos,
@@ -63,6 +64,7 @@ int main(int argc, char** argv) {
         MarginGlBackend margin(inner);
         Driver gl{margin};
         margin.set_layout(800, 60, 0);
+        margin.set_scene_names("p", "m");
         const auto prog = gl.program("attribute vec4 p; void main() { gl_Position = p; }", "void main() { gl_FragColor = vec4(1.0); }");
         gl.op(GlOp::use_program, {prog});
         gl.op(GlOp::viewport, {0, 0, 800, 480});
@@ -70,20 +72,20 @@ int main(int argc, char** argv) {
         check(viewports.size() == 1 && viewports[0].a[0] == 0 && viewports[0].a[2] == 860 && viewports[0].a[3] == 480,
               "a full-surface viewport covers the margin");
         gl.op(GlOp::draw_arrays, {4, 0, 3});
-        auto uniforms = inner.of(GlOp::uniform_4fv);
+        auto uniforms = inner.of(GlOp::uniform_2fv);
         check(uniforms.size() == 1 && uniforms[0].a[0] == 7, "the transform is set before the draw");
         auto t = floats(uniforms[0]);
-        check(close(t[0], 800.0F / 860) && close(t[1], 60.0F / 860) && t[2] == 1 && t[3] == 0, "scale, offset and left snap");
+        check(close(t[0], 800.0F / 860) && close(t[1], 60.0F / 860), "scale and offset");
         // guest NDC -1 lands on target pixel 60, guest NDC 1 on 860
         check(close((-t[0] + t[1] + 1) / 2 * 860, 60) && close((t[0] + t[1] + 1) / 2 * 860, 860), "guest pixels keep their place");
         gl.op(GlOp::draw_arrays, {4, 0, 3});
-        check(inner.of(GlOp::uniform_4fv).size() == 1, "an unchanged transform is not sent again");
+        check(inner.of(GlOp::uniform_2fv).size() == 1, "an unchanged transform is not sent again");
         gl.op(GlOp::viewport, {100, 50, 200, 100});
         viewports = inner.of(GlOp::viewport);
         check(viewports.back().a[0] == 160 && viewports.back().a[1] == 50 && viewports.back().a[2] == 200, "an inner viewport only moves");
         gl.op(GlOp::draw_arrays, {4, 0, 3});
-        t = floats(inner.of(GlOp::uniform_4fv).back());
-        check(t[0] == 1 && t[1] == 0 && t[2] == 0 && t[3] == 0, "and draws untransformed");
+        t = floats(inner.of(GlOp::uniform_2fv).back());
+        check(t[0] == 1 && t[1] == 0, "and draws untransformed");
         const auto read = gl.op(GlOp::read_pixels, {0, 0, 800, 480, 0x1908, 0x1401});
         (void)read;
         check(inner.of(GlOp::read_pixels).back().a[0] == 60, "read-backs shift by the left margin");
@@ -93,16 +95,49 @@ int main(int argc, char** argv) {
         check(viewports.back().a[0] == 100 && viewports.back().a[2] == 200, "a new layout re-applies the viewport");
         gl.op(GlOp::viewport, {0, 0, 800, 480});
         gl.op(GlOp::draw_arrays, {4, 0, 3});
-        t = floats(inner.of(GlOp::uniform_4fv).back());
-        check(inner.of(GlOp::viewport).back().a[2] == 860 && close(t[1], -60.0F / 860) && t[2] == 0 && t[3] == 1, "right margin");
+        t = floats(inner.of(GlOp::uniform_2fv).back());
+        check(inner.of(GlOp::viewport).back().a[2] == 860 && close(t[1], -60.0F / 860), "right margin");
         margin.set_layout(800, 0, 0);
         gl.op(GlOp::draw_arrays, {4, 0, 3});
-        t = floats(inner.of(GlOp::uniform_4fv).back());
-        check(inner.of(GlOp::viewport).back().a[2] == 800 && t == std::array<float, 4>{1, 0, 0, 0}, "no margins: the guest's own viewport");
-        const auto relinked = inner.of(GlOp::uniform_4fv).size();
+        t = floats(inner.of(GlOp::uniform_2fv).back());
+        check(inner.of(GlOp::viewport).back().a[2] == 800 && t == std::array<float, 2>{1, 0}, "no margins: the guest's own viewport");
+        const auto relinked = inner.of(GlOp::uniform_2fv).size();
         gl.op(GlOp::link_program, {prog});
         gl.op(GlOp::draw_arrays, {4, 0, 3});
-        check(inner.of(GlOp::uniform_4fv).size() == relinked + 1, "a relinked program gets the transform again");
+        check(inner.of(GlOp::uniform_2fv).size() == relinked + 1, "a relinked program gets the transform again");
+    }
+    {   // a draw over the whole width is drawn again into the margin; one touching a single edge is not
+        Recorder inner;
+        MarginGlBackend margin(inner);
+        Driver gl{margin};
+        margin.set_layout(800, 60, 0);
+        margin.set_scene_names("p", "m");
+        const auto prog = gl.program("attribute vec4 p; uniform mat4 m; void main() { gl_Position = m * p; }", "void main() { gl_FragColor = vec4(1.0); }");
+        gl.op(GlOp::use_program, {prog});
+        gl.matrix4(3, identity());
+        gl.op(GlOp::viewport, {0, 0, 800, 480});
+        const auto draws = [&] { return inner.of(GlOp::draw_arrays).size(); };
+        gl.draw(5, {{0, {2, {-1, -1, 0, -1, -1, 1, 0, 1}}}}, 4);
+        check(draws() == 1, "a panel on the left edge is drawn once");
+        gl.draw(5, {{0, {2, {-1, -1, 1, -1, -1, 1, 1, 1}}}}, 4);
+        check(draws() == 3, "a full-width backdrop is drawn again for the margin");
+        const auto viewports = inner.of(GlOp::viewport);
+        check(viewports.size() >= 3 && viewports[viewports.size() - 2].a[0] == 0 && viewports[viewports.size() - 2].a[2] == 60 &&
+              viewports.back().a[2] == 860, "into the margin's own viewport, then back");
+        const auto margin_t = floats(inner.of(GlOp::uniform_2fv).back());
+        gl.draw(5, {{0, {2, {-1, -1, 0, -1, -1, 1, 0, 1}}}}, 4);
+        const auto t = floats(inner.of(GlOp::uniform_2fv).back());
+        check(close(t[0], 800.0F / 860), "the next draw gets the guest transform back");
+        check(close(-margin_t[0] + margin_t[1], -1) && margin_t[0] > 100, "the guest's edge lands on the margin's edge, the rest far beyond");
+        Recorder bare;
+        MarginGlBackend plain(bare);
+        Driver g2{plain};
+        plain.set_layout(800, 60, 0);
+        const auto p2 = g2.program("attribute vec4 p; uniform mat4 m; void main() { gl_Position = m * p; }", "void main() { gl_FragColor = vec4(1.0); }");
+        g2.op(GlOp::use_program, {p2});
+        g2.op(GlOp::viewport, {0, 0, 800, 480});
+        g2.draw(5, {{0, {2, {-1, -1, 1, -1, -1, 1, 1, 1}}}}, 4);
+        check(bare.of(GlOp::draw_arrays).size() == 1, "without scene names nothing is drawn twice");
     }
     {   // the state machine translates rewritten shaders and passes the uniform to the draw
         struct Sink final : GlSink {

@@ -17,6 +17,9 @@ namespace atlan::shell {
 class JavaServices;
 class AtlanAdapter final : public AppAdapter {
 public:
+    // The guest's shaders compute gl_Position = clip_matrix * position_attribute (MarginGlBackend::set_scene_names).
+    static constexpr const char* position_attribute = "a_position";
+    static constexpr const char* clip_matrix = "word_view_projection";
     struct Config {
         // Called on the guest thread when the guest reports MainActivity.setSurfaces(a, b). Arguments are passed
         // through unchanged; the embedder decides what they mean.

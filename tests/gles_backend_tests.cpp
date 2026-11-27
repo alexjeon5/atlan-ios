@@ -199,13 +199,14 @@ int main() {
 
     // MarginGlBackend: a 64-pixel guest surface in an 80-pixel frame with a 16-pixel margin on the left. A quad from
     // guest NDC x -1.5 to 0 covers guest pixels -16..32, so frame pixels 0..48; a quad over the whole guest width
-    // covers the margin too (its left edge sits on the guest's edge).
+    // is continued over the margin, a quad touching only the left edge is not.
     {
         gl.set_surface_size(80, 32);
         atlan::MarginGlBackend margin(gl);
         margin.set_layout(64, 16, 0);
+        margin.set_scene_names("pos", "m");
         const auto edge = program(margin, next,
-            "attribute vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0.0, 1.0); }\n",
+            "attribute vec2 pos;\nuniform mat4 m;\nvoid main() { gl_Position = m * vec4(pos, 0.0, 1.0); }\n",
             "precision mediump float;\nuniform vec4 color;\nvoid main() { gl_FragColor = color; }\n");
         auto where = op(GlOp::get_attrib_location, {edge});
         where.text = "pos";
@@ -229,6 +230,11 @@ int main() {
         margin.execute(op(GlOp::viewport, {0, 0, 64, 32}));
         margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
         margin.execute(op(GlOp::use_program, {edge}));
+        auto mwhere = op(GlOp::get_uniform_location, {edge});
+        mwhere.text = "m";
+        auto identity = op(GlOp::uniform_matrix_4fv, {margin.execute(mwhere).value, 1, 0});
+        identity.data = bytes(std::vector<float>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+        margin.execute(identity);
         quad({-1.5F, -1, 0, -1, -1.5F, 1, 0, 1}, {1, 0, 0, 1});
         const auto back = margin.execute(op(GlOp::read_pixels, {0, 0, 64, 32, GL_RGBA, GL_UNSIGNED_BYTE}));
         margin.execute(op(GlOp::swap_buffers));
@@ -240,12 +246,17 @@ int main() {
         check(back.bytes.size() == 64 * 32 * 4 && std::to_integer<int>(back.bytes[(16 * 64 + 31) * 4]) == 255 &&
               std::to_integer<int>(back.bytes[(16 * 64 + 33) * 4]) == 0, "read_pixels reads the guest's pixels");
         margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
+        quad({-1, -1, 0, -1, -1, 1, 0, 1}, {1, 0, 0, 1});
+        margin.execute(op(GlOp::swap_buffers));
+        if (frame_width == 80)
+            check(near(at(frame, 80, 8, 16), 0, 0, 255) && near(at(frame, 80, 18, 16), 255, 0, 0), "a panel on the left edge stays out of the margin");
+        margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
         quad({-1, -1, 1, -1, -1, 1, 1, 1}, {0, 1, 0, 1});
         margin.execute(op(GlOp::viewport, {8, 0, 16, 32}));  // inside the surface: shifted, not widened
         quad({-1.5F, -1, 1, -1, -1.5F, 1, 1, 1}, {1, 0, 0, 1});
         margin.execute(op(GlOp::swap_buffers));
         if (frame_width == 80) {
-            check(near(at(frame, 80, 1, 16), 0, 255, 0) && near(at(frame, 80, 78, 16), 0, 255, 0), "a full-width backdrop spans the margin");
+            check(near(at(frame, 80, 1, 16), 0, 255, 0) && near(at(frame, 80, 78, 16), 0, 255, 0), "a full-width backdrop continues over the margin");
             check(near(at(frame, 80, 22, 16), 0, 255, 0) && near(at(frame, 80, 25, 16), 255, 0, 0) &&
                   near(at(frame, 80, 39, 16), 255, 0, 0) && near(at(frame, 80, 41, 16), 0, 255, 0), "an inner viewport only moves");
         }
