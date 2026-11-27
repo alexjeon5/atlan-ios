@@ -831,8 +831,12 @@ std::string fingerprint(const AtlanDataStatus& s) {
     NSMutableArray<UIView*>* sections = [NSMutableArray array];
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone) {
         [sections addObject:[self sectionCaption:text::section_experimental top:0]];
-        [sections addObject:LKGroup(@[LKSwitchRow(text::notch_map, text::notch_map_detail, settings.notchMap, m.settingsRow,
-                                                  ^(BOOL on) { LauncherSettings.shared.notchMap = on; })])];
+        [sections addObject:LKGroup(@[
+            LKSwitchRow(text::notch_map, text::notch_map_detail, settings.notchMap, m.settingsRow,
+                        ^(BOOL on) { LauncherSettings.shared.notchMap = on; }),
+            LKSwitchRow(text::balanced_aspect, text::balanced_aspect_detail, settings.balancedAspect, m.settingsRow,
+                        ^(BOOL on) { LauncherSettings.shared.balancedAspect = on; }),
+        ])];
     }
     [sections addObjectsFromArray:@[
         [self sectionCaption:text::section_logs top:sections.count ? 12 : 0],

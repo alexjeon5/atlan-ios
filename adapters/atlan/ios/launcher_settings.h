@@ -18,6 +18,7 @@ extern NSNotificationName const LauncherSettingsDidChange;
 @property(nonatomic) LauncherAppearance appearance;
 @property(nonatomic) BOOL notchInset;
 @property(nonatomic) BOOL notchMap;        // experimental: the map runs on under the notch's strip
+@property(nonatomic) BOOL balancedAspect;  // experimental: the guest's screen stretched half as much, the map at the sides
 @property(nonatomic) BOOL duckOthers;      // lower other apps' audio while a voice prompt plays
 @property(nonatomic) BOOL sessionLog;
 @property(nonatomic) BOOL perfLog;

@@ -2,6 +2,7 @@
 #include "atlan/gl_margin.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 
 namespace atlan {
@@ -67,9 +68,9 @@ void MarginGlBackend::set_scene_names(std::string position_attribute, std::strin
     matrix_name_ = std::move(clip_matrix);
 }
 
-bool MarginGlBackend::spans_width(const GlCall& draw) const {
+MarginGlBackend::Edges MarginGlBackend::backdrop_edges(const GlCall& draw) {
     const auto scene = scenes_.find(program_);
-    if (scene == scenes_.end() || scene->second.position < 0 || !scene->second.has_matrix) return false;
+    if (scene == scenes_.end() || scene->second.position < 0 || !scene->second.has_matrix) return {};
     // The positions: gathered client-side bytes, or a small array buffer this backend has seen uploaded.
     const auto index = static_cast<std::uint32_t>(scene->second.position);
     const std::vector<std::byte>* bytes = nullptr;
@@ -79,31 +80,47 @@ bool MarginGlBackend::spans_width(const GlCall& draw) const {
         if (a.index == index) { bytes = &a.bytes; size = a.size; type = a.type; stride = a.stride; normalized = a.normalized; }
     if (!bytes) {
         const auto pointer = pointers_.find(index);
-        if (pointer == pointers_.end() || pointer->second.buffer == 0) return false;
+        if (pointer == pointers_.end() || pointer->second.buffer == 0) return {};
         const auto buffer = buffers_.find(pointer->second.buffer);
-        if (buffer == buffers_.end()) return false;
+        if (buffer == buffers_.end()) return {};
         bytes = &buffer->second;
         size = pointer->second.size; type = pointer->second.type; stride = pointer->second.stride; offset = pointer->second.offset;
         normalized = pointer->second.normalized;
     }
     constexpr std::size_t most = 256;  // a backdrop is a few vertices; scene geometry is left alone
     const std::size_t component = component_size(type);
-    if (component == 0 || size == 0 || size > 4) return false;
+    if (component == 0 || size == 0 || size > 4) return {};
     const std::size_t step = stride ? stride : size * component;
-    if (bytes->size() <= offset || (bytes->size() - offset) / step > most) return false;
+    if (bytes->size() <= offset || (bytes->size() - offset) / step > most) return {};
     const auto& m = scene->second.clip;  // column-major
-    bool left = false, right = false;
+    bool left = false, right = false, top = false, bottom = false;
+    float low = 2, high = -2, under = 2, over = -2;  // NDC x and y extent
     for (std::size_t at = offset; at + size * component <= bytes->size(); at += step) {
         std::array<float, 4> p{0, 0, 0, 1};
         for (std::uint32_t k = 0; k < size; ++k) p[k] = component_value(type, normalized, bytes->data() + at + k * component);
         const float x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12] * p[3];
         const float w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15] * p[3];
         if (!(w > 0)) continue;
+        const float y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13] * p[3];
         const float near = w * 0.001F;
         left = left || x <= -w + near;
         right = right || x >= w - near;
+        top = top || y >= w - near;
+        bottom = bottom || y <= -w + near;
+        low = std::min(low, x / w);
+        high = std::max(high, x / w);
+        under = std::min(under, y / w);
+        over = std::max(over, y / w);
     }
-    return left && right;
+    // Across the whole width: both sides. A band along the top or the bottom edge from one side, at least a third of
+    // the width, or at the height of such a band seen before (a backdrop drawn in tiles that scroll, like a sky):
+    // that side. A panel or button at one edge, or a full-height panel: neither.
+    if (left && right) return {true, true};
+    if (top == bottom || (!left && !right)) return {};
+    const bool seen = std::abs(under - band_.first) < 0.002F && std::abs(over - band_.second) < 0.002F;
+    if (high - low < 2.0F / 3 && !seen) return {};
+    band_ = {under, over};
+    return {left, right};
 }
 
 void MarginGlBackend::apply_viewport() {
@@ -153,22 +170,27 @@ void MarginGlBackend::send_transform(const std::array<float, 2>& value) {
 GlResult MarginGlBackend::draw(const GlCall& c) {
     send_transform(transform_);
     auto result = inner_.execute(c);
-    if ((grow_left_ == 0 && grow_right_ == 0) || !spans_width(c)) return result;
-    // The draw covers the guest's whole width (a backdrop, a bar, a picture of the screen): draw it again into each
-    // margin alone, its edge column drawn out over the margin. Inside a margin's own viewport, guest viewport pixel
+    if (grow_left_ == 0 && grow_right_ == 0) return result;
+    const auto edges = backdrop_edges(c);
+    if (!edges.left && !edges.right) return result;
+    // A backdrop (across the whole width, a picture of the screen, or a band from one side such as a tiled sky):
+    // draw it again into each margin it reaches, alone, its edge column drawn out over the margin. Inside a margin's own viewport, guest viewport pixel
     // gx lands on margin pixel gx * smear from that edge, so the margin shows the guest's outermost pixel.
-    constexpr float smear = 50;
+    // The column taken is `inset` pixels in from the edge: a picture's outermost texels are often a light border.
+    constexpr float smear = 50, inset = 2;
     const float guest = static_cast<float>(vw_);
-    if (grow_left_ > 0) {
-        const float s = smear * guest / static_cast<float>(grow_left_);
+    if (grow_left_ > 0 && edges.left) {
+        const float margin = static_cast<float>(grow_left_);
+        const float s = smear * guest / margin;
         set_inner_viewport(vx_ + static_cast<std::int32_t>(left_) - grow_left_, grow_left_);
-        send_transform({s, s - 1});
+        send_transform({s, s - 1 - 2 * smear * inset / margin});
         inner_.execute(c);
     }
-    if (grow_right_ > 0) {
-        const float s = smear * guest / static_cast<float>(grow_right_);
+    if (grow_right_ > 0 && edges.right) {
+        const float margin = static_cast<float>(grow_right_);
+        const float s = smear * guest / margin;
         set_inner_viewport(vx_ + static_cast<std::int32_t>(left_) + vw_, grow_right_);
-        send_transform({s, 1 - s});
+        send_transform({s, 1 - s + 2 * smear * inset / margin});
         inner_.execute(c);
     }
     apply_viewport();

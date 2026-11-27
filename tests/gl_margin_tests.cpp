@@ -128,7 +128,14 @@ int main(int argc, char** argv) {
         gl.draw(5, {{0, {2, {-1, -1, 0, -1, -1, 1, 0, 1}}}}, 4);
         const auto t = floats(inner.of(GlOp::uniform_2fv).back());
         check(close(t[0], 800.0F / 860), "the next draw gets the guest transform back");
-        check(close(-margin_t[0] + margin_t[1], -1) && margin_t[0] > 100, "the guest's edge lands on the margin's edge, the rest far beyond");
+        // guest pixel 2 (NDC -1 + 4/800) lands on the margin's outer edge, the rest far beyond
+        check(close((-1 + 4.0F / 800) * margin_t[0] + margin_t[1], -1) && margin_t[0] > 100, "a column just inside the guest's edge fills the margin");
+        gl.draw(5, {{0, {2, {-1, 0.8F, 0.5F, 0.8F, -1, 1, 0.5F, 1}}}}, 4);
+        check(draws() == 6, "so is a band along the top from the left edge (a tiled sky)");
+        gl.draw(5, {{0, {2, {-1, 0.9F, -0.6F, 0.9F, -1, 1, -0.6F, 1}}}}, 4);
+        check(draws() == 7, "but not a small box in the corner");
+        gl.draw(5, {{0, {2, {-1, 0.8F, -0.8F, 0.8F, -1, 1, -0.8F, 1}}}}, 4);
+        check(draws() == 9, "unless it is the narrow end of that band (a scrolling sky tile)");
         Recorder bare;
         MarginGlBackend plain(bare);
         Driver g2{plain};
