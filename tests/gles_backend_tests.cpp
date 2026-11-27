@@ -3,6 +3,7 @@
 // client-side arrays, buffers, textures and read-back, checked by pixels of the presented frame.
 #include "egl_host.hpp"
 #include "gles_backend.hpp"
+#include "atlan/gl_margin.hpp"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -48,7 +49,7 @@ bool near(Pixel p, int r, int g, int b) {
     return close(p.r, r) && close(p.g, g) && close(p.b, b);
 }
 
-std::uint32_t program(atlan::GlesBackend& gl, std::uint32_t& next, const char* vs, const char* fs) {
+std::uint32_t program(atlan::GlBackend& gl, std::uint32_t& next, const char* vs, const char* fs) {
     std::uint32_t shaders[2] = {next++, next++};
     const char* sources[2] = {vs, fs};
     const std::uint32_t types[2] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
@@ -195,6 +196,69 @@ int main() {
     check(gl.stats().draws_skipped == 1, "stale client array skipped");
     check(gl.stats().frames == 1 && gl.stats().draws == 3, "draw and frame counts");
     check(!extensions.text.empty(), "extensions string");
+
+    // MarginGlBackend: a 64-pixel guest surface in an 80-pixel frame with a 16-pixel margin on the left. A quad from
+    // guest NDC x -1.5 to 0 covers guest pixels -16..32, so frame pixels 0..48; a quad over the whole guest width
+    // covers the margin too (its left edge sits on the guest's edge).
+    {
+        gl.set_surface_size(80, 32);
+        atlan::MarginGlBackend margin(gl);
+        margin.set_layout(64, 16, 0);
+        const auto edge = program(margin, next,
+            "attribute vec2 pos;\nvoid main() { gl_Position = vec4(pos, 0.0, 1.0); }\n",
+            "precision mediump float;\nuniform vec4 color;\nvoid main() { gl_FragColor = color; }\n");
+        auto where = op(GlOp::get_attrib_location, {edge});
+        where.text = "pos";
+        const auto edge_pos = margin.execute(where).value;
+        auto uwhere = op(GlOp::get_uniform_location, {edge});
+        uwhere.text = "color";
+        const auto edge_color = margin.execute(uwhere).value;
+        const auto quad = [&](std::vector<float> xy, std::vector<float> rgba) {
+            auto paint = op(GlOp::uniform_4fv, {edge_color, 1});
+            paint.data = bytes(rgba);
+            margin.execute(paint);
+            margin.execute(op(GlOp::enable_vertex_attrib_array, {edge_pos}));
+            margin.execute(op(GlOp::vertex_attrib_pointer, {edge_pos, 2, GL_FLOAT, 0, 0, 0x12340000, 0}));
+            auto d = op(GlOp::draw_arrays, {GL_TRIANGLE_STRIP, 0, 4});
+            d.vertex_count = 4;
+            d.attribs.push_back({edge_pos, 2, GL_FLOAT, 0, false, bytes(xy)});
+            margin.execute(d);
+        };
+        margin.execute(op(GlOp::bind_buffer, {GL_ARRAY_BUFFER, 0}));
+        margin.execute(clear_color);
+        margin.execute(op(GlOp::viewport, {0, 0, 64, 32}));
+        margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
+        margin.execute(op(GlOp::use_program, {edge}));
+        quad({-1.5F, -1, 0, -1, -1.5F, 1, 0, 1}, {1, 0, 0, 1});
+        const auto back = margin.execute(op(GlOp::read_pixels, {0, 0, 64, 32, GL_RGBA, GL_UNSIGNED_BYTE}));
+        margin.execute(op(GlOp::swap_buffers));
+        check(frame_width == 80 && frame_height == 32, "margin frame size");
+        if (frame_width == 80) {
+            check(near(at(frame, 80, 2, 16), 255, 0, 0), "past the guest's left edge shows in the margin");
+            check(near(at(frame, 80, 46, 16), 255, 0, 0) && near(at(frame, 80, 50, 16), 0, 0, 255), "guest pixels keep their place");
+        }
+        check(back.bytes.size() == 64 * 32 * 4 && std::to_integer<int>(back.bytes[(16 * 64 + 31) * 4]) == 255 &&
+              std::to_integer<int>(back.bytes[(16 * 64 + 33) * 4]) == 0, "read_pixels reads the guest's pixels");
+        margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
+        quad({-1, -1, 1, -1, -1, 1, 1, 1}, {0, 1, 0, 1});
+        margin.execute(op(GlOp::viewport, {8, 0, 16, 32}));  // inside the surface: shifted, not widened
+        quad({-1.5F, -1, 1, -1, -1.5F, 1, 1, 1}, {1, 0, 0, 1});
+        margin.execute(op(GlOp::swap_buffers));
+        if (frame_width == 80) {
+            check(near(at(frame, 80, 1, 16), 0, 255, 0) && near(at(frame, 80, 78, 16), 0, 255, 0), "a full-width backdrop spans the margin");
+            check(near(at(frame, 80, 22, 16), 0, 255, 0) && near(at(frame, 80, 25, 16), 255, 0, 0) &&
+                  near(at(frame, 80, 39, 16), 255, 0, 0) && near(at(frame, 80, 41, 16), 0, 255, 0), "an inner viewport only moves");
+        }
+        margin.set_layout(64, 0, 16);  // the margin on the other side
+        margin.execute(op(GlOp::viewport, {0, 0, 64, 32}));
+        margin.execute(op(GlOp::clear, {GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT}));
+        quad({0, -1, 1.5F, -1, 0, 1, 1.5F, 1}, {1, 0, 0, 1});
+        margin.execute(op(GlOp::swap_buffers));
+        if (frame_width == 80) {
+            check(near(at(frame, 80, 30, 16), 0, 0, 255) && near(at(frame, 80, 34, 16), 255, 0, 0) &&
+                  near(at(frame, 80, 78, 16), 255, 0, 0), "right margin");
+        }
+    }
     if (failures == 0) std::printf("gles backend ok\n");
     return failures == 0 ? 0 : 1;
 }

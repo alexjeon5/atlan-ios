@@ -4,6 +4,7 @@
 // container (count, then {length, offset} pairs) to prove the translated MSL is accepted by the Metal compiler.
 #include "gl_driver.hpp"
 #include "metal_gl_backend.hpp"
+#include "atlan/gl_margin.hpp"
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -236,6 +237,38 @@ int main() {
         gl.uniform1i(gl.uniform(mixer, "u_swap"), 1);
         check(mix_draw() && near(at(img, 8, 56), 0, 64, 191, 2), "blend program: gl_FragColor read back and swapped: got " + show(at(img, 8, 56)));
         check(backend.stats().library_failures == 0 && backend.stats().pipeline_failures == 0, "no Metal library or pipeline failures so far");
+    }
+
+    // MarginGlBackend: a 64-pixel guest surface in an 80-pixel target with a 16-pixel margin on the left
+    {
+        atlan::MetalGlBackend wide(80, 32);
+        atlan::MarginGlBackend margin(wide);
+        margin.set_layout(64, 16, 0);
+        Driver mg{margin};
+        const auto p = mg.program(flat_vs, flat_fs);
+        check(mg.linked(p), "rewritten flat program links");
+        mg.op(GlOp::use_program, {p});
+        const auto c = mg.uniform(p, "u_color"), a = mg.attrib(p, "a_pos");
+        std::vector<std::uint8_t> px;
+        std::uint32_t pw = 0, ph = 0;
+        const auto pixel = [&](std::uint32_t x, std::uint32_t y) { const auto* q = &px[(std::size_t{y} * pw + x) * 4]; return Pixel{q[2], q[1], q[0], q[3]}; };
+        mg.op(GlOp::viewport, {0, 0, 64, 32});
+        mg.clear_color(0, 0, 1, 1);
+        mg.op(GlOp::clear, {0x4100});
+        mg.uniform4(c, 1, 0, 0, 1);
+        mg.draw(5, {{a, {3, {-1.5F, -1, 0, 0, -1, 0, -1.5F, 1, 0, 0, 1, 0}}}}, 4);
+        mg.op(GlOp::swap_buffers);
+        check(wide.read_back(px, pw, ph) && pw == 80 && ph == 32, "margin frame read back");
+        if (pw == 80) {
+            check(near(pixel(2, 16), 255, 0, 0), "past the guest's left edge shows in the margin: " + show(pixel(2, 16)));
+            check(near(pixel(46, 16), 255, 0, 0) && near(pixel(50, 16), 0, 0, 255), "guest pixels keep their place: " + show(pixel(46, 16)) + show(pixel(50, 16)));
+        }
+        mg.op(GlOp::clear, {0x4100});
+        mg.uniform4(c, 0, 1, 0, 1);
+        mg.draw(5, {{a, {3, {-1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0}}}}, 4);
+        mg.op(GlOp::swap_buffers);
+        check(wide.read_back(px, pw, ph) && pw == 80 && near(pixel(1, 16), 0, 255, 0) && near(pixel(78, 16), 0, 255, 0),
+              "a full-width backdrop spans the margin");
     }
 
     // every program in a shader container builds a Metal pipeline

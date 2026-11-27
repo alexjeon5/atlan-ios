@@ -3,6 +3,7 @@
 // LIBRARY is an ARM32 .so, an APK or an encoded atlan.dat; "" runs the package found in DATA_ROOT/ATLAN.
 #include "atlan/gl_context.hpp"
 #include "atlan/gl_recorder.hpp"
+#include "atlan/gl_margin.hpp"
 #include "shell/session.hpp"
 #include "adapters/atlan/atlan_adapter.hpp"
 #include "preview_sink.hpp"
@@ -49,8 +50,11 @@ int main(int argc, char** argv) {
 #if ATLAN_HAVE_GLES
     // ATLAN_GLES=DIR: draw with the host's real GLES2 (platform/gles, the Android renderer; Mesa here) instead of the
     // state machine, and write every ATLAN_PREVIEW_EVERY-th presented frame as DIR/gles_NNNNN.ppm.
+    // ATLAN_MARGIN=L,R with it: the frames are L + R pixels wider than the guest's surface (MarginGlBackend, as on a
+    // notched iPhone).
     std::unique_ptr<atlan::EglHost> egl;
     std::unique_ptr<atlan::GlesBackend> gles;
+    std::unique_ptr<atlan::MarginGlBackend> margin;
     std::uint64_t gles_frames = 0;
     if (const char* gles_directory = std::getenv("ATLAN_GLES")) {
         egl = std::make_unique<atlan::EglHost>();
@@ -73,11 +77,19 @@ int main(int argc, char** argv) {
         atlan::shell::AtlanAdapter::Config app;
         app.exhaustive_native_checks = std::getenv("ATLAN_NATIVE_CHECK_ALL") != nullptr;
         atlan::GlesBackend* backend = gles.get();
-        app.on_set_surfaces = [backend](std::int32_t w, std::int32_t h) {
-            if (w > 0 && h > 0) backend->set_surface_size(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+        unsigned margin_left = 0, margin_right = 0;
+        if (const char* m = std::getenv("ATLAN_MARGIN")) {
+            std::sscanf(m, "%u,%u", &margin_left, &margin_right);
+            margin = std::make_unique<atlan::MarginGlBackend>(*gles);
+        }
+        atlan::MarginGlBackend* margins = margin.get();
+        app.on_set_surfaces = [backend, margins, margin_left, margin_right](std::int32_t w, std::int32_t h) {
+            if (w <= 0 || h <= 0) return;
+            backend->set_surface_size(static_cast<std::uint32_t>(w) + margin_left + margin_right, static_cast<std::uint32_t>(h));
+            if (margins) margins->set_layout(static_cast<std::uint32_t>(w), margin_left, margin_right);
         };
         config.adapter = std::make_shared<atlan::shell::AtlanAdapter>(std::move(app));
-        config.gl_backend = gles.get();
+        config.gl_backend = margins ? static_cast<atlan::GlBackend*>(margins) : gles.get();
     }
 #endif
     config.block_cache = std::getenv("ATLAN_NO_BLOCK_CACHE") == nullptr;
