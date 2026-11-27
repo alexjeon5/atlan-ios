@@ -35,7 +35,7 @@
     atlan::shell::SurfaceState _surface;
     UIView* _metalView;
     std::unique_ptr<atlan::MetalGlBackend> _gl;
-    std::unique_ptr<atlan::MarginGlBackend> _margin;  // between the guest and _gl: the map under the notch's strip
+    std::unique_ptr<atlan::MarginGlBackend> _margin;  // between the guest and _gl: the experimental map under the notch's strip
     CAMetalLayer* _layer;
     atlan::shell::InputQueue _input;
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
@@ -84,9 +84,9 @@
 // Where the guest surface is shown inside the metal view; touches map through the same rectangle.
 - (atlan::shell::ViewRect)shownRect {
     // The guest's screen is stretched over the whole display whatever its size, as the app's Android layout does
-    // on a phone; its UI is laid out for exactly that size. Only the notch's strip is left out, since the notch
-    // would cover the guest's text there; the map runs on under it (layoutSurface). The rounded corners and the
-    // home indicator are left as they are.
+    // on a phone; its UI is laid out for exactly that size. Only the notch's strip is left out (black, or the map
+    // with the experimental setting; layoutSurface), since the notch would cover the guest's text there. The rounded
+    // corners and the home indicator are left as they are.
     const CGSize view = _metalView.bounds.size;
     const UIEdgeInsets notch = self.notchInsets;
     const CGFloat width = view.width - notch.left - notch.right;
@@ -94,16 +94,17 @@
     return {notch.left, 0, width, view.height};
 }
 
-// The layer covers the whole view: the guest's surface in shownRect and, beside it, the notch's strip, where the
-// margin backend shows what the guest draws past its edge (the map; its buttons and text stay on the surface).
+// The layer covers the guest's surface in shownRect. With the developer setting's experimental notch map it also
+// covers the notch's strip, where the margin backend shows what the guest draws past its edge (the map; its buttons
+// and text stay on the surface, though panels touching the edge stretch into the strip).
 - (void)layoutSurface {
     if (!_layer) return;
     const auto shown = self.shownRect;
     const CGSize view = _metalView.bounds.size;
     const auto guest = self.touchSurface;
     const CGFloat leftPoints = shown.x, rightPoints = MAX(0.0, view.width - shown.x - shown.width);
-    std::uint32_t left = 0, right = 0;
-    if (shown.width > 0 && guest.width > 0) {
+    std::uint32_t left = 0, right = 0;  // the strip stays black unless the experimental setting asks for the map
+    if (LauncherSettings.shared.notchMap && shown.width > 0 && guest.width > 0) {
         const CGFloat pixelsPerPoint = guest.width / shown.width;
         left = static_cast<std::uint32_t>(std::lround(leftPoints * pixelsPerPoint));
         right = static_cast<std::uint32_t>(std::lround(rightPoints * pixelsPerPoint));

@@ -40,7 +40,7 @@ CI는 `Release-iphoneos` 앱을 `Payload/`로 압축한 서명 없는 IPA(`atlan
 ## 실행 중 동작
 
 - 게스트 화면은 설정의 화면 크기와 상관없이 기기 화면 전체에 늘려 표시한다.
-- 노치가 있는 iPhone에서 런처 설정의 "노치 여백"이 켜져 있으면(기본값) 게스트 화면은 노치 쪽 띠를 뺀 safe area 폭으로 잡혀 버튼과 글자가 노치에 가리지 않는다. 노치 띠에는 `MarginGlBackend`(`engine/include/atlan/gl_margin.hpp`)가 게스트가 화면 가장자리 밖으로 그린 지도를 보여 주고, 화면 폭 전체를 덮는 배경(하늘, 메뉴 배경)은 띠까지 늘린다. 렌더 대상(drawable)은 게스트 폭 + 띠 폭이고 레이어는 뷰 전체를 덮으며, 터치는 그대로 게스트 영역(`shownRect`)으로 매핑한다. 기기를 반대 방향 가로로 돌리면 띠가 반대쪽으로 옮겨진다.
+- 노치가 있는 iPhone에서 런처 설정의 "노치 여백"이 켜져 있으면(기본값) 게스트 화면은 노치 쪽 띠를 뺀 safe area 폭으로 잡혀 버튼과 글자가 노치에 가리지 않고, 띠는 검게 남는다. 개발자 설정의 실험 기능 "노치 밑 지도"(`launcher.notchMap`, 기본값 꺼짐)를 켜면 노치 띠에 `MarginGlBackend`(`engine/include/atlan/gl_margin.hpp`)가 게스트가 화면 가장자리 밖으로 그린 지도를 보여 주고, 화면 폭 전체를 덮는 배경(하늘, 메뉴 배경)은 띠까지 늘린다. 렌더 대상(drawable)은 게스트 폭 + 띠 폭이고 레이어는 뷰 전체를 덮으며, 터치는 그대로 게스트 영역(`shownRect`)으로 매핑한다. 기기를 반대 방향 가로로 돌리면 띠가 반대쪽으로 옮겨진다.
 - 게스트가 실행 중이면 화면 자동 잠금을 끈다(`idleTimerDisabled`).
 - 게스트의 종료 대화상자에서 종료를 고르면 앱도 끝난다. 안드로이드 쪽 Java 코드처럼 `MainActivity.nativeIsProgramExit`를 1초마다 확인하고(`SessionConfig::on_guest_exit`), 참이면 세션을 끝낸 뒤 프로세스를 종료한다.
 - 디버깅용으로 한 번 실행한 동안의 모든 로그 줄을 걸러내지 않고 `Documents/logs/session-<시각>.log`에 줄마다 바로 기록한다(앞의 숫자는 시작 후 경과 초, 최근 5개만 보관). 충돌하거나 종료해도 그때까지의 내용이 남는다. `platform/ios/main.mm`의 `kWriteSessionLog`를 `false`로 바꾸면 꺼진다.

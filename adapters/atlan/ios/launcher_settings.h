@@ -17,6 +17,7 @@ extern NSNotificationName const LauncherSettingsDidChange;
 @property(nonatomic) BOOL setupDone;        // a complete ATLAN folder has been seen once
 @property(nonatomic) LauncherAppearance appearance;
 @property(nonatomic) BOOL notchInset;
+@property(nonatomic) BOOL notchMap;        // experimental: the map runs on under the notch's strip
 @property(nonatomic) BOOL duckOthers;      // lower other apps' audio while a voice prompt plays
 @property(nonatomic) BOOL sessionLog;
 @property(nonatomic) BOOL perfLog;
