@@ -761,7 +761,8 @@ void GuestSession::run() {
                             " MIPS; time render " + share(render_seconds) + "%, threads " + share(pump_seconds) + "% (" +
                             std::to_string(pump_seconds > 0 ? static_cast<double>(pump_instructions) / pump_seconds / 1e6 : 0.0) +
                             " MIPS), audio " + share(audio_seconds) + "%, idle " + share(idle_seconds) + "%; still frames " +
-                            std::to_string(still_drawn) + ", interval " + std::to_string(frame_interval(true).count()) + " ms";
+                            std::to_string(still_drawn) + ", interval " + std::to_string(frame_interval(true).count()) + " ms (host floor " +
+                            std::to_string(frame_floor_ms_.load(std::memory_order_relaxed)) + " ms)";
                         if (config_.perf_log) line += perf_details();
                         log_(line);
                         write_profile("frames");
