@@ -4,6 +4,7 @@
 #include "apple_audio_sink.hpp"
 #include "apple_network.hpp"
 #include "metal_gl_backend.hpp"
+#include "atlan/gl_margin.hpp"
 #import "adapters/atlan/ios/launcher_settings.h"
 #import "adapters/atlan/ios/launcher_view_controller.h"
 #import <QuartzCore/CAMetalLayer.h>
@@ -19,6 +20,7 @@
 #include "shell/session.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <exception>
 #include <memory>
 #include <vector>
@@ -33,6 +35,7 @@
     atlan::shell::SurfaceState _surface;
     UIView* _metalView;
     std::unique_ptr<atlan::MetalGlBackend> _gl;
+    std::unique_ptr<atlan::MarginGlBackend> _margin;  // between the guest and _gl: the map under the notch's strip
     CAMetalLayer* _layer;
     atlan::shell::InputQueue _input;
     std::atomic<std::uint64_t> _guestSurface;  // (width << 32) | height from the guest's setSurfaces; 0 until reported
@@ -81,8 +84,9 @@
 // Where the guest surface is shown inside the metal view; touches map through the same rectangle.
 - (atlan::shell::ViewRect)shownRect {
     // The guest's screen is stretched over the whole display whatever its size, as the app's Android layout does
-    // on a phone; its UI is laid out for exactly that size. Only the notch's strip is left out (black), since the
-    // notch would cover the guest's text there; the rounded corners and the home indicator are left as they are.
+    // on a phone; its UI is laid out for exactly that size. Only the notch's strip is left out, since the notch
+    // would cover the guest's text there; the map runs on under it (layoutSurface). The rounded corners and the
+    // home indicator are left as they are.
     const CGSize view = _metalView.bounds.size;
     const UIEdgeInsets notch = self.notchInsets;
     const CGFloat width = view.width - notch.left - notch.right;
@@ -90,12 +94,27 @@
     return {notch.left, 0, width, view.height};
 }
 
+// The layer covers the whole view: the guest's surface in shownRect and, beside it, the notch's strip, where the
+// margin backend shows what the guest draws past its edge (the map; its buttons and text stay on the surface).
 - (void)layoutSurface {
     if (!_layer) return;
     const auto shown = self.shownRect;
+    const CGSize view = _metalView.bounds.size;
+    const auto guest = self.touchSurface;
+    const CGFloat leftPoints = shown.x, rightPoints = MAX(0.0, view.width - shown.x - shown.width);
+    std::uint32_t left = 0, right = 0;
+    if (shown.width > 0 && guest.width > 0) {
+        const CGFloat pixelsPerPoint = guest.width / shown.width;
+        left = static_cast<std::uint32_t>(std::lround(leftPoints * pixelsPerPoint));
+        right = static_cast<std::uint32_t>(std::lround(rightPoints * pixelsPerPoint));
+    }
+    if (_margin && guest.width > 0) _margin->set_layout(guest.width, left, right);
+    const CGSize drawable = CGSizeMake(guest.width + left + right, guest.height);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _layer.frame = CGRectMake(shown.x, shown.y, shown.width, shown.height);
+    if (guest.width > 0 && guest.height > 0 && !CGSizeEqualToSize(_layer.drawableSize, drawable)) _layer.drawableSize = drawable;
+    if (left + right > 0) _layer.frame = CGRectMake(shown.x - leftPoints, shown.y, shown.width + leftPoints + rightPoints, shown.height);
+    else _layer.frame = CGRectMake(shown.x, shown.y, shown.width, shown.height);
     [CATransaction commit];
 }
 
@@ -389,8 +408,6 @@
         name:NSProcessInfoPowerStateDidChangeNotification object:nil];
 }
 
-- (CAMetalLayer*)metalLayer { return _layer; }
-
 // The launcher over the guest, which keeps running underneath (the guest's home button, a finished run, or the
 // first screen of the app).
 - (void)showLauncher {
@@ -479,11 +496,12 @@
         layer.contentsGravity = kCAGravityResize;
         [_metalView.layer addSublayer:layer];
         _layer = layer;
-        [self layoutSurface];
         _gl = std::make_unique<atlan::MetalGlBackend>((__bridge void*)layer);
+        _margin = std::make_unique<atlan::MarginGlBackend>(*_gl);
+        [self layoutSurface];
         atlan::shell::SessionLogFile* logFile = &_logFile;  // outlives the backend and the session
         _gl->set_log([logFile](const std::string& line) { logFile->write("gl " + line); });
-        config.gl_backend = _gl.get();
+        config.gl_backend = _margin.get();
         // The guest sizes its GL surface itself (MainActivity.setSurfaces); render at exactly that size and show
         // it in the aspect-fitting rectangle of the view.
         std::atomic<std::uint64_t>* guestSurface = &_guestSurface;  // outlives the session (joined in dealloc)
@@ -491,10 +509,7 @@
             if (width > 0 && height > 0)
                 guestSurface->store((std::uint64_t{static_cast<std::uint32_t>(width)} << 32) | static_cast<std::uint32_t>(height));
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (width > 0 && height > 0) {
-                    [weakSelf metalLayer].drawableSize = CGSizeMake(width, height);
-                    [weakSelf layoutSurface];
-                }
+                if (width > 0 && height > 0) [weakSelf layoutSurface];  // the drawable: that size plus the strip
             });
         };
     }
